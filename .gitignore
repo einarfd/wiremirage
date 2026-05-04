@@ -1,0 +1,32 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Node (compiler sidecar)
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Wasm build artifacts (kept out by default; add fixture paths explicitly if needed)
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code (per-user)
+.claude/settings.local.json
+
+# Local Arkiv spec snapshots (if introduced later)
+docs/specs/snapshot/
