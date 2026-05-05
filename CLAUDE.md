@@ -9,8 +9,10 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** pre-implementation. Most of the work right now is scaffolding,
-ADR drafting, and contract design — not feature code.
+**Status:** slice 1 landed. The WIT contract is live at `wit/wiremirage.wit`,
+the host (`wm-host`) instantiates components against it with an in-memory
+store and log capture, and a single hardcoded-component axum server is
+wired up. Next slice: Valkey-backed storage and a real route table.
 
 ## Where the design lives
 
@@ -38,6 +40,17 @@ Cargo workspace with four crates under `crates/`:
 - `wm-cli` — `wm` CLI binary
 - `wm-mcp` — MCP server
 
+The WIT contract that handlers program against lives at `wit/wiremirage.wit`.
+It is the verbatim mirror of `script-api-wit.md` in the Arkiv workspace; if
+you need to change it, update the design doc first.
+
+Wasm guest fixtures used by the host's tier-2 integration tests live at
+`crates/wm-host/tests/fixtures/<name>/` as **standalone crates** (their own
+`Cargo.toml` + `Cargo.lock`, excluded from the parent workspace). The host's
+`build.rs` compiles them to `wasm32-unknown-unknown` and runs `wasm-tools
+component new` on the result; the resulting paths are stamped into env vars
+of the form `WM_FIXTURE_<name>_COMPONENT` for tests to read via `env!()`.
+
 The product skill (shipped to *users* of WireMirage) will live at
 `skill/wiremirage/` per ADR-0015. The dev skill at `.claude/skills/wm-dev/`
 is for *developing this repo* — not the same thing.
@@ -51,6 +64,23 @@ Use `just` (see `justfile`):
 - `just test` — tests only
 - `just build` — `cargo build --workspace`
 - `just run-host` / `just run-cli <args>`
+
+To run the host directly against a fixture component:
+
+```sh
+WM_FIXTURE_WASM=$(find target -name 'echo_handler.component.wasm') \
+  cargo run -p wm-host
+```
+
+## Required tooling
+
+In addition to a stable Rust toolchain:
+
+- `wasm32-unknown-unknown` target — `rustup target add wasm32-unknown-unknown`
+- `wasm-tools` CLI — `cargo install wasm-tools` (used by `wm-host/build.rs`
+  to componentize fixture guests; also handy for `wasm-tools component wit
+  <component.wasm>` when investigating component-shape issues)
+- `just` — `cargo install just`
 
 ## Conventions
 

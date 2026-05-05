@@ -1,0 +1,24 @@
+# Standalone fixture crate — NOT a member of the wm workspace.
+# Lives outside so the wasm32 target doesn't pollute `cargo check` /
+# `cargo clippy --workspace` and so this crate keeps its own Cargo.lock.
+# The host's build script invokes `cargo build` here on demand.
+
+[package]
+name = "echo-handler"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+
+# Self-contained workspace so this crate isn't auto-pulled into the parent.
+[workspace]

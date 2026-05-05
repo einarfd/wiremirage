@@ -6,6 +6,10 @@ members = [
     "crates/wm-cli",
     "crates/wm-mcp",
 ]
+# Wasm guest fixtures live outside the workspace so the wasm32 target
+# doesn't pollute `cargo check --workspace` / `cargo clippy --workspace`.
+# Each fixture crate is self-contained with its own Cargo.lock.
+exclude = ["crates/wm-host/tests/fixtures"]
 
 [workspace.package]
 edition = "2024"
@@ -21,6 +25,12 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmtime = "44"
+axum = "0.8"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+reqwest = { version = "0.12", default-features = false, features = ["http2"] }
 
 [profile.release]
 lto = "thin"

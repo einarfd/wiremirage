@@ -7,9 +7,26 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "wm-host"
 path = "src/main.rs"
 
 [dependencies]
 wm-core = { path = "../wm-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wasmtime = { workspace = true, features = ["component-model", "runtime", "cranelift"] }
+axum.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+
+[dev-dependencies]
+hyper.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }

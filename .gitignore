@@ -1,5 +1,6 @@
 # Rust
 /target
+crates/wm-host/tests/fixtures/*/target/
 **/*.rs.bk
 *.pdb
 

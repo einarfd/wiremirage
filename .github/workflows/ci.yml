@@ -19,8 +19,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-tools
+        # The host's build.rs invokes wasm-tools to componentize fixture
+        # guests; tier-2 integration tests load those components.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
 
       - name: Format check
         run: cargo fmt --all -- --check

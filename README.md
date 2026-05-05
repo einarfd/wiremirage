@@ -13,8 +13,10 @@ isn't practical. A small web UI exists for human inspection.
 
 ## Status
 
-Pre-implementation. The design is captured in a private specification set;
-this repository will be populated as the contracts stabilize.
+Early implementation. The WIT script API (`wit/wiremirage.wit`) is in place
+and the host can instantiate components against it; storage is in-memory
+and routing is a single hardcoded handler. Valkey-backed storage, real
+route tables, and the CLI come next.
 
 ## Layout
 
@@ -24,16 +26,32 @@ crates/
   wm-host/   the long-running Rust server (axum + wasmtime + Valkey)
   wm-cli/    the wm CLI binary
   wm-mcp/    the MCP server
+wit/
+  wiremirage.wit    handler script API contract (mirrors the design doc)
 ```
 
 ## Building
 
 Requires the latest stable Rust toolchain (pinned via `rust-toolchain.toml`)
-and [`just`](https://github.com/casey/just).
+and a few extra tools used to build the host's fixture guests:
+
+```
+rustup target add wasm32-unknown-unknown
+cargo install just wasm-tools
+```
+
+Then:
 
 ```
 just check    # fmt, clippy, test
 just build    # cargo build --workspace
+```
+
+To run the host directly against the bundled echo fixture:
+
+```
+WM_FIXTURE_WASM=$(find target -name 'echo_handler.component.wasm') \
+  cargo run -p wm-host
 ```
 
 ## License

@@ -1,0 +1,168 @@
+// WireMirage handler script API.
+//
+// Canonical contract lives in the Arkiv `wiremirage` workspace at
+// `script-api-wit.md`. This file MUST stay in sync with that document.
+// If you need to change the contract, update the design doc first
+// (with an ADR if it's a real decision), then mirror the change here.
+
+package wiremirage:handler@0.1.0;
+
+// -----------------------------------------------------------------------------
+// HTTP request and response types
+
+interface http {
+  // A header name and value pair. Names are case-insensitive on the wire but
+  // are presented to handlers in lowercase. Multi-valued headers appear as
+  // multiple entries.
+  type header = tuple<string, string>;
+
+  // A captured path parameter. The name corresponds to a {name} segment in
+  // the route's path pattern; the value is the literal segment from the
+  // request path. See route-model.md for path syntax.
+  type path-param = tuple<string, string>;
+
+  record request {
+    method: string,                 // "GET", "POST", etc. Always uppercase.
+    path: string,                   // The full literal path. e.g., "/users/123/posts/456"
+    matched-pattern: string,        // The route pattern that matched. e.g., "/users/{id}/posts/{post-id}"
+    path-params: list<path-param>,  // Captures from the route pattern. e.g., [("id","123"),("post-id","456")]
+    query: list<header>,            // Parsed query parameters. Names lowercased.
+    headers: list<header>,          // Request headers. Names lowercased.
+    body: list<u8>,                 // Raw body bytes. May be empty. Capped at request-body-size.
+  }
+
+  record response {
+    status: u16,                    // Any value, including non-standard ones.
+    headers: list<header>,          // See "Reserved headers" below.
+    body: list<u8>,                 // Raw body bytes. May be empty. Capped at handler-value-size.
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Storage
+//
+// A handler is invoked with two stores: a route-private store and a
+// group-shared store. Both are instances of the same `bucket` resource type
+// defined here. Keys are UTF-8 strings; values are bytes (typically JSON, but
+// the runtime is value-agnostic).
+//
+// The richer-than-KV operations (lists, hashes, sets) map to native Valkey
+// data types. See storage-model.md for the mapping.
+
+interface store {
+  resource bucket {
+    // -- Basic key-value operations --
+
+    // Get a value by key. Returns none if the key doesn't exist.
+    get: func(key: string) -> option<list<u8>>;
+
+    // Set a value. Overwrites any existing value at the same key.
+    set: func(key: string, value: list<u8>);
+
+    // Delete a key. No-op if the key doesn't exist.
+    delete: func(key: string);
+
+    // Atomically increment an integer counter and return the new value.
+    // If the key doesn't exist, it's initialized to `by` and that value
+    // is returned. If the existing value isn't a valid signed integer,
+    // the call traps (handler returns an error to the host).
+    incr: func(key: string, by: s64) -> s64;
+
+    // List keys in this store, optionally filtered by prefix.
+    // Returned in undefined order. Bounded by list-keys-max (see storage-model.md).
+    list-keys: func(prefix: option<string>) -> list<string>;
+
+    // -- List operations (for queues, history, ordered logs) --
+
+    // Push a value onto the right end of the list at `key`.
+    // Creates the list if it doesn't exist.
+    list-push: func(key: string, value: list<u8>);
+
+    // Pop and return the leftmost value. Returns none if the list is empty
+    // or doesn't exist.
+    list-pop: func(key: string) -> option<list<u8>>;
+
+    // Return values in the index range [start, stop] inclusive. Negative
+    // indices count from the end. Returns empty list if the range is empty
+    // or the key doesn't exist.
+    list-range: func(key: string, start: s64, stop: s64) -> list<list<u8>>;
+
+    // Return the length of the list. Returns 0 if the key doesn't exist.
+    list-length: func(key: string) -> u64;
+
+    // -- Hash operations (for record-shaped data) --
+
+    // Get a single field of a hash. Returns none if the hash or field doesn't exist.
+    hash-get: func(key: string, field: string) -> option<list<u8>>;
+
+    // Set a field of a hash. Creates the hash if it doesn't exist.
+    hash-set: func(key: string, field: string, value: list<u8>);
+
+    // Delete a field of a hash. No-op if the field doesn't exist.
+    hash-delete: func(key: string, field: string);
+
+    // List the field names of a hash. Returns empty list if the key doesn't exist.
+    hash-keys: func(key: string) -> list<string>;
+
+    // -- Set operations (for tracking unique members) --
+
+    // Add a member to a set. No-op if already present.
+    set-add: func(key: string, member: string);
+
+    // Remove a member from a set. No-op if not present.
+    set-remove: func(key: string, member: string);
+
+    // Check whether a member is in the set.
+    set-contains: func(key: string, member: string) -> bool;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Logging
+//
+// Handler-emitted log lines are captured by the host and attached to the
+// request's journal entry. Optionally (per host config) they are also
+// forwarded to the host's stderr stream so they reach centralized logging.
+// There's no separate "stdout" — anything a handler wants to surface goes
+// through `log`. See storage-model.md and "Logs and trace IDs" below.
+
+interface log {
+  enum level {
+    debug,
+    info,
+    warn,
+    error,
+  }
+
+  emit: func(level: level, message: string);
+}
+
+// -----------------------------------------------------------------------------
+// The handler world
+//
+// A handler is a Wasm component that imports the host interfaces above and
+// exports a single `handle` function taking a request plus two `store.bucket`
+// resources (the route-private store and the group-shared store) and
+// returning a response.
+//
+// Both buckets are borrowed: the host owns them for the lifetime of the
+// invocation and reclaims them after `handle` returns. Handlers must not
+// retain or attempt to use them after returning.
+//
+// The host invokes `handle` once per matched HTTP request, in a fresh wasmtime
+// instance. Handlers must not assume any state survives across invocations
+// other than what they explicitly persist via `store` or `group-store`.
+
+world handler {
+  import store;
+  import log;
+
+  use store.{bucket};
+  use http.{request, response};
+
+  export handle: func(
+    req: request,
+    route-store: borrow<bucket>,
+    group-store: borrow<bucket>,
+  ) -> response;
+}
