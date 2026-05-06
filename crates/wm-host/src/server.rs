@@ -23,11 +23,24 @@ const RESERVED_EXACT: &[&str] = &["/__health", "/__ready", "/__api", "/__ui", "/
 pub struct AppState {
     runtime: Arc<Runtime>,
     routes: Arc<RouteTable>,
+    /// Optional compiler-sidecar client. `None` means the host hasn't
+    /// been configured with `WM_COMPILER_URL`; source-based POSTs to
+    /// `/__api/routes` are rejected with `compile_failed` in that case.
+    compiler: Option<crate::compiler::CompilerClient>,
 }
 
 impl AppState {
     pub fn new(runtime: Arc<Runtime>, routes: Arc<RouteTable>) -> Self {
-        Self { runtime, routes }
+        Self {
+            runtime,
+            routes,
+            compiler: None,
+        }
+    }
+
+    pub fn with_compiler(mut self, compiler: crate::compiler::CompilerClient) -> Self {
+        self.compiler = Some(compiler);
+        self
     }
 
     pub fn runtime(&self) -> &Arc<Runtime> {
@@ -36,6 +49,10 @@ impl AppState {
 
     pub fn routes(&self) -> &Arc<RouteTable> {
         &self.routes
+    }
+
+    pub fn compiler(&self) -> Option<&crate::compiler::CompilerClient> {
+        self.compiler.as_ref()
     }
 }
 

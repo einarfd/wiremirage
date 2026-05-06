@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod bindings;
+pub mod compiler;
 pub mod host_state;
 pub mod log;
 pub mod pattern;
@@ -14,6 +15,13 @@ pub mod route_table;
 pub mod runtime;
 pub mod server;
 pub mod store;
+
+/// Handler bindings version this build of the host accepts. Compilers
+/// (sidecar) and pre-compiled-component uploads must declare this exact
+/// value; mismatches are rejected. Bumped per the protocol in
+/// `script-api-wit.md`'s "Stability policy" when the WIT contract changes
+/// shape.
+pub const SUPPORTED_BINDINGS_VERSION: &str = "0.1.0";
 
 pub use bindings::Handler;
 pub use bindings::wiremirage::handler::http::{Header, PathParam, Request, Response};

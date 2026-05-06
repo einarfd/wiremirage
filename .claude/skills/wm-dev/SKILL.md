@@ -16,6 +16,9 @@ which is shipped to *users* of WireMirage.
   - `wm-host` — long-running Rust server (axum + wasmtime + Valkey).
   - `wm-cli` — `wm` CLI binary.
   - `wm-mcp` — MCP server.
+- **Compiler sidecar (Node, not Rust):** `compiler/typescript/`. Hono
+  HTTP server + jco/componentize-js. Built as its own Docker image. Not
+  in the cargo workspace; uses npm + tsc + vitest.
 - **WIT contract:** `wit/wiremirage.wit` at the repo root — the *verbatim*
   mirror of `script-api-wit.md` in Arkiv. Treat the Arkiv doc as the source
   of truth; if the contract has to change, update the doc first (with an
@@ -77,6 +80,26 @@ or `WM_STORAGE=memory`; tier-3 tests start a real Valkey container and
 use `Storage::valkey(url)`. **Don't introduce a default-to-memory
 fallback in production paths** — fail-fast on missing config is a
 deliberate project convention.
+
+## Compiler sidecar
+
+`POST /__api/routes` accepts two body shapes (per `rest-api.md`):
+pre-compiled `language: "wasm"` uploads go straight through; source-based
+`language: "typescript"` requests are forwarded to the sidecar via
+`CompilerClient::compile`. Sidecar is reachable via `WM_COMPILER_URL`;
+unset → source requests return `compile_failed` ("compiler not
+configured"), pre-compiled uploads still work.
+
+The sidecar is *built* as part of the host's tier-3 sidecar tests
+(`just test-sidecar`) — those tests start a real container via
+testcontainers-rs against a locally-built `wiremirage/compiler-typescript:dev`
+image. CI builds the image as a step before running those tests; locally
+`just test-sidecar` does the same.
+
+When changing the WIT contract, the sidecar's image must be rebuilt
+because the WIT directory is COPYed in at image-build time. The `dev`
+tag is a moving target — always rebuild after a WIT change before
+running `just test-sidecar`.
 
 ## Auth / WM_INSECURE_NO_AUTH
 

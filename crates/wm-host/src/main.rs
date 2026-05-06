@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use tracing_subscriber::EnvFilter;
+use wm_host::compiler::CompilerClient;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
@@ -23,7 +24,16 @@ async fn main() -> anyhow::Result<()> {
     let registry = Arc::new(Registry::new(storage));
     let routes = RouteTable::warm(registry, runtime.engine().clone())?;
 
-    let app = router(AppState::new(runtime, routes));
+    let mut state = AppState::new(runtime, routes);
+    if let Some(compiler) = CompilerClient::from_env() {
+        tracing::info!(url = compiler.base_url(), "compiler sidecar configured");
+        state = state.with_compiler(compiler);
+    } else {
+        tracing::info!(
+            "WM_COMPILER_URL is not set; only `language: \"wasm\"` requests will be accepted by /__api/routes"
+        );
+    }
+    let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await

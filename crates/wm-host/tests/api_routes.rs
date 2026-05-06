@@ -6,10 +6,14 @@
 
 use std::sync::Arc;
 
+use axum::Router;
+use axum::extract::State;
+use axum::routing::post;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use reqwest::Client;
 use serde_json::json;
+use wm_host::compiler::CompilerClient;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
@@ -29,15 +33,88 @@ struct Harness {
     addr: String,
     client: Client,
     server: tokio::task::JoinHandle<()>,
+    mock_compiler: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with_compiler(None).await
+    }
+
+    /// Spin up a mock compiler that returns `canned_component` for every
+    /// `/compile` call, then start the host pointed at it.
+    async fn start_with_mock_compiler(canned_component: Vec<u8>) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind compiler");
+        let mock_addr = listener.local_addr().unwrap();
+        let canned_b64 = B64.encode(&canned_component);
+        let app = Router::new()
+            .route(
+                "/compile",
+                post(move |State(state): State<Arc<String>>| {
+                    let body = (*state).clone();
+                    async move {
+                        axum::Json(json!({
+                            "compiled_wasm": body,
+                            "bindings_version": "0.1.0",
+                        }))
+                    }
+                }),
+            )
+            .with_state(Arc::new(canned_b64));
+        let mock = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("axum::serve");
+        });
+        let url = format!("http://{mock_addr}");
+        let mut h = Self::start_with_compiler(Some(CompilerClient::new(url))).await;
+        h.mock_compiler = Some(mock);
+        h
+    }
+
+    /// Mock compiler that always returns a `compile_failed` error.
+    async fn start_with_failing_compiler(message: &'static str) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind compiler");
+        let mock_addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/compile",
+            post(move || async move {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({
+                        "error": {
+                            "code": "compile_failed",
+                            "message": message,
+                            "diagnostics": ["expected `;` here"],
+                        }
+                    })),
+                )
+                    .into_response()
+            }),
+        );
+        let mock = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("axum::serve");
+        });
+        let url = format!("http://{mock_addr}");
+        let mut h = Self::start_with_compiler(Some(CompilerClient::new(url))).await;
+        h.mock_compiler = Some(mock);
+        h
+    }
+
+    async fn start_with_compiler(compiler: Option<CompilerClient>) -> Self {
         let storage = Storage::in_memory();
         let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
         let registry = Arc::new(Registry::new(storage));
         let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-        let app = router(AppState::new(runtime, routes));
+        let mut state = AppState::new(runtime, routes);
+        if let Some(c) = compiler {
+            state = state.with_compiler(c);
+        }
+        let app = router(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -52,6 +129,7 @@ impl Harness {
             addr,
             client: Client::new(),
             server,
+            mock_compiler: None,
         }
     }
 
@@ -72,6 +150,9 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         self.server.abort();
+        if let Some(c) = self.mock_compiler.take() {
+            c.abort();
+        }
     }
 }
 
@@ -230,7 +311,7 @@ async fn counter_state_persists_across_calls_in_memory() {
 // -- Validation / errors -------------------------------------------------------
 
 #[tokio::test]
-async fn rejects_source_based_request_until_compiler_lands() {
+async fn rejects_source_request_when_no_compiler_configured() {
     let h = Harness::start().await;
     let resp = h
         .create_route_body(json!({
@@ -243,6 +324,71 @@ async fn rejects_source_based_request_until_compiler_lands() {
     assert_eq!(resp.status().as_u16(), 400);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], "compile_failed");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("compiler sidecar not configured"),
+        "got: {}",
+        body["error"]["message"]
+    );
+}
+
+#[tokio::test]
+async fn source_path_with_mock_compiler_creates_callable_route() {
+    // Mock compiler returns the echo fixture's bytes; the host should
+    // accept them and dispatch normally.
+    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "typescript",
+            "source": "export function handle(req, _r, _g) { return { status: 200, headers: [], body: new Uint8Array() }; }",
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["language"], "typescript");
+
+    // The route now dispatches via the (echo-fixture) component.
+    let resp = h
+        .client
+        .post(h.url("/v1/charges"))
+        .body("ignored")
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.text().await.expect("body"), "echo: POST /v1/charges");
+}
+
+#[tokio::test]
+async fn source_path_surfaces_compiler_diagnostics() {
+    let h = Harness::start_with_failing_compiler("transpile failed").await;
+
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/bad",
+            "language": "typescript",
+            "source": "??? not valid",
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "compile_failed");
+    assert_eq!(body["error"]["message"], "transpile failed");
+    let diags = body["error"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0], "expected `;` here");
+}
+
+fn echo_bytes() -> Vec<u8> {
+    std::fs::read(env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT")).expect("read echo fixture")
 }
 
 #[tokio::test]

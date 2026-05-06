@@ -15,22 +15,25 @@ isn't practical. A small web UI exists for human inspection.
 
 Early implementation. The WIT script API (`wit/wiremirage.wit`) is in
 place, the host runs components against it, storage is abstracted behind
-in-memory and Valkey backends, and routes are stored in a registry keyed
-by `{group}/{n}`. The slice-3 REST API at `/__api/routes` accepts
-pre-compiled wasm components today; the source-based path waits on the
-compiler sidecar slice. No real auth yet — the host requires
+in-memory and Valkey backends, routes are stored in a registry keyed by
+`{group}/{n}`, and the REST API accepts both pre-compiled wasm uploads
+and TypeScript source (the latter goes through a Node sidecar at
+`compiler/typescript/`). No real auth yet — the host requires
 `WM_INSECURE_NO_AUTH=1` to acknowledge that.
 
 ## Layout
 
 ```
 crates/
-  wm-core/   shared types, REST client, auth
-  wm-host/   the long-running Rust server (axum + wasmtime + Valkey)
-  wm-cli/    the wm CLI binary
-  wm-mcp/    the MCP server
+  wm-core/                shared types, REST client, auth
+  wm-host/                long-running Rust server (axum + wasmtime + Valkey)
+  wm-cli/                 the wm CLI binary
+  wm-mcp/                 the MCP server
+compiler/
+  typescript/             Node-based compiler sidecar (componentize-js + jco)
 wit/
-  wiremirage.wit    handler script API contract (mirrors the design doc)
+  wiremirage.wit          handler script API contract (mirrors the design doc)
+docker-compose.yml        Valkey + sidecar for local development
 ```
 
 ## Building
@@ -50,14 +53,18 @@ just check    # fmt, clippy, test
 just build    # cargo build --workspace
 ```
 
-To run the host and register a route:
+To run the host with the TypeScript sidecar:
 
 ```
-WM_INSECURE_NO_AUTH=1 WM_STORAGE=memory cargo run -p wm-host
+docker compose up -d   # starts Valkey + compiler-typescript
+WM_INSECURE_NO_AUTH=1 \
+  WM_STORAGE=redis://localhost:6379 \
+  WM_COMPILER_URL=http://localhost:9100 \
+  cargo run -p wm-host
 # In another shell:
-WASM=$(base64 -w0 < $(find target -name echo_handler.component.wasm | head -1))
 curl -X POST localhost:8080/__api/routes -H content-type:application/json \
-  -d "{\"methods\":[\"POST\"],\"path\":\"/v1/charges\",\"language\":\"wasm\",\"bindings_version\":\"0.1.0\",\"compiled_wasm\":\"$WASM\"}"
+  -d '{"methods":["POST"],"path":"/v1/charges","language":"typescript",
+       "source":"export function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"}'
 curl -X POST localhost:8080/v1/charges -d '{}'
 ```
 
@@ -65,13 +72,19 @@ Required env vars (no silent fallbacks):
 
 - `WM_STORAGE` — `memory`, `redis://host:port[/db]`, or `rediss://...` for TLS.
 - `WM_INSECURE_NO_AUTH=1` — acknowledges that the REST API is open
-  without authentication. Real auth lands in a follow-up slice.
+  without authentication.
 
-Tier-3 tests (against a real Valkey container via testcontainers-rs)
-require Docker:
+Optional:
+
+- `WM_COMPILER_URL` — sidecar endpoint. Without it, source-based
+  requests fail; pre-compiled `language: "wasm"` uploads still work.
+
+Tier-3 tests require Docker:
 
 ```
-just test-valkey      # or: cargo test -p wm-host --features valkey-tests
+just test-valkey       # Valkey-backed storage suite
+just test-sidecar      # builds the sidecar image, runs end-to-end TS test
+just check-all         # everything (fmt + clippy + test + tier-3)
 ```
 
 ## License

@@ -9,14 +9,15 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–3 landed. The WIT contract is live at
-`wit/wiremirage.wit`, the host (`wm-host`) instantiates components against
-it, storage is abstracted behind a `Storage` enum with both in-memory and
-Valkey backends, and routes are stored in a `Registry` + `RouteTable`
-keyed by `{group}/{n}` slugs per `route-model.md`. The slice-3 REST API
-at `/__api/routes` accepts pre-compiled wasm components (base64 in JSON)
-and supports POST/GET/DELETE; the source-based path returns
-`compile_failed` until the compiler sidecar slice arrives. No real auth
+**Status:** slices 1–4 landed. The WIT contract is live at
+`wit/wiremirage.wit`, the host (`wm-host`) instantiates components
+against it, storage is abstracted behind a `Storage` enum with both
+in-memory and Valkey backends, and routes are stored in a `Registry` +
+`RouteTable` keyed by `{group}/{n}` slugs per `route-model.md`. The
+REST API at `/__api/routes` supports POST/GET/DELETE for both
+pre-compiled wasm uploads and TypeScript source — the source path goes
+through a separate Node sidecar at `compiler/typescript/`
+(componentize-js + jco), reachable via `WM_COMPILER_URL`. No real auth
 yet — the host refuses to start without `WM_INSECURE_NO_AUTH=1`.
 
 ## Where the design lives
@@ -45,6 +46,14 @@ Cargo workspace with four crates under `crates/`:
 - `wm-cli` — `wm` CLI binary
 - `wm-mcp` — MCP server
 
+Plus a Node-based compiler sidecar:
+
+- `compiler/typescript/` — accepts TypeScript source over HTTP, returns
+  componentized wasm bytes. Built as its own Docker image
+  (`compiler/typescript/Dockerfile`); the host calls it when the user
+  POSTs `language: "typescript"` to `/__api/routes`. **Not** Rust, not
+  in the cargo workspace.
+
 The WIT contract that handlers program against lives at `wit/wiremirage.wit`.
 It is the verbatim mirror of `script-api-wit.md` in the Arkiv workspace; if
 you need to change it, update the design doc first.
@@ -65,33 +74,52 @@ is for *developing this repo* — not the same thing.
 Use `just` (see `justfile`):
 
 - `just check` — fmt check + clippy `-D warnings` + tests (skips Docker tests)
-- `just check-all` — like `check` plus tier-3 Valkey tests via testcontainers
+- `just check-all` — like `check` plus tier-3 Valkey + sidecar tests
 - `just fmt` — format
-- `just test` — workspace tests only (no Valkey)
-- `just test-valkey` — tier-3 testcontainers suite, requires Docker
+- `just test` — workspace tests only (no Docker)
+- `just test-valkey` — tier-3 Valkey-backed tests, requires Docker
+- `just test-sidecar` — tier-3 TS sidecar tests; builds the image first
+- `just build-sidecar-image` — build the sidecar Docker image only
 - `just build` — `cargo build --workspace`
 - `just run-host` / `just run-cli <args>`
 
-To run the host:
+To run the host with sidecar (for TypeScript handlers):
+
+```sh
+docker compose up -d   # starts valkey + compiler-typescript
+WM_INSECURE_NO_AUTH=1 \
+  WM_STORAGE=redis://localhost:6379 \
+  WM_COMPILER_URL=http://localhost:9100 \
+  cargo run -p wm-host
+```
+
+Or in-memory + no compiler (pre-compiled `language: "wasm"` only):
 
 ```sh
 WM_INSECURE_NO_AUTH=1 WM_STORAGE=memory cargo run -p wm-host
 ```
 
-Then register a route via the REST API and call it:
+Register a TypeScript route and call it:
 
 ```sh
-WASM=$(base64 -w0 < $(find target -name echo_handler.component.wasm | head -1))
 curl -X POST localhost:8080/__api/routes -H content-type:application/json \
-  -d "{\"methods\":[\"POST\"],\"path\":\"/v1/charges\",\"language\":\"wasm\",\"bindings_version\":\"0.1.0\",\"compiled_wasm\":\"$WASM\"}"
+  -d '{
+    "methods": ["POST"],
+    "path": "/v1/charges",
+    "language": "typescript",
+    "source": "export function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"
+  }'
 curl -X POST localhost:8080/v1/charges -d '{}'
 ```
 
-Required env vars (no silent fallbacks; missing → fail-fast):
+Env vars (no silent fallbacks; missing required → fail-fast):
 
-- `WM_STORAGE` — `memory`, `redis://...`, or `rediss://...`
-- `WM_INSECURE_NO_AUTH=1` — acknowledges that the REST API is open without
-  authentication (slice 3 has no real auth yet)
+- `WM_STORAGE` (required) — `memory`, `redis://...`, or `rediss://...`
+- `WM_INSECURE_NO_AUTH=1` (required) — acknowledges that the REST API
+  is open without authentication
+- `WM_COMPILER_URL` (optional) — URL of the TypeScript sidecar. If
+  unset, source-based POSTs return `compile_failed`; pre-compiled
+  uploads still work.
 
 ## Required tooling
 
@@ -102,6 +130,11 @@ In addition to a stable Rust toolchain:
   to componentize fixture guests; also handy for `wasm-tools component wit
   <component.wasm>` when investigating component-shape issues)
 - `just` — `cargo install just`
+- **Node 22+** — only needed for hacking on the compiler sidecar
+  (`compiler/typescript/`) or running its `npm test`. Not required to
+  build or run the host.
+- **Docker** — required for the tier-3 testcontainers suites
+  (`just test-valkey`, `just test-sidecar`).
 
 ## Conventions
 

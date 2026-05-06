@@ -30,19 +30,43 @@ jobs:
         with:
           tool: wasm-tools
 
+      - name: Set up Node
+        # Needed for the compiler sidecar's own test suite. We don't run
+        # the host with Node anywhere — only the sidecar.
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: compiler/typescript/package-lock.json
+
+      - name: Install sidecar dependencies
+        working-directory: compiler/typescript
+        run: npm ci
+
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
+      - name: Test (sidecar own tests)
+        working-directory: compiler/typescript
+        run: npm test
+
+      - name: Test (host)
         run: cargo test --workspace
 
       - name: Test (Valkey-backed, tier-3)
         # Spins up real `valkey/valkey:8` containers via testcontainers-rs.
         # GitHub-hosted runners have Docker available; ryuk reaps stragglers.
         run: cargo test -p wm-host --features valkey-tests --test valkey_storage
+
+      - name: Build sidecar image
+        # The sidecar tier-3 test below loads `wiremirage/compiler-typescript:dev`.
+        run: docker build -f compiler/typescript/Dockerfile -t wiremirage/compiler-typescript:dev .
+
+      - name: Test (sidecar tier-3 end-to-end)
+        run: cargo test -p wm-host --features sidecar-tests --test sidecar_e2e
 
       - name: Build
         run: cargo build --workspace

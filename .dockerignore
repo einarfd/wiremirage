@@ -1,0 +1,9 @@
+# Repo-root .dockerignore — applied when building images whose context is
+# the repo root (e.g., `docker build -f compiler/typescript/Dockerfile .`).
+
+target/
+.git/
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
+crates/wm-host/tests/fixtures/*/target/

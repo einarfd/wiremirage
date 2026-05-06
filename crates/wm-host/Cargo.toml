@@ -31,15 +31,20 @@ base64.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via
 # testcontainers-rs. Requires Docker. Disabled by default so plain
 # `cargo test` stays fast and works without Docker; CI enables it.
 valkey-tests = []
+# Enables tier-3 integration tests that spin up the TypeScript compiler
+# sidecar Docker image. Requires Docker AND a pre-built
+# `wiremirage/compiler-typescript:dev` image (built via
+# `compiler/typescript/Dockerfile`).
+sidecar-tests = []
 
 [dev-dependencies]
 hyper.workspace = true
-reqwest.workspace = true
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -1,7 +1,10 @@
 //! REST API at `/__api/routes`.
 //!
-//! Slice 3 surface: POST/GET/DELETE for routes, source-based requests
-//! rejected with `compile_failed` until the compiler sidecar lands.
+//! POST/GET/DELETE for routes. Body has two shapes per `rest-api.md`:
+//! pre-compiled (`language: "wasm"`, `compiled_wasm` base64) and
+//! source-based (`language: "typescript"|...`, `source`). Source-based
+//! requests forward to the compiler sidecar via `CompilerClient`; if no
+//! sidecar is configured, those requests fail with `compile_failed`.
 //!
 //! No auth on the request handlers themselves yet — the host refuses to
 //! start without `WM_INSECURE_NO_AUTH=1`, so a deployer can't enable this
@@ -17,13 +20,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
-use crate::AppState;
 use crate::registry::{NewRoute, RegistryError, Route, render_slug};
 use crate::server::is_reserved_path;
-
-/// Currently-supported handler bindings version. Pre-compiled uploads
-/// must declare this; mismatches are rejected.
-const SUPPORTED_BINDINGS_VERSION: &str = "0.1.0";
+use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -46,8 +45,8 @@ struct CreateRouteBody {
     /// Base64-encoded `.component.wasm` bytes. Required when
     /// `language == "wasm"`.
     compiled_wasm: Option<String>,
-    /// Source code for the source-based path. Slice 3 returns
-    /// `compile_failed` because the compiler sidecar isn't here yet.
+    /// Source code for the source-based path. Forwarded to the compiler
+    /// sidecar; returns `compile_failed` if no sidecar is configured.
     source: Option<String>,
 }
 
@@ -101,6 +100,8 @@ struct ErrorBody {
 struct ErrorDetail {
     code: String,
     message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -108,6 +109,7 @@ struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    diagnostics: Vec<String>,
 }
 
 impl ApiError {
@@ -116,6 +118,7 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "validation_failed",
             message: msg.into(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -124,6 +127,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code: "conflict",
             message: msg.into(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -132,6 +136,7 @@ impl ApiError {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
             message: "no such route".into(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -140,6 +145,16 @@ impl ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "compile_failed",
             message: msg.into(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn compile_failed_with_diagnostics(msg: impl Into<String>, diagnostics: Vec<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "compile_failed",
+            message: msg.into(),
+            diagnostics,
         }
     }
 
@@ -148,6 +163,7 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
             message: msg.into(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -158,6 +174,7 @@ impl IntoResponse for ApiError {
             error: ErrorDetail {
                 code: self.code.into(),
                 message: self.message,
+                diagnostics: self.diagnostics,
             },
         };
         (self.status, Json(body)).into_response()
@@ -190,6 +207,12 @@ async fn create_route(
         )));
     }
 
+    if body.source.is_some() && body.compiled_wasm.is_some() {
+        return Err(ApiError::validation(
+            "send either `source` or `compiled_wasm`, not both",
+        ));
+    }
+
     let (compiled_wasm, language, bindings_version) = match body.language.as_str() {
         "wasm" => {
             let encoded = body
@@ -214,18 +237,39 @@ async fn create_route(
             (bytes, "wasm".to_string(), bv)
         }
         other => {
-            return Err(ApiError::compile_failed(format!(
-                "compiler sidecar not yet implemented; language={other:?} cannot be compiled. \
-                 Use language=\"wasm\" with a pre-compiled component for now."
-            )));
+            // Source-based path: hand off to the compiler sidecar.
+            let source = body.source.ok_or_else(|| {
+                ApiError::validation(format!("source required when language={other:?}"))
+            })?;
+            let compiler = state.compiler().ok_or_else(|| {
+                ApiError::compile_failed(
+                    "compiler sidecar not configured; set WM_COMPILER_URL or send a pre-compiled component",
+                )
+            })?;
+            let artifact = compiler
+                .compile(other, &source)
+                .await
+                .map_err(|e| match e {
+                    crate::compiler::CompilerError::CompileFailed {
+                        message,
+                        diagnostics,
+                    } => ApiError::compile_failed_with_diagnostics(message, diagnostics),
+                    other_err => ApiError::compile_failed(format!("{other_err}")),
+                })?;
+            // Validate the bytes parse here too — defends against a
+            // misbehaving sidecar shipping garbage.
+            wasmtime::component::Component::from_binary(
+                state.runtime().engine(),
+                &artifact.component,
+            )
+            .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
+            (
+                artifact.component,
+                other.to_string(),
+                artifact.bindings_version,
+            )
         }
     };
-
-    if body.source.is_some() && body.language == "wasm" {
-        return Err(ApiError::validation(
-            "send either `source` or `compiled_wasm`, not both",
-        ));
-    }
 
     let route = state.routes().registry().create_route(NewRoute {
         group: body.group,
