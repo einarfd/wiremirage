@@ -5,13 +5,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use wm_host::{AppState, Runtime, router};
+use wm_host::{AppState, Runtime, Storage, router};
 
 const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
 
 #[tokio::test]
 async fn echo_via_http() {
-    let runtime = Arc::new(Runtime::new().expect("runtime"));
+    let runtime = Arc::new(Runtime::new(Storage::in_memory()).expect("runtime"));
     let component = runtime
         .load_component(&PathBuf::from(ECHO_COMPONENT_PATH))
         .expect("load component");
@@ -49,7 +49,7 @@ async fn echo_via_http() {
 
 #[tokio::test]
 async fn echo_root_path() {
-    let runtime = Arc::new(Runtime::new().expect("runtime"));
+    let runtime = Arc::new(Runtime::new(Storage::in_memory()).expect("runtime"));
     let component = runtime
         .load_component(&PathBuf::from(ECHO_COMPONENT_PATH))
         .expect("load component");

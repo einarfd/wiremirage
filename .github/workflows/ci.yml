@@ -39,5 +39,10 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Test (Valkey-backed, tier-3)
+        # Spins up real `valkey/valkey:8` containers via testcontainers-rs.
+        # GitHub-hosted runners have Docker available; ryuk reaps stragglers.
+        run: cargo test -p wm-host --features valkey-tests --test valkey_storage
+
       - name: Build
         run: cargo build --workspace

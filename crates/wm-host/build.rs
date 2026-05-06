@@ -30,7 +30,7 @@ fn main() {
         workspace_root.join("wit/wiremirage.wit").display()
     );
 
-    let fixtures = ["echo-handler"];
+    let fixtures = ["echo-handler", "counter-handler"];
     for name in fixtures {
         build_fixture(&manifest_dir, &out_dir, name);
     }

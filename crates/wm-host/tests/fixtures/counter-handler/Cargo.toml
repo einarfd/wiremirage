@@ -1,0 +1,24 @@
+# Counter fixture: increments a key in the route-private store and returns
+# the new value. Used by tier-3 tests to verify state persists across
+# requests when the storage backend is Valkey.
+#
+# Standalone crate, NOT a workspace member (see echo-handler's Cargo.toml).
+
+[package]
+name = "counter-handler"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+
+[workspace]

@@ -1,0 +1,403 @@
+//! Storage abstraction.
+//!
+//! `Storage` is the host-side factory that produces `Bucket` instances. Each
+//! bucket is namespaced by an internal key prefix per `storage-model.md`:
+//!
+//!   route bucket: `kv:{group_ulid}:{route_ulid}:`
+//!   group bucket: `gkv:{group_ulid}:`
+//!
+//! Buckets are owned per-request (held by the wasmtime resource table) and
+//! act as thin views over the shared backing store. Persistence lives in the
+//! backend, not in the bucket.
+
+use std::sync::{Arc, Mutex};
+
+use thiserror::Error;
+
+use self::memory::MemStore;
+
+pub mod memory;
+// Always compiled: the case_ helpers and `storage_cases!` macro live here so
+// the tier-3 integration test in `tests/valkey_storage.rs` can reuse them.
+// The `in_memory` runner inside is itself `#[cfg(test)]`.
+pub mod tests;
+pub mod valkey;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum StoreError {
+    #[error("WRONGTYPE: key {key:?} holds {actual}, op requires {expected}")]
+    WrongType {
+        key: String,
+        actual: &'static str,
+        expected: &'static str,
+    },
+    #[error("VALUE: key {key:?} value is not a valid signed integer")]
+    NotInteger { key: String },
+    #[error("OVERFLOW: incr on key {key:?} would overflow s64")]
+    IncrOverflow { key: String },
+    #[error("BACKEND: {0}")]
+    Backend(String),
+}
+
+// -- Storage ------------------------------------------------------------------
+
+/// Host-side storage factory. Cheap to clone (the inner state is `Arc`-ed).
+#[derive(Clone)]
+pub enum Storage {
+    InMemory(Arc<Mutex<MemStore>>),
+    Valkey(Arc<redis::Client>),
+}
+
+impl Storage {
+    pub fn in_memory() -> Self {
+        Self::InMemory(Arc::new(Mutex::new(MemStore::new())))
+    }
+
+    /// Connect to a Valkey instance and return a `Storage` backed by it.
+    /// `url` follows the redis URL scheme: `redis://[user:pass@]host[:port][/db]`
+    /// or `rediss://...` for TLS. The client is constructed eagerly so a bad
+    /// URL fails here rather than on the first request.
+    pub fn valkey(url: &str) -> Result<Self, StoreError> {
+        let client = redis::Client::open(url).map_err(|e| StoreError::Backend(format!("{e}")))?;
+        // Round-trip a PING so config errors surface at startup rather than
+        // on the first mock request. Aligns with the project's fail-fast
+        // preference for missing/invalid backend config.
+        let mut conn = client
+            .get_connection()
+            .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
+        let _: String = redis::cmd("PING")
+            .query(&mut conn)
+            .map_err(|e| StoreError::Backend(format!("ping: {e}")))?;
+        Ok(Self::Valkey(Arc::new(client)))
+    }
+
+    /// Open the route-private bucket scoped to `(group, route)`.
+    pub fn route_bucket(&self, group_ulid: &str, route_ulid: &str) -> Result<Bucket, StoreError> {
+        let prefix = format!("kv:{group_ulid}:{route_ulid}:");
+        self.bucket_with_prefix(prefix)
+    }
+
+    /// Open the group-shared bucket scoped to `group`.
+    pub fn group_bucket(&self, group_ulid: &str) -> Result<Bucket, StoreError> {
+        let prefix = format!("gkv:{group_ulid}:");
+        self.bucket_with_prefix(prefix)
+    }
+
+    fn bucket_with_prefix(&self, prefix: String) -> Result<Bucket, StoreError> {
+        match self {
+            Storage::InMemory(store) => Ok(Bucket::InMemory {
+                store: store.clone(),
+                prefix,
+            }),
+            Storage::Valkey(client) => {
+                let conn = client
+                    .get_connection()
+                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
+                Ok(Bucket::Valkey { conn, prefix })
+            }
+        }
+    }
+}
+
+// -- Bucket -------------------------------------------------------------------
+
+/// Per-request handle on a scoped slice of the backing store. Maps to the
+/// `bucket` resource in the WIT contract.
+pub enum Bucket {
+    InMemory {
+        store: Arc<Mutex<MemStore>>,
+        prefix: String,
+    },
+    Valkey {
+        conn: redis::Connection,
+        prefix: String,
+    },
+}
+
+impl Bucket {
+    // -- Basic KV --
+
+    pub fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::get(&store, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::get(conn, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn set(&mut self, key: &str, value: Vec<u8>) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::set(&mut store, fk, value);
+                Ok(())
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::set(conn, &fk, value).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn delete(&mut self, key: &str) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::delete(&mut store, &fk);
+                Ok(())
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::delete(conn, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn incr(&mut self, key: &str, by: i64) -> Result<i64, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::incr(&mut store, &fk, by).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::incr(conn, &fk, by).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn list_keys(&mut self, user_prefix: Option<&str>) -> Result<Vec<String>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let combined = match user_prefix {
+                    Some(p) => format!("{prefix}{p}"),
+                    None => prefix.clone(),
+                };
+                let store = store.lock().expect("poisoned");
+                Ok(memory::scan_with_prefix(&store, &combined)
+                    .into_iter()
+                    .map(|k| k.strip_prefix(prefix.as_str()).unwrap_or(&k).to_string())
+                    .collect())
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let combined = match user_prefix {
+                    Some(p) => format!("{prefix}{p}"),
+                    None => prefix.clone(),
+                };
+                let bucket_prefix = prefix.clone();
+                Ok(valkey::scan_with_prefix(conn, &combined)?
+                    .into_iter()
+                    .map(|k| {
+                        k.strip_prefix(bucket_prefix.as_str())
+                            .unwrap_or(&k)
+                            .to_string()
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    // -- List ops --
+
+    pub fn list_push(&mut self, key: &str, value: Vec<u8>) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::list_push(&mut store, fk, value).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::list_push(conn, &fk, value).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn list_pop(&mut self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::list_pop(&mut store, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::list_pop(conn, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn list_range(
+        &mut self,
+        key: &str,
+        start: i64,
+        stop: i64,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::list_range(&store, &fk, start, stop)
+                    .map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::list_range(conn, &fk, start, stop).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn list_length(&mut self, key: &str) -> Result<u64, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::list_length(&store, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::list_length(conn, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    // -- Hash ops --
+
+    pub fn hash_get(&mut self, key: &str, field: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::hash_get(&store, &fk, field).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::hash_get(conn, &fk, field).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn hash_set(&mut self, key: &str, field: &str, value: Vec<u8>) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::hash_set(&mut store, fk, field.to_string(), value)
+                    .map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::hash_set(conn, &fk, field, value).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn hash_delete(&mut self, key: &str, field: &str) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::hash_delete(&mut store, &fk, field).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::hash_delete(conn, &fk, field).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn hash_keys(&mut self, key: &str) -> Result<Vec<String>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::hash_keys(&store, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::hash_keys(conn, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    // -- Set ops --
+
+    pub fn set_add(&mut self, key: &str, member: &str) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::set_add(&mut store, fk, member.to_string())
+                    .map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::set_add(conn, &fk, member).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn set_remove(&mut self, key: &str, member: &str) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::set_remove(&mut store, &fk, member).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::set_remove(conn, &fk, member).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    pub fn set_contains(&mut self, key: &str, member: &str) -> Result<bool, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::set_contains(&store, &fk, member).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::set_contains(conn, &fk, member).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+}
+
+/// Backend ops report errors with the prefixed key. Strip the bucket prefix
+/// so the error names the user-facing key, not the internal storage key.
+fn restore_user_key(err: StoreError, prefix: &str) -> StoreError {
+    match err {
+        StoreError::WrongType {
+            key,
+            actual,
+            expected,
+        } => StoreError::WrongType {
+            key: strip(&key, prefix),
+            actual,
+            expected,
+        },
+        StoreError::NotInteger { key } => StoreError::NotInteger {
+            key: strip(&key, prefix),
+        },
+        StoreError::IncrOverflow { key } => StoreError::IncrOverflow {
+            key: strip(&key, prefix),
+        },
+        StoreError::Backend(_) => err,
+    }
+}
+
+fn strip(full: &str, prefix: &str) -> String {
+    full.strip_prefix(prefix).unwrap_or(full).to_string()
+}

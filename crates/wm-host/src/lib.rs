@@ -1,9 +1,8 @@
 //! WireMirage host runtime.
 //!
-//! Slice 1 surface: WIT bindings, an in-memory `MemBucket` backing for the
-//! `store.bucket` resource, and a `HostState` that wires both into wasmtime.
-//! The axum server, route table, and Valkey-backed storage arrive in
-//! subsequent slices.
+//! Surface: WIT bindings, the `Bucket` / `Storage` abstraction (in-memory
+//! today, Valkey landing in slice 2), the `HostState` that wires them into
+//! wasmtime, the slice-1 hardcoded-component axum server.
 
 pub mod bindings;
 pub mod host_state;
@@ -18,4 +17,4 @@ pub use host_state::HostState;
 pub use log::{LogCapture, LogLevel, LogRecord};
 pub use runtime::{BucketHandles, Runtime};
 pub use server::{AppState, router};
-pub use store::{MemBucket, StoreError};
+pub use store::{Bucket, Storage, StoreError};

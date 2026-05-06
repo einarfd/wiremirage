@@ -42,8 +42,12 @@ In addition to stable Rust + clippy + rustfmt (already pulled in via
 - `wasm32-unknown-unknown` target — `rustup target add wasm32-unknown-unknown`
 - `wasm-tools` CLI — `cargo install wasm-tools`
 - `just` — `cargo install just`
+- **Docker** — needed only for `just check-all` / `just test-valkey`. The
+  testcontainers-rs sync runner spins up `valkey/valkey:8` for the tier-3
+  storage suite. CI already has Docker; locally you only need it if you
+  want to exercise the Valkey backend.
 
-CI installs all three. Locally, install once.
+CI installs all four. Locally, install once.
 
 ## Standard loop
 
@@ -52,10 +56,27 @@ CI installs all three. Locally, install once.
    `script-api-wit.md`, `cli-design.md`, etc.) and the relevant ADR.
 2. **Make the code change.** Prefer editing existing files over adding new
    ones. Follow the rest of the repo's style (rustfmt, clippy `-D warnings`).
-3. **Run `just check`.** Fix what's broken before reporting.
+3. **Run `just check`.** Fix what's broken before reporting. If the change
+   touches storage, also run `just check-all` to exercise the tier-3
+   Valkey suite.
 4. **If the code conflicts with the spec, surface it.** Either propose a
    spec update (via `/new-adr` if it's a real decision) or revise the code.
    Don't silently diverge.
+
+## Storage backend selection
+
+The host requires `WM_STORAGE` to be set (no silent fallback). Values:
+
+- `memory` — in-process backing, state lost on restart. Logged as a
+  warning at startup.
+- `redis://host:port[/db]` — Valkey or other Redis-compatible service.
+- `rediss://host:port[/db]` — same, with TLS.
+
+Tests opt into the in-memory backend explicitly via `Storage::in_memory()`
+or `WM_STORAGE=memory`; tier-3 tests start a real Valkey container and
+use `Storage::valkey(url)`. **Don't introduce a default-to-memory
+fallback in production paths** — fail-fast on missing config is a
+deliberate project convention.
 
 ## Arkiv discipline
 

@@ -25,8 +25,16 @@ wasmtime = { workspace = true, features = ["component-model", "runtime", "cranel
 axum.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+redis.workspace = true
+
+[features]
+# Enables tier-3 integration tests that spin up a real Valkey container via
+# testcontainers-rs. Requires Docker. Disabled by default so plain
+# `cargo test` stays fast and works without Docker; CI enables it.
+valkey-tests = []
 
 [dev-dependencies]
 hyper.workspace = true
 reqwest.workspace = true
+testcontainers.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }

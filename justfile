@@ -1,8 +1,12 @@
 default:
     @just --list
 
-# Run the full check suite (fmt check, clippy, test).
+# Run the full check suite (fmt check, clippy, test). Excludes tier-3
+# Valkey/Docker tests; use `just check-all` for those.
 check: fmt-check clippy test
+
+# Like `check` but also runs the tier-3 testcontainers suite. Requires Docker.
+check-all: check test-valkey
 
 fmt:
     cargo fmt --all
@@ -15,6 +19,10 @@ clippy:
 
 test:
     cargo test --workspace
+
+# Tier-3: real Valkey container via testcontainers-rs. Needs Docker.
+test-valkey:
+    cargo test -p wm-host --features valkey-tests --test valkey_storage
 
 build:
     cargo build --workspace

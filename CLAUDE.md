@@ -9,10 +9,11 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slice 1 landed. The WIT contract is live at `wit/wiremirage.wit`,
-the host (`wm-host`) instantiates components against it with an in-memory
-store and log capture, and a single hardcoded-component axum server is
-wired up. Next slice: Valkey-backed storage and a real route table.
+**Status:** slices 1–2 landed. The WIT contract is live at
+`wit/wiremirage.wit`, the host (`wm-host`) instantiates components against
+it, and storage is abstracted behind a `Storage` enum with both in-memory
+and Valkey backends. Routing is still a single hardcoded-component
+catch-all. Next slice: a real route table + REST API for creating routes.
 
 ## Where the design lives
 
@@ -59,18 +60,24 @@ is for *developing this repo* — not the same thing.
 
 Use `just` (see `justfile`):
 
-- `just check` — fmt check + clippy `-D warnings` + tests
+- `just check` — fmt check + clippy `-D warnings` + tests (skips Docker tests)
+- `just check-all` — like `check` plus tier-3 Valkey tests via testcontainers
 - `just fmt` — format
-- `just test` — tests only
+- `just test` — workspace tests only (no Valkey)
+- `just test-valkey` — tier-3 testcontainers suite, requires Docker
 - `just build` — `cargo build --workspace`
 - `just run-host` / `just run-cli <args>`
 
 To run the host directly against a fixture component:
 
 ```sh
+WM_STORAGE=memory \
 WM_FIXTURE_WASM=$(find target -name 'echo_handler.component.wasm') \
   cargo run -p wm-host
 ```
+
+`WM_STORAGE` is required (no silent fallback). Accepts `memory`,
+`redis://host:port[/db]`, or `rediss://...` for TLS.
 
 ## Required tooling
 

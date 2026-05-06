@@ -5,26 +5,36 @@ use wasmtime::{Engine, Result, Store};
 
 use crate::bindings::Handler;
 use crate::host_state::HostState;
-use crate::store::MemBucket;
+use crate::store::{Bucket, Storage};
 
-/// Wraps an `Engine` and a `Linker` configured with all WireMirage host
-/// imports. One `Runtime` is shared across requests; per-request state lives
-/// in `HostState` instances created via `instantiate_with`.
+/// Wraps a wasmtime `Engine`, a `Linker` configured with all WireMirage
+/// host imports, and the `Storage` backend that mints per-request buckets.
+/// One `Runtime` is shared across requests; per-request state lives in
+/// `HostState` instances created via `instantiate`.
 pub struct Runtime {
     engine: Engine,
     linker: Linker<HostState>,
+    storage: Storage,
 }
 
 impl Runtime {
-    pub fn new() -> Result<Self> {
+    pub fn new(storage: Storage) -> Result<Self> {
         let engine = Engine::default();
         let mut linker: Linker<HostState> = Linker::new(&engine);
         Handler::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |s| s)?;
-        Ok(Self { engine, linker })
+        Ok(Self {
+            engine,
+            linker,
+            storage,
+        })
     }
 
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    pub fn storage(&self) -> &Storage {
+        &self.storage
     }
 
     /// Compile a component from a file (typically a `.component.wasm`
@@ -33,15 +43,34 @@ impl Runtime {
         Component::from_file(&self.engine, path)
     }
 
-    /// Instantiate the component with a fresh `HostState` containing an
-    /// empty route bucket and an empty group bucket. Returns the
-    /// instantiated `Handler` plus the wasmtime `Store` (which owns the
-    /// state and the resource handles).
-    pub fn instantiate_with(
+    /// Instantiate the component with fresh buckets for the given
+    /// `(group, route)` scope. Returns the `Handler`, the wasmtime `Store`
+    /// (which owns the state and resource handles), and the bucket
+    /// resources to pass to `call_handle`.
+    pub fn instantiate(
         &self,
         component: &Component,
-        route_bucket: MemBucket,
-        group_bucket: MemBucket,
+        group_ulid: &str,
+        route_ulid: &str,
+    ) -> Result<(Handler, Store<HostState>, BucketHandles)> {
+        let route_bucket = self
+            .storage
+            .route_bucket(group_ulid, route_ulid)
+            .map_err(|e| wasmtime::Error::msg(format!("open route bucket: {e}")))?;
+        let group_bucket = self
+            .storage
+            .group_bucket(group_ulid)
+            .map_err(|e| wasmtime::Error::msg(format!("open group bucket: {e}")))?;
+        self.instantiate_with_buckets(component, route_bucket, group_bucket)
+    }
+
+    /// Lower-level entry point used by tests that want to construct buckets
+    /// explicitly (e.g., to seed state before instantiation).
+    pub fn instantiate_with_buckets(
+        &self,
+        component: &Component,
+        route_bucket: Bucket,
+        group_bucket: Bucket,
     ) -> Result<(Handler, Store<HostState>, BucketHandles)> {
         let mut store = Store::new(&self.engine, HostState::new());
         let route = store.data_mut().push_bucket(route_bucket)?;
@@ -55,6 +84,6 @@ impl Runtime {
 /// caller can pass them as the `route-store` / `group-store` arguments to
 /// `call_handle`.
 pub struct BucketHandles {
-    pub route: wasmtime::component::Resource<MemBucket>,
-    pub group: wasmtime::component::Resource<MemBucket>,
+    pub route: wasmtime::component::Resource<Bucket>,
+    pub group: wasmtime::component::Resource<Bucket>,
 }

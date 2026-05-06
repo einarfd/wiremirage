@@ -9,19 +9,19 @@
 use std::path::PathBuf;
 
 use wm_host::bindings::wiremirage::handler::http::Request;
-use wm_host::{MemBucket, Runtime};
+use wm_host::{Runtime, Storage};
 
 const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
 
 #[test]
 fn echo_handler_round_trip() {
-    let runtime = Runtime::new().expect("runtime");
+    let runtime = Runtime::new(Storage::in_memory()).expect("runtime");
     let component = runtime
         .load_component(&PathBuf::from(ECHO_COMPONENT_PATH))
         .expect("load component");
 
     let (handler, mut store, handles) = runtime
-        .instantiate_with(&component, MemBucket::new(), MemBucket::new())
+        .instantiate(&component, "test-group", "test-route")
         .expect("instantiate");
 
     let req = Request {

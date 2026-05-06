@@ -11,7 +11,12 @@ use wasmtime::component::Component;
 
 use crate::Runtime;
 use crate::bindings::wiremirage::handler::http::{Header, Request as WitRequest};
-use crate::store::MemBucket;
+
+/// Slice 2 has no route table yet, so all traffic routes to the same hidden
+/// (group, route) scope. Slice 3's route lookup replaces these with the
+/// matched route's actual ULIDs.
+const DEFAULT_GROUP_ULID: &str = "default";
+const DEFAULT_ROUTE_ULID: &str = "default";
 
 /// Slice 1 server state: a single hardcoded component is wired to a
 /// catch-all route. Slice 2 turns this into a route-table lookup.
@@ -62,7 +67,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
 
     let wit_response = tokio::task::spawn_blocking(move || {
         let (handler, mut store, handles) =
-            runtime.instantiate_with(&component, MemBucket::new(), MemBucket::new())?;
+            runtime.instantiate(&component, DEFAULT_GROUP_ULID, DEFAULT_ROUTE_ULID)?;
         handler.call_handle(&mut store, &wit_request, handles.route, handles.group)
     })
     .await??;

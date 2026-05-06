@@ -13,10 +13,10 @@ isn't practical. A small web UI exists for human inspection.
 
 ## Status
 
-Early implementation. The WIT script API (`wit/wiremirage.wit`) is in place
-and the host can instantiate components against it; storage is in-memory
-and routing is a single hardcoded handler. Valkey-backed storage, real
-route tables, and the CLI come next.
+Early implementation. The WIT script API (`wit/wiremirage.wit`) is in place,
+the host runs components against it, and storage is abstracted behind both
+in-memory and Valkey backends. Routing is still a single hardcoded
+handler — the route table, REST API, and CLI come next.
 
 ## Layout
 
@@ -50,8 +50,21 @@ just build    # cargo build --workspace
 To run the host directly against the bundled echo fixture:
 
 ```
+WM_STORAGE=memory \
 WM_FIXTURE_WASM=$(find target -name 'echo_handler.component.wasm') \
   cargo run -p wm-host
+```
+
+`WM_STORAGE` is required and has no default — the host fails to start if
+unset. Use `memory` for in-process storage (state lost on restart) or a
+`redis://` / `rediss://` URL to point at Valkey or any Redis-protocol
+service.
+
+Tier-3 tests (against a real Valkey container via testcontainers-rs)
+require Docker:
+
+```
+just test-valkey      # or: cargo test -p wm-host --features valkey-tests
 ```
 
 ## License
