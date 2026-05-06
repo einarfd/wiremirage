@@ -83,6 +83,13 @@ impl Storage {
         self.bucket_with_prefix(prefix)
     }
 
+    /// Open a bucket with no key prefix, for host-internal admin records
+    /// (route table, group records, indexes). Handlers cannot reach this —
+    /// the WIT contract only exposes per-route / per-group buckets.
+    pub fn admin_bucket(&self) -> Result<Bucket, StoreError> {
+        self.bucket_with_prefix(String::new())
+    }
+
     fn bucket_with_prefix(&self, prefix: String) -> Result<Bucket, StoreError> {
         match self {
             Storage::InMemory(store) => Ok(Bucket::InMemory {
@@ -329,6 +336,43 @@ impl Bucket {
         }
     }
 
+    /// Atomic increment of a hash field. Host-internal: not exposed via WIT
+    /// (handlers should use `incr` for top-level counters). Used by the
+    /// route registry to allocate per-group route numbers.
+    pub fn hash_incr(&mut self, key: &str, field: &str, by: i64) -> Result<i64, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let mut store = store.lock().expect("poisoned");
+                memory::hash_incr(&mut store, &fk, field, by)
+                    .map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::hash_incr(conn, &fk, field, by).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    /// Read all field/value pairs of a hash. Host-internal: used by the
+    /// registry to deserialise route/group records.
+    pub fn hash_get_all(
+        &mut self,
+        key: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<u8>>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::hash_get_all(&store, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::hash_get_all(conn, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
     // -- Set ops --
 
     pub fn set_add(&mut self, key: &str, member: &str) -> Result<(), StoreError> {
@@ -370,6 +414,22 @@ impl Bucket {
             Bucket::Valkey { conn, prefix } => {
                 let fk = format!("{prefix}{key}");
                 valkey::set_contains(conn, &fk, member).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    /// List all members of a set. Host-internal: used by the registry to
+    /// enumerate routes within a group.
+    pub fn set_members(&mut self, key: &str) -> Result<Vec<String>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                memory::set_members(&store, &fk).map_err(|e| restore_user_key(e, prefix))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::set_members(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
         }
     }

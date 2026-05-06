@@ -4,9 +4,13 @@
 //! today, Valkey landing in slice 2), the `HostState` that wires them into
 //! wasmtime, the slice-1 hardcoded-component axum server.
 
+pub mod api;
 pub mod bindings;
 pub mod host_state;
 pub mod log;
+pub mod pattern;
+pub mod registry;
+pub mod route_table;
 pub mod runtime;
 pub mod server;
 pub mod store;

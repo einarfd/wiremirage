@@ -17,10 +17,16 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage};
 use wm_host::bindings::wiremirage::handler::http::Request as WitRequest;
+use wm_host::registry::{NewRoute, Registry};
+use wm_host::route_table::RouteTable;
 use wm_host::store::tests as cases;
 use wm_host::{AppState, Bucket, Runtime, Storage, router};
 
 const COUNTER_COMPONENT_PATH: &str = env!("WM_FIXTURE_COUNTER_HANDLER_COMPONENT");
+
+fn counter_bytes() -> Vec<u8> {
+    std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture")
+}
 
 struct SharedValkey {
     _container: Container<GenericImage>,
@@ -76,11 +82,21 @@ wm_host::storage_cases!(decl_cases);
 #[tokio::test]
 async fn counter_persists_across_requests_via_http() {
     let storage = Storage::valkey(&shared().url).expect("connect to valkey");
-    let runtime = Arc::new(Runtime::new(storage).expect("runtime"));
-    let component = runtime
-        .load_component(&PathBuf::from(COUNTER_COMPONENT_PATH))
-        .expect("load component");
-    let app = router(AppState::new(runtime, component));
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let registry = Arc::new(Registry::new(storage));
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/bump".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: counter_bytes(),
+        })
+        .expect("create route");
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    routes.refresh_after_create(route);
+    let app = router(AppState::new(runtime, routes));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

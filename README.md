@@ -13,10 +13,13 @@ isn't practical. A small web UI exists for human inspection.
 
 ## Status
 
-Early implementation. The WIT script API (`wit/wiremirage.wit`) is in place,
-the host runs components against it, and storage is abstracted behind both
-in-memory and Valkey backends. Routing is still a single hardcoded
-handler — the route table, REST API, and CLI come next.
+Early implementation. The WIT script API (`wit/wiremirage.wit`) is in
+place, the host runs components against it, storage is abstracted behind
+in-memory and Valkey backends, and routes are stored in a registry keyed
+by `{group}/{n}`. The slice-3 REST API at `/__api/routes` accepts
+pre-compiled wasm components today; the source-based path waits on the
+compiler sidecar slice. No real auth yet — the host requires
+`WM_INSECURE_NO_AUTH=1` to acknowledge that.
 
 ## Layout
 
@@ -47,18 +50,22 @@ just check    # fmt, clippy, test
 just build    # cargo build --workspace
 ```
 
-To run the host directly against the bundled echo fixture:
+To run the host and register a route:
 
 ```
-WM_STORAGE=memory \
-WM_FIXTURE_WASM=$(find target -name 'echo_handler.component.wasm') \
-  cargo run -p wm-host
+WM_INSECURE_NO_AUTH=1 WM_STORAGE=memory cargo run -p wm-host
+# In another shell:
+WASM=$(base64 -w0 < $(find target -name echo_handler.component.wasm | head -1))
+curl -X POST localhost:8080/__api/routes -H content-type:application/json \
+  -d "{\"methods\":[\"POST\"],\"path\":\"/v1/charges\",\"language\":\"wasm\",\"bindings_version\":\"0.1.0\",\"compiled_wasm\":\"$WASM\"}"
+curl -X POST localhost:8080/v1/charges -d '{}'
 ```
 
-`WM_STORAGE` is required and has no default — the host fails to start if
-unset. Use `memory` for in-process storage (state lost on restart) or a
-`redis://` / `rediss://` URL to point at Valkey or any Redis-protocol
-service.
+Required env vars (no silent fallbacks):
+
+- `WM_STORAGE` — `memory`, `redis://host:port[/db]`, or `rediss://...` for TLS.
+- `WM_INSECURE_NO_AUTH=1` — acknowledges that the REST API is open
+  without authentication. Real auth lands in a follow-up slice.
 
 Tier-3 tests (against a real Valkey container via testcontainers-rs)
 require Docker:

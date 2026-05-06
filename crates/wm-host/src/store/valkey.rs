@@ -130,6 +130,37 @@ pub fn hash_keys(conn: &mut redis::Connection, key: &str) -> Result<Vec<String>,
     conn.hkeys(key).map_err(|e| classify(e, key))
 }
 
+pub fn hash_incr(
+    conn: &mut redis::Connection,
+    key: &str,
+    field: &str,
+    by: i64,
+) -> Result<i64, StoreError> {
+    conn.hincr::<_, _, _, i64>(key, field, by).map_err(|err| {
+        if err.code() == Some("WRONGTYPE") {
+            return StoreError::WrongType {
+                key: key.to_string(),
+                actual: "unknown",
+                expected: "hash",
+            };
+        }
+        let msg = format!("{err}");
+        if msg.contains("not an integer") {
+            return StoreError::NotInteger {
+                key: format!("{key}.{field}"),
+            };
+        }
+        StoreError::Backend(msg)
+    })
+}
+
+pub fn hash_get_all(
+    conn: &mut redis::Connection,
+    key: &str,
+) -> Result<std::collections::HashMap<String, Vec<u8>>, StoreError> {
+    conn.hgetall(key).map_err(|e| classify(e, key))
+}
+
 // -- Set ops --
 
 pub fn set_add(conn: &mut redis::Connection, key: &str, member: &str) -> Result<(), StoreError> {
@@ -148,4 +179,8 @@ pub fn set_contains(
     member: &str,
 ) -> Result<bool, StoreError> {
     conn.sismember(key, member).map_err(|e| classify(e, key))
+}
+
+pub fn set_members(conn: &mut redis::Connection, key: &str) -> Result<Vec<String>, StoreError> {
+    conn.smembers(key).map_err(|e| classify(e, key))
 }

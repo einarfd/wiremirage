@@ -78,6 +78,39 @@ use `Storage::valkey(url)`. **Don't introduce a default-to-memory
 fallback in production paths** — fail-fast on missing config is a
 deliberate project convention.
 
+## Auth / WM_INSECURE_NO_AUTH
+
+Slice 3 ships without auth: `POST /__api/routes` is fully open. To prevent
+that from being deployed unintentionally, the host refuses to start unless
+`WM_INSECURE_NO_AUTH=1` is set. Until the auth slice lands, every dev /
+test invocation needs both `WM_STORAGE=...` and `WM_INSECURE_NO_AUTH=1`.
+
+When auth lands, this gate is either retired or kept as an opt-out for
+trusted networks. **Don't add code paths that bypass the gate** — the
+fail-fast intent is to prevent a deployer from accidentally running an
+open instance.
+
+## Route table architecture
+
+Three layers in `wm-host`:
+
+- `registry::Registry` — durable CRUD on routes/groups via Valkey or
+  in-memory storage. Generates ULIDs, allocates per-group route numbers,
+  enforces conflict detection at create time. Single source of truth on
+  what routes exist.
+- `route_table::RouteTable` — in-memory snapshot of all routes plus a
+  cache of compiled `wasmtime::Component`s. Warmed at startup from the
+  registry; kept in sync via `refresh_after_create` /
+  `refresh_after_delete` calls from the API handlers (single-host
+  coherence; multi-host via Valkey keyspace notifications is a later
+  concern).
+- `server::dispatch` — for each request, checks reserved paths, queries
+  the route table, instantiates the matched route's component, populates
+  `WitRequest` with `matched_pattern` and `path_params`, calls into the
+  guest.
+
+The slice-1 catch-all is gone; every request goes through the table.
+
 ## Arkiv discipline
 
 - **Read-only by default.** Don't call `update_file`, `create_file`,

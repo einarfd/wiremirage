@@ -213,6 +213,55 @@ pub fn hash_keys(store: &MemStore, key: &str) -> Result<Vec<String>, StoreError>
     }
 }
 
+/// Atomic increment of a hash field interpreted as a signed integer. Mirrors
+/// Valkey's HINCRBY. Initializes to `by` if the key/field is absent.
+pub fn hash_incr(store: &mut MemStore, key: &str, field: &str, by: i64) -> Result<i64, StoreError> {
+    let entry = store
+        .entry(key.to_string())
+        .or_insert_with(|| MemValue::Hash(HashMap::new()));
+    match entry {
+        MemValue::Hash(h) => match h.get(field) {
+            None => {
+                h.insert(field.to_string(), by.to_string().into_bytes());
+                Ok(by)
+            }
+            Some(b) => {
+                let s = std::str::from_utf8(b).map_err(|_| StoreError::NotInteger {
+                    key: format!("{key}.{field}"),
+                })?;
+                let cur: i64 = s.parse().map_err(|_| StoreError::NotInteger {
+                    key: format!("{key}.{field}"),
+                })?;
+                let next = cur.checked_add(by).ok_or(StoreError::IncrOverflow {
+                    key: format!("{key}.{field}"),
+                })?;
+                h.insert(field.to_string(), next.to_string().into_bytes());
+                Ok(next)
+            }
+        },
+        other => Err(wrong_type(key, other.kind(), "hash")),
+    }
+}
+
+/// Read all field/value pairs of a hash. Mirrors Valkey's HGETALL.
+pub fn hash_get_all(store: &MemStore, key: &str) -> Result<HashMap<String, Vec<u8>>, StoreError> {
+    match store.get(key) {
+        None => Ok(HashMap::new()),
+        Some(MemValue::Hash(h)) => Ok(h.clone()),
+        Some(other) => Err(wrong_type(key, other.kind(), "hash")),
+    }
+}
+
+/// List all members of a set. Mirrors Valkey's SMEMBERS. Returned in
+/// undefined order.
+pub fn set_members(store: &MemStore, key: &str) -> Result<Vec<String>, StoreError> {
+    match store.get(key) {
+        None => Ok(Vec::new()),
+        Some(MemValue::Set(s)) => Ok(s.iter().cloned().collect()),
+        Some(other) => Err(wrong_type(key, other.kind(), "set")),
+    }
+}
+
 // -- Set ops --
 
 pub fn set_add(store: &mut MemStore, key: String, member: String) -> Result<(), StoreError> {
