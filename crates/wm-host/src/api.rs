@@ -26,7 +26,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthContext, AuthError, Token};
+use crate::auth::{AuthContext, AuthError, Token, User};
 use crate::registry::{NewRoute, RegistryError, Route, render_slug};
 use crate::server::is_reserved_path;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
@@ -40,6 +40,16 @@ pub fn router() -> Router<AppState> {
         )
         .route("/__api/tokens", post(create_token).get(list_tokens))
         .route("/__api/tokens/{name}", get(get_token).delete(delete_token))
+        // Users — POST/GET (admin); GET /me (any authed); GET/PATCH/DELETE
+        // /{name} (admin or self for the GET; admin-only for PATCH/DELETE).
+        // /me must come before /{name} or axum's matcher will treat "me"
+        // as a user name.
+        .route("/__api/users", post(create_user).get(list_users))
+        .route("/__api/users/me", get(get_me))
+        .route(
+            "/__api/users/{name}",
+            get(get_user).patch(patch_user).delete(delete_user),
+        )
 }
 
 // -- Request / response shapes ------------------------------------------------
@@ -512,5 +522,171 @@ async fn delete_token(
     if !revoked {
         return Err(ApiError::not_found());
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// -- /__api/users -------------------------------------------------------------
+//
+// Admin-only for cross-user actions. `GET /__api/users/me` and
+// `GET /__api/users/{name}` (when `name` is the caller's own name) are
+// open to any authed user. PATCH is admin-only and only toggles
+// `is_admin` for now — rename is too close to the deferred user-merge
+// operation, see the auth design notes.
+//
+// Three guardrails on DELETE / PATCH:
+//   1. An admin cannot delete themselves (avoids accidental lockout).
+//   2. The system cannot drop below one admin (refuse last-admin
+//      DELETE or PATCH-to-non-admin).
+//   3. A user that owns routes cannot be deleted; admins clean up the
+//      routes first.
+
+#[derive(Debug, Deserialize)]
+struct CreateUserBody {
+    name: String,
+    #[serde(default)]
+    is_admin: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchUserBody {
+    is_admin: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct UserRecord {
+    id: String,
+    name: String,
+    is_admin: bool,
+    created_at: String,
+}
+
+impl From<&User> for UserRecord {
+    fn from(u: &User) -> Self {
+        Self {
+            id: u.id.clone(),
+            name: u.name.clone(),
+            is_admin: u.is_admin,
+            created_at: u.created_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ListUsersResponse {
+    users: Vec<UserRecord>,
+}
+
+fn require_admin(auth: &AuthContext) -> Result<(), ApiError> {
+    if auth.is_admin {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("admin role required"))
+    }
+}
+
+async fn create_user(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<CreateUserBody>,
+) -> Result<Response, ApiError> {
+    require_admin(&auth)?;
+    if body.name.trim().is_empty() {
+        return Err(ApiError::validation("user name must not be empty"));
+    }
+    let user = state.auth().create_user(&body.name, body.is_admin)?;
+    Ok((StatusCode::CREATED, Json(UserRecord::from(&user))).into_response())
+}
+
+async fn list_users(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<ListUsersResponse>, ApiError> {
+    require_admin(&auth)?;
+    let users = state.auth().list_users()?;
+    let records = users.iter().map(UserRecord::from).collect();
+    Ok(Json(ListUsersResponse { users: records }))
+}
+
+async fn get_me(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<UserRecord>, ApiError> {
+    let user = state.auth().get_user_by_id(&auth.user_id)?;
+    Ok(Json(UserRecord::from(&user)))
+}
+
+async fn get_user(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(name): Path<String>,
+) -> Result<Json<UserRecord>, ApiError> {
+    let user = state
+        .auth()
+        .get_user_by_name(&name)?
+        .ok_or_else(ApiError::not_found)?;
+    if !auth.is_admin && user.id != auth.user_id {
+        return Err(ApiError::forbidden(
+            "only an admin or the user themselves may view this record",
+        ));
+    }
+    Ok(Json(UserRecord::from(&user)))
+}
+
+async fn patch_user(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(name): Path<String>,
+    Json(body): Json<PatchUserBody>,
+) -> Result<Json<UserRecord>, ApiError> {
+    require_admin(&auth)?;
+    let user = state
+        .auth()
+        .get_user_by_name(&name)?
+        .ok_or_else(ApiError::not_found)?;
+    let Some(target_admin) = body.is_admin else {
+        // Nothing to patch right now — only `is_admin` is supported. A
+        // body with no recognised fields is a 400 so callers don't
+        // believe a no-op succeeded.
+        return Err(ApiError::validation(
+            "PATCH body must include `is_admin` (the only mutable field today)",
+        ));
+    };
+    if !target_admin && user.is_admin && state.auth().count_admins()? <= 1 {
+        return Err(ApiError::forbidden(
+            "cannot demote the last admin; promote another user first",
+        ));
+    }
+    let updated = state.auth().set_user_admin(&user.id, target_admin)?;
+    Ok(Json(UserRecord::from(&updated)))
+}
+
+async fn delete_user(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&auth)?;
+    let user = state
+        .auth()
+        .get_user_by_name(&name)?
+        .ok_or_else(ApiError::not_found)?;
+    if user.id == auth.user_id {
+        return Err(ApiError::forbidden(
+            "an admin cannot delete themselves; ask another admin",
+        ));
+    }
+    if user.is_admin && state.auth().count_admins()? <= 1 {
+        return Err(ApiError::forbidden(
+            "cannot delete the last admin; promote another user first",
+        ));
+    }
+    let owned = state.routes().registry().list_routes_by_owner(&user.id)?;
+    if !owned.is_empty() {
+        return Err(ApiError::conflict(format!(
+            "user owns {} route(s); delete them before deleting the user",
+            owned.len()
+        )));
+    }
+    state.auth().delete_user(&user.id)?;
     Ok(StatusCode::NO_CONTENT)
 }

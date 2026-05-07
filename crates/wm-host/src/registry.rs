@@ -254,6 +254,18 @@ impl Registry {
         self.list_routes_internal(&mut bucket)
     }
 
+    /// Routes owned by `owner_id`. Reads the `route:by-owner:{owner_id}`
+    /// index maintained by `create_route` / `delete_route`.
+    pub fn list_routes_by_owner(&self, owner_id: &str) -> Result<Vec<Route>, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let ids = bucket.set_members(&format!("route:by-owner:{owner_id}"))?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(self.read_route(&mut bucket, &id)?);
+        }
+        Ok(out)
+    }
+
     fn list_routes_internal(&self, bucket: &mut Bucket) -> Result<Vec<Route>, RegistryError> {
         let ids = bucket.set_members("route:all")?;
         let mut out = Vec::with_capacity(ids.len());
@@ -543,6 +555,42 @@ mod tests {
             .create_route(sample_new_route(None, "/v1/foo"))
             .unwrap_err();
         assert!(matches!(err, RegistryError::Conflict(_)));
+    }
+
+    #[test]
+    fn list_routes_by_owner_returns_only_callers_routes() {
+        let registry = fresh_registry();
+        let alice = registry
+            .create_route(NewRoute {
+                group: None,
+                methods: vec!["POST".into()],
+                path: "/v1/alice".into(),
+                language: "wasm".into(),
+                bindings_version: "0.1.0".into(),
+                compiled_wasm: b"A".to_vec(),
+                owner_id: "alice".into(),
+            })
+            .unwrap();
+        let _bob = registry
+            .create_route(NewRoute {
+                group: None,
+                methods: vec!["POST".into()],
+                path: "/v1/bob".into(),
+                language: "wasm".into(),
+                bindings_version: "0.1.0".into(),
+                compiled_wasm: b"B".to_vec(),
+                owner_id: "bob".into(),
+            })
+            .unwrap();
+        let alice_routes = registry.list_routes_by_owner("alice").unwrap();
+        assert_eq!(alice_routes.len(), 1);
+        assert_eq!(alice_routes[0].id, alice.id);
+        assert!(registry.list_routes_by_owner("nobody").unwrap().is_empty());
+        // Deleting Alice's route empties her index.
+        registry
+            .delete_route(&alice.group_name, alice.number)
+            .unwrap();
+        assert!(registry.list_routes_by_owner("alice").unwrap().is_empty());
     }
 
     #[test]

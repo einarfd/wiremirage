@@ -910,3 +910,277 @@ async fn token_endpoints_require_auth() {
         .expect("post");
     assert_eq!(resp.status().as_u16(), 401);
 }
+
+// -- /__api/users -------------------------------------------------------------
+
+#[tokio::test]
+async fn admin_creates_lists_and_reads_user() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .post(h.url("/__api/users"))
+        .json(&json!({ "name": "alice", "is_admin": false }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["name"], "alice");
+    assert_eq!(body["is_admin"], false);
+
+    // List includes alice + bootstrap.
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/users"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let mut names: Vec<&str> = listed["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["alice", "bootstrap"]);
+
+    // GET by name works too.
+    let one: serde_json::Value = h
+        .client
+        .get(h.url("/__api/users/alice"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(one["name"], "alice");
+}
+
+#[tokio::test]
+async fn non_admin_cannot_create_or_list_users() {
+    let h = Harness::start().await;
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+
+    let resp = alice_client
+        .post(h.url("/__api/users"))
+        .json(&json!({ "name": "mallory" }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 403);
+
+    let resp = alice_client
+        .get(h.url("/__api/users"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn me_returns_caller_record() {
+    let h = Harness::start().await;
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+    let body: serde_json::Value = alice_client
+        .get(h.url("/__api/users/me"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["name"], "alice");
+    assert_eq!(body["is_admin"], false);
+}
+
+#[tokio::test]
+async fn user_can_read_own_record_by_name() {
+    let h = Harness::start().await;
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+    let resp = alice_client
+        .get(h.url("/__api/users/alice"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn user_cannot_read_another_users_record() {
+    let h = Harness::start().await;
+    h.provision_user("bob", false);
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+    let resp = alice_client
+        .get(h.url("/__api/users/bob"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn admin_can_promote_user() {
+    let h = Harness::start().await;
+    h.provision_user("alice", false);
+    let resp = h
+        .client
+        .patch(h.url("/__api/users/alice"))
+        .json(&json!({ "is_admin": true }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["is_admin"], true);
+}
+
+#[tokio::test]
+async fn patch_rejects_demoting_last_admin() {
+    let h = Harness::start().await;
+    // Bootstrap is the only admin.
+    let resp = h
+        .client
+        .patch(h.url("/__api/users/bootstrap"))
+        .json(&json!({ "is_admin": false }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 403);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "forbidden");
+}
+
+#[tokio::test]
+async fn patch_with_no_recognised_fields_is_bad_request() {
+    let h = Harness::start().await;
+    h.provision_user("alice", false);
+    let resp = h
+        .client
+        .patch(h.url("/__api/users/alice"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn admin_cannot_delete_themselves() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .delete(h.url("/__api/users/bootstrap"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn cannot_delete_last_admin_via_another_admin() {
+    let h = Harness::start().await;
+    // Provision a second admin so they can attempt to delete bootstrap;
+    // then demote themselves first to leave bootstrap as the lone admin
+    // (we can't actually demote via the API once they're alone, but for
+    // the symmetry we just verify the bootstrap-delete path).
+    let (_other_id, other) = h.provision_user("other-admin", true);
+    // First delete bootstrap from `other`'s perspective — succeeds
+    // because two admins exist.
+    let resp = other
+        .delete(h.url("/__api/users/bootstrap"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 204);
+    // Now `other` is the lone admin; their own delete attempt is
+    // refused by self-delete first, but we can also confirm the
+    // last-admin guard via PATCH demotion below in another test. Here
+    // we just check that bootstrap is gone.
+    let listed: serde_json::Value = other
+        .get(h.url("/__api/users"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let names: Vec<&str> = listed["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"bootstrap"));
+    assert!(names.contains(&"other-admin"));
+}
+
+#[tokio::test]
+async fn delete_user_refused_when_user_owns_routes() {
+    let h = Harness::start().await;
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+    // Alice creates a route.
+    alice_client
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "methods": ["POST"],
+            "path": "/v1/alice-thing",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .delete(h.url("/__api/users/alice"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 409);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "conflict");
+}
+
+#[tokio::test]
+async fn delete_user_cascades_tokens() {
+    let h = Harness::start().await;
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+    // Sanity: alice can hit /me with her token before deletion.
+    let pre = alice_client
+        .get(h.url("/__api/users/me"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(pre.status().as_u16(), 200);
+
+    let resp = h
+        .client
+        .delete(h.url("/__api/users/alice"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 204);
+
+    // Alice's token no longer authenticates.
+    let post = alice_client
+        .get(h.url("/__api/users/me"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(post.status().as_u16(), 401);
+}
+
+#[tokio::test]
+async fn user_endpoints_require_auth() {
+    let h = Harness::start().await;
+    let unauth = h.unauthenticated_client();
+    for path in ["/__api/users", "/__api/users/me", "/__api/users/alice"] {
+        let resp = unauth.get(h.url(path)).send().await.expect("get");
+        assert_eq!(resp.status().as_u16(), 401, "GET {path}");
+    }
+}

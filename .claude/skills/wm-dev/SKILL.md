@@ -129,6 +129,19 @@ don't have tokens. The unauthenticated probes `GET /__health` and
   at create time). DELETE requires `route.owner_id == caller || caller.is_admin`;
   unauthorized callers get 403 `forbidden`. PATCH and admin "act on behalf of"
   flows for tokens land later.
+- **User CRUD.** `/__api/users` exposes POST/GET/PATCH/DELETE plus
+  `GET /__api/users/me`. Admin-only for cross-user actions; any authed
+  caller can read their own record (via `me` or `GET /{name}` when
+  `name` is theirs). Three guardrails on destructive ops:
+  (a) an admin **cannot delete themselves** (self-lockout protection),
+  (b) the system **cannot drop below one admin** (refuse last-admin DELETE
+  or PATCH-to-non-admin), (c) a user that **owns routes cannot be deleted** —
+  admins clean up the routes via `/__api/routes/...` first.
+  PATCH today only mutates `is_admin`; rename is deferred (it overlaps
+  with the user-merge operation in the design docs).
+- **Token cascade.** `Auth::delete_user` cascades the user's tokens but
+  does *not* touch their routes — the API layer enforces the
+  refuse-when-owns-routes rule before calling in.
 
 The legacy `WM_INSECURE_NO_AUTH` gate is gone. Don't reintroduce it.
 

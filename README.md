@@ -21,6 +21,8 @@ and TypeScript source (the latter goes through a Node sidecar at
 `compiler/typescript/`). Bearer-token auth gates the `/__api/*` surface;
 mock traffic to user routes stays open by design (SUTs don't have
 tokens). Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup.
+Token and user management live at `/__api/tokens` and `/__api/users`
+(admin-only for cross-user actions; `GET /__api/users/me` for self).
 
 ## Layout
 

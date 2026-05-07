@@ -15,9 +15,8 @@
 //! ADR-0012. We never persist plaintext; only its SHA-256 (hex). Token
 //! authenticate compares hashes.
 //!
-//! Slice 5 scope: bearer-token auth only. OAuth login flow, sessions,
-//! identity linking, and `/__api/users` CRUD all land in a follow-up
-//! slice.
+//! Slice 5 scope: bearer-token auth + user CRUD on top. OAuth login
+//! flow, sessions, and identity linking land in a follow-up slice.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -122,6 +121,74 @@ impl Auth {
         let mut bucket = self.bucket()?;
         self.read_user_by_id(&mut bucket, id)?
             .ok_or(AuthError::NotFound)
+    }
+
+    pub fn get_user_by_name(&self, name: &str) -> Result<Option<User>, AuthError> {
+        let mut bucket = self.bucket()?;
+        self.read_user_by_name(&mut bucket, name)
+    }
+
+    pub fn list_users(&self) -> Result<Vec<User>, AuthError> {
+        let mut bucket = self.bucket()?;
+        let ids = bucket.set_members("user:all")?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(user) = self.read_user_by_id(&mut bucket, &id)? {
+                out.push(user);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Count of users with `is_admin == true`. Used by the API to refuse
+    /// operations that would leave the system with zero admins.
+    pub fn count_admins(&self) -> Result<usize, AuthError> {
+        Ok(self.list_users()?.iter().filter(|u| u.is_admin).count())
+    }
+
+    /// Toggle a user's admin flag. Idempotent — setting to the current
+    /// value is a no-op.
+    pub fn set_user_admin(&self, id: &str, is_admin: bool) -> Result<User, AuthError> {
+        let mut bucket = self.bucket()?;
+        let mut user = self
+            .read_user_by_id(&mut bucket, id)?
+            .ok_or(AuthError::NotFound)?;
+        user.is_admin = is_admin;
+        bucket.hash_set(
+            &format!("user:{}", user.id),
+            "is_admin",
+            if is_admin { b"1" } else { b"0" }.to_vec(),
+        )?;
+        Ok(user)
+    }
+
+    /// Delete a user and cascade-delete every token they own. Routes
+    /// they own are left untouched — the API layer is expected to refuse
+    /// the delete upstream when `list_routes_by_owner` is non-empty.
+    pub fn delete_user(&self, id: &str) -> Result<(), AuthError> {
+        let mut bucket = self.bucket()?;
+        let user = self
+            .read_user_by_id(&mut bucket, id)?
+            .ok_or(AuthError::NotFound)?;
+
+        // Cascade tokens. `revoke_token_by_name` rebuilds the bucket
+        // each call (cheap on the in-memory backend, one connection
+        // per call on Valkey); for the per-user counts we expect this
+        // is fine. If user-delete becomes hot, push the loop into a
+        // single bucket borrow.
+        let token_ids = bucket.set_members(&format!("token:by-owner:{}", user.id))?;
+        for token_id in token_ids {
+            if let Some(token) = self.read_token_by_id(&mut bucket, &token_id)? {
+                self.delete_token(&mut bucket, &token)?;
+            }
+        }
+
+        bucket.delete(&format!("user:by-name:{}", user.name))?;
+        bucket.set_remove("user:all", &user.id)?;
+        for field in ["id", "name", "is_admin", "created_at"] {
+            bucket.hash_delete(&format!("user:{}", user.id), field)?;
+        }
+        Ok(())
     }
 
     fn read_user_by_id(&self, bucket: &mut Bucket, id: &str) -> Result<Option<User>, AuthError> {
@@ -590,5 +657,70 @@ mod tests {
         auth.create_token(&user.id, "ci", None).unwrap();
         let err = auth.create_token(&user.id, "ci", None).unwrap_err();
         assert!(matches!(err, AuthError::NameTaken(_)));
+    }
+
+    #[test]
+    fn list_users_returns_all_users() {
+        let auth = fresh();
+        auth.bootstrap_admin("bootstrap", "wmt_b").unwrap();
+        auth.create_user("alice", false).unwrap();
+        auth.create_user("bob", true).unwrap();
+        let mut names: Vec<String> = auth
+            .list_users()
+            .unwrap()
+            .into_iter()
+            .map(|u| u.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["alice", "bob", "bootstrap"]);
+    }
+
+    #[test]
+    fn count_admins_only_includes_admins() {
+        let auth = fresh();
+        auth.bootstrap_admin("bootstrap", "wmt_b").unwrap();
+        auth.create_user("alice", false).unwrap();
+        auth.create_user("bob", true).unwrap();
+        assert_eq!(auth.count_admins().unwrap(), 2);
+    }
+
+    #[test]
+    fn set_user_admin_toggles_flag() {
+        let auth = fresh();
+        let alice = auth.create_user("alice", false).unwrap();
+        assert!(!alice.is_admin);
+        let promoted = auth.set_user_admin(&alice.id, true).unwrap();
+        assert!(promoted.is_admin);
+        assert!(auth.get_user_by_id(&alice.id).unwrap().is_admin);
+        let demoted = auth.set_user_admin(&alice.id, false).unwrap();
+        assert!(!demoted.is_admin);
+    }
+
+    #[test]
+    fn delete_user_cascades_tokens() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let alice = auth.get_user_by_name("alice").unwrap().unwrap();
+        let (_t1, t1_plain) = auth.create_token(&alice.id, "extra", None).unwrap();
+        // Both the bootstrap token and the extra token should authenticate.
+        assert!(auth.authenticate("wmt_alice").unwrap().is_some());
+        assert!(auth.authenticate(&t1_plain).unwrap().is_some());
+
+        auth.delete_user(&alice.id).unwrap();
+
+        // User is gone.
+        assert!(auth.get_user_by_name("alice").unwrap().is_none());
+        // All of the user's tokens stop authenticating.
+        assert!(auth.authenticate("wmt_alice").unwrap().is_none());
+        assert!(auth.authenticate(&t1_plain).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_user_unknown_id_is_not_found() {
+        let auth = fresh();
+        let err = auth
+            .delete_user("01HZZZZZZZZZZZZZZZZZZZZZZZZZ")
+            .unwrap_err();
+        assert!(matches!(err, AuthError::NotFound));
     }
 }

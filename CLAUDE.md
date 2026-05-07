@@ -21,8 +21,10 @@ through a separate Node sidecar at `compiler/typescript/`
 `/__api/*` surface is gated by bearer-token auth (bootstrap via
 `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup); mock traffic to user
 routes stays open by design. Public probes: `GET /__health`,
-`GET /__ready`. Token CRUD lives at `/__api/tokens`; routes carry
-`owner_id` and DELETE checks owner-or-admin.
+`GET /__ready`. Token CRUD lives at `/__api/tokens`; user CRUD lives
+at `/__api/users` (admin-only for cross-user actions, plus
+`GET /__api/users/me` for any authed caller). Routes carry `owner_id`
+and DELETE checks owner-or-admin.
 
 ## Where the design lives
 
