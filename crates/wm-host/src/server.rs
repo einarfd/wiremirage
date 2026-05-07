@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri};
-use axum::response::Response;
-use axum::routing::any;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{any, get};
 use http::header;
+use serde_json::json;
 
 use crate::Runtime;
 use crate::bindings::wiremirage::handler::http::{Header, Request as WitRequest};
@@ -23,6 +25,7 @@ const RESERVED_EXACT: &[&str] = &["/__health", "/__ready", "/__api", "/__ui", "/
 pub struct AppState {
     runtime: Arc<Runtime>,
     routes: Arc<RouteTable>,
+    auth: crate::auth::Auth,
     /// Optional compiler-sidecar client. `None` means the host hasn't
     /// been configured with `WM_COMPILER_URL`; source-based POSTs to
     /// `/__api/routes` are rejected with `compile_failed` in that case.
@@ -30,10 +33,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(runtime: Arc<Runtime>, routes: Arc<RouteTable>) -> Self {
+    pub fn new(runtime: Arc<Runtime>, routes: Arc<RouteTable>, auth: crate::auth::Auth) -> Self {
         Self {
             runtime,
             routes,
+            auth,
             compiler: None,
         }
     }
@@ -51,6 +55,10 @@ impl AppState {
         &self.routes
     }
 
+    pub fn auth(&self) -> &crate::auth::Auth {
+        &self.auth
+    }
+
     pub fn compiler(&self) -> Option<&crate::compiler::CompilerClient> {
         self.compiler.as_ref()
     }
@@ -61,8 +69,53 @@ impl AppState {
 /// prefixes (e.g., `/__api/typo`) with 404 before consulting user routes.
 pub fn router(state: AppState) -> Router {
     crate::api::router()
+        .route("/__health", get(health))
+        .route("/__ready", get(ready))
         .fallback(any(dispatch))
         .with_state(state)
+}
+
+const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Liveness probe. Public, unauthenticated. Always 200 as long as the
+/// process can answer at all — orchestrators use this to decide whether to
+/// restart the container.
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "ok",
+        "version": HOST_VERSION,
+    }))
+}
+
+/// Readiness probe. Public, unauthenticated. Reports per-dependency status:
+/// `valkey` always reports for the configured backend (in-memory is
+/// trivially "ok"); `compiler` is "not_configured" when no sidecar URL is
+/// set. Returns 503 if any dependency is configured but unreachable.
+async fn ready(State(state): State<AppState>) -> Response {
+    let valkey = match state.runtime().storage().ping() {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("unreachable: {e}"),
+    };
+    let compiler = match state.compiler() {
+        None => "not_configured".to_string(),
+        Some(client) => match client.ping().await {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("unreachable: {e}"),
+        },
+    };
+    let healthy = valkey == "ok" && (compiler == "ok" || compiler == "not_configured");
+    let status = if healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = json!({
+        "status": if healthy { "ready" } else { "not_ready" },
+        "valkey": valkey,
+        "compiler": compiler,
+        "version": HOST_VERSION,
+    });
+    (status, Json(body)).into_response()
 }
 
 pub fn is_reserved_path(path: &str) -> bool {

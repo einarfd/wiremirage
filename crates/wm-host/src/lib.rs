@@ -5,6 +5,7 @@
 //! wasmtime, the slice-1 hardcoded-component axum server.
 
 pub mod api;
+pub mod auth;
 pub mod bindings;
 pub mod compiler;
 pub mod host_state;

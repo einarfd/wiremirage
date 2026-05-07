@@ -16,6 +16,7 @@ use std::sync::{Arc, OnceLock};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage};
+use wm_host::auth::Auth;
 use wm_host::bindings::wiremirage::handler::http::Request as WitRequest;
 use wm_host::registry::{NewRoute, Registry};
 use wm_host::route_table::RouteTable;
@@ -82,6 +83,9 @@ wm_host::storage_cases!(decl_cases);
 #[tokio::test]
 async fn counter_persists_across_requests_via_http() {
     let storage = Storage::valkey(&shared().url).expect("connect to valkey");
+    let auth = Auth::new(storage.clone());
+    auth.bootstrap_admin("bootstrap", "wmt_test")
+        .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let registry = Arc::new(Registry::new(storage));
     let route = registry
@@ -92,11 +96,12 @@ async fn counter_persists_across_requests_via_http() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: counter_bytes(),
+            owner_id: "test-owner".into(),
         })
         .expect("create route");
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
-    let app = router(AppState::new(runtime, routes));
+    let app = router(AppState::new(runtime, routes, auth));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

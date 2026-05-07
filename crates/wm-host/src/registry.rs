@@ -61,6 +61,9 @@ pub struct Route {
     #[serde(with = "serde_bytes")]
     pub compiled_wasm: Vec<u8>,
     pub created_at: DateTime<Utc>,
+    /// User ULID of the caller that created the route. DELETE/PATCH require
+    /// the caller to match this id (or to be admin).
+    pub owner_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +85,8 @@ pub struct NewRoute {
     pub language: String,
     pub bindings_version: String,
     pub compiled_wasm: Vec<u8>,
+    /// User ULID of the caller creating this route.
+    pub owner_id: String,
 }
 
 /// Slug rendering: `{group_name}/{number}`.
@@ -209,6 +214,7 @@ impl Registry {
             bindings_version: params.bindings_version,
             compiled_wasm: params.compiled_wasm,
             created_at: Utc::now(),
+            owner_id: params.owner_id,
         };
 
         // Write the record + indexes.
@@ -219,6 +225,7 @@ impl Registry {
         )?;
         bucket.set_add(&format!("route:in-group:{}", group.id), &route_id)?;
         bucket.set_add("route:all", &route_id)?;
+        bucket.set_add(&format!("route:by-owner:{}", route.owner_id), &route_id)?;
         for method in &route.methods {
             bucket.set(
                 &format!("route:by-method-path:{method}:{}", route.path),
@@ -279,6 +286,7 @@ impl Registry {
         ))?;
         bucket.set_remove(&format!("route:in-group:{}", route.group_id), &route_id)?;
         bucket.set_remove("route:all", &route_id)?;
+        bucket.set_remove(&format!("route:by-owner:{}", route.owner_id), &route_id)?;
         // Finally the record itself.
         for field in [
             "id",
@@ -291,6 +299,7 @@ impl Registry {
             "bindings_version",
             "compiled_wasm",
             "created_at",
+            "owner_id",
         ] {
             bucket.hash_delete(&format!("route:{route_id}"), field)?;
         }
@@ -354,6 +363,7 @@ fn write_route(bucket: &mut Bucket, route: &Route) -> Result<(), RegistryError> 
         "created_at",
         route.created_at.to_rfc3339().into_bytes(),
     )?;
+    bucket.hash_set(&key, "owner_id", route.owner_id.as_bytes().to_vec())?;
     Ok(())
 }
 
@@ -388,6 +398,7 @@ fn decode_route(fields: &HashMap<String, Vec<u8>>) -> Result<Route, RegistryErro
             .cloned()
             .ok_or_else(|| RegistryError::Malformed("compiled_wasm missing".into()))?,
         created_at: parse_ts(&utf8(fields, "created_at")?)?,
+        owner_id: utf8(fields, "owner_id")?,
     })
 }
 
@@ -450,6 +461,7 @@ mod tests {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            owner_id: "test-owner".into(),
         }
     }
 
@@ -550,6 +562,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"B".to_vec(),
+                owner_id: "test-owner".into(),
             })
             .unwrap();
         assert_eq!(r1.number, 1);
@@ -564,6 +577,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"C".to_vec(),
+                owner_id: "test-owner".into(),
             })
             .unwrap();
         assert_eq!(r3.number, 3, "deleted number must not be reused");

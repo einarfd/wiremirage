@@ -85,6 +85,27 @@ impl CompilerClient {
         &self.base_url
     }
 
+    /// Probe `GET /health` on the sidecar with a short timeout. Used by the
+    /// host's `/__ready` endpoint — only checks reachability, not language
+    /// support.
+    pub async fn ping(&self) -> Result<(), CompilerError> {
+        let url = format!("{}/health", self.base_url.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .map_err(|e| CompilerError::Network(format!("{e}")))?;
+        if !response.status().is_success() {
+            return Err(CompilerError::BadResponse(format!(
+                "health returned {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn compile(
         &self,
         language: &str,

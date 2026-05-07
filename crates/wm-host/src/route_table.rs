@@ -131,6 +131,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"FAKE".to_vec(),
+                owner_id: "test-owner".into(),
             })
             .unwrap();
         table.refresh_after_create(route.clone());

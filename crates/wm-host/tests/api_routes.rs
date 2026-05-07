@@ -13,10 +13,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use reqwest::Client;
 use serde_json::json;
+use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
+
+const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
 
 const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
 const COUNTER_COMPONENT_PATH: &str = env!("WM_FIXTURE_COUNTER_HANDLER_COMPONENT");
@@ -32,6 +35,7 @@ fn counter_b64() -> String {
 struct Harness {
     addr: String,
     client: Client,
+    auth: Auth,
     server: tokio::task::JoinHandle<()>,
     mock_compiler: Option<tokio::task::JoinHandle<()>>,
 }
@@ -107,10 +111,13 @@ impl Harness {
 
     async fn start_with_compiler(compiler: Option<CompilerClient>) -> Self {
         let storage = Storage::in_memory();
+        let auth = Auth::new(storage.clone());
+        auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
+            .expect("bootstrap admin");
         let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
         let registry = Arc::new(Registry::new(storage));
         let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-        let mut state = AppState::new(runtime, routes);
+        let mut state = AppState::new(runtime, routes, auth.clone());
         if let Some(c) = compiler {
             state = state.with_compiler(c);
         }
@@ -125,12 +132,52 @@ impl Harness {
             axum::serve(listener, app).await.expect("axum::serve");
         });
 
+        // Default reqwest client carries the bootstrap admin token; tests
+        // that want to drive auth-failure cases construct their own client
+        // via `Harness::unauthenticated_client` etc.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {BOOTSTRAP_TOKEN}")).unwrap(),
+        );
+        let client = Client::builder()
+            .default_headers(headers)
+            .build()
+            .expect("build client");
+
         Harness {
             addr,
-            client: Client::new(),
+            client,
+            auth,
             server,
             mock_compiler: None,
         }
+    }
+
+    /// Reqwest client with no Authorization header — for testing 401 paths.
+    fn unauthenticated_client(&self) -> Client {
+        Client::new()
+    }
+
+    /// Provision an additional non-admin user with one token, and return a
+    /// reqwest client carrying that token in the default Authorization
+    /// header. Used to drive ownership-check tests.
+    fn provision_user(&self, name: &str, is_admin: bool) -> (String, Client) {
+        let user = self.auth.create_user(name, is_admin).expect("create user");
+        let (_token, plaintext) = self
+            .auth
+            .create_token(&user.id, "default", None)
+            .expect("create token");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {plaintext}")).unwrap(),
+        );
+        let client = Client::builder()
+            .default_headers(headers)
+            .build()
+            .expect("build client");
+        (user.id, client)
     }
 
     fn url(&self, path: &str) -> String {
@@ -391,6 +438,85 @@ fn echo_bytes() -> Vec<u8> {
     std::fs::read(env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT")).expect("read echo fixture")
 }
 
+// -- Auth -------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejects_request_without_authorization_header() {
+    let h = Harness::start().await;
+    let resp = h
+        .unauthenticated_client()
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "methods": ["GET"],
+            "path": "/foo",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 401);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn rejects_request_with_bogus_token() {
+    let h = Harness::start().await;
+    let resp = h
+        .unauthenticated_client()
+        .post(h.url("/__api/routes"))
+        .header("authorization", "Bearer wmt_not_a_real_token")
+        .json(&json!({
+            "methods": ["GET"],
+            "path": "/foo",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[tokio::test]
+async fn rejects_non_bearer_scheme() {
+    let h = Harness::start().await;
+    let resp = h
+        .unauthenticated_client()
+        .get(h.url("/__api/routes"))
+        .header("authorization", format!("Basic {BOOTSTRAP_TOKEN}"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[tokio::test]
+async fn mock_traffic_does_not_require_auth() {
+    // SUTs hitting mock routes don't carry tokens. The dispatch handler
+    // (everything not under a reserved prefix) stays open.
+    let h = Harness::start().await;
+    h.create_route_body(json!({
+        "methods": ["GET"],
+        "path": "/v1/anonymous",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+
+    let resp = h
+        .unauthenticated_client()
+        .get(h.url("/v1/anonymous"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
 #[tokio::test]
 async fn rejects_reserved_path() {
     let h = Harness::start().await;
@@ -483,4 +609,304 @@ async fn rejects_pattern_shape_conflict() {
     assert_eq!(resp.status().as_u16(), 409);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], "conflict");
+}
+
+// -- /__api/tokens ------------------------------------------------------------
+
+#[tokio::test]
+async fn create_token_returns_plaintext_then_authenticates() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .post(h.url("/__api/tokens"))
+        .json(&json!({ "name": "ci-runner" }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let plaintext = body["token"].as_str().expect("token field").to_string();
+    assert!(plaintext.starts_with("wmt_"));
+    assert_eq!(body["record"]["name"], "ci-runner");
+
+    // The new token should authenticate on its own — drive a request that
+    // hits an authenticated endpoint with it.
+    let client = Client::new();
+    let listed = client
+        .get(h.url("/__api/tokens"))
+        .header("Authorization", format!("Bearer {plaintext}"))
+        .send()
+        .await
+        .expect("list");
+    assert_eq!(listed.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn list_tokens_returns_callers_tokens() {
+    let h = Harness::start().await;
+    // Bootstrap created a token already; create one more.
+    h.client
+        .post(h.url("/__api/tokens"))
+        .json(&json!({ "name": "extra" }))
+        .send()
+        .await
+        .expect("post");
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/tokens"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let tokens = body["tokens"].as_array().expect("tokens array");
+    assert_eq!(tokens.len(), 2);
+    let names: Vec<&str> = tokens.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"bootstrap"));
+    assert!(names.contains(&"extra"));
+    // No plaintext leaks in list responses.
+    for t in tokens {
+        assert!(
+            t.get("token").is_none(),
+            "list response must not expose plaintext"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_token_by_name() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/tokens"))
+        .json(&json!({ "name": "deploy-bot", "ttl_seconds": 3600 }))
+        .send()
+        .await
+        .expect("post");
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/tokens/deploy-bot"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["name"], "deploy-bot");
+    assert!(body.get("expires_at").is_some());
+}
+
+#[tokio::test]
+async fn delete_token_revokes_it() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .client
+        .post(h.url("/__api/tokens"))
+        .json(&json!({ "name": "throwaway" }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    let plaintext = created["token"].as_str().unwrap().to_string();
+
+    let del = h
+        .client
+        .delete(h.url("/__api/tokens/throwaway"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(del.status().as_u16(), 204);
+
+    // Subsequent uses of the revoked token are 401.
+    let client = Client::new();
+    let resp = client
+        .get(h.url("/__api/tokens"))
+        .header("Authorization", format!("Bearer {plaintext}"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 401);
+
+    // Second DELETE for the same name 404s.
+    let again = h
+        .client
+        .delete(h.url("/__api/tokens/throwaway"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(again.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn create_token_rejects_duplicate_name() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/tokens"))
+        .json(&json!({ "name": "ci" }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .post(h.url("/__api/tokens"))
+        .json(&json!({ "name": "ci" }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 409);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "conflict");
+}
+
+// -- Ownership checks ---------------------------------------------------------
+
+#[tokio::test]
+async fn create_route_records_callers_user_id_as_owner() {
+    let h = Harness::start().await;
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/things",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let owner_id = body["owner_id"].as_str().expect("owner_id field");
+    assert!(!owner_id.is_empty(), "owner_id must not be empty");
+
+    // The owner_id should match the bootstrap user — confirm by listing
+    // and checking the stored value is consistent.
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["routes"][0]["owner_id"], owner_id);
+}
+
+#[tokio::test]
+async fn non_owner_non_admin_cannot_delete_route() {
+    let h = Harness::start().await;
+    // Bootstrap admin creates a route.
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/billing",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
+    let number = create["number"].as_u64().unwrap();
+    let location = format!("/__api/routes/{group}/{number}");
+
+    // A different, non-admin user tries to delete it.
+    let (_user_id, alice_client) = h.provision_user("alice", false);
+    let resp = alice_client
+        .delete(h.url(&location))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 403);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "forbidden");
+
+    // The route is still there — bootstrap can still see it.
+    let show = h.client.get(h.url(&location)).send().await.expect("get");
+    assert_eq!(show.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn admin_can_delete_route_owned_by_someone_else() {
+    let h = Harness::start().await;
+    // Alice (non-admin) creates a route.
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+    let create: serde_json::Value = alice_client
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "methods": ["POST"],
+            "path": "/v1/alice-thing",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
+    let number = create["number"].as_u64().unwrap();
+    let location = format!("/__api/routes/{group}/{number}");
+
+    // Bootstrap (admin) deletes Alice's route.
+    let resp = h
+        .client
+        .delete(h.url(&location))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 204);
+}
+
+#[tokio::test]
+async fn owner_can_delete_their_own_route() {
+    let h = Harness::start().await;
+    let (_alice_id, alice_client) = h.provision_user("alice", false);
+    let create: serde_json::Value = alice_client
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "methods": ["POST"],
+            "path": "/v1/alice-thing-2",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
+    let number = create["number"].as_u64().unwrap();
+    let resp = alice_client
+        .delete(h.url(&format!("/__api/routes/{group}/{number}")))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 204);
+}
+
+#[tokio::test]
+async fn token_endpoints_require_auth() {
+    let h = Harness::start().await;
+    let unauth = h.unauthenticated_client();
+    let resp = unauth
+        .get(h.url("/__api/tokens"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 401);
+    let resp = unauth
+        .post(h.url("/__api/tokens"))
+        .json(&json!({ "name": "x" }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 401);
 }

@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use tracing_subscriber::EnvFilter;
+use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
+
+const BOOTSTRAP_USER_NAME: &str = "bootstrap";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,15 +19,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    require_insecure_no_auth_acknowledgement()?;
     let listen_addr = env::var("WM_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let storage = build_storage()?;
+    let auth = Auth::new(storage.clone());
+    bootstrap_admin_if_requested(&auth)?;
 
     let runtime = Arc::new(Runtime::new(storage.clone())?);
     let registry = Arc::new(Registry::new(storage));
     let routes = RouteTable::warm(registry, runtime.engine().clone())?;
 
-    let mut state = AppState::new(runtime, routes);
+    let mut state = AppState::new(runtime, routes, auth);
     if let Some(compiler) = CompilerClient::from_env() {
         tracing::info!(url = compiler.base_url(), "compiler sidecar configured");
         state = state.with_compiler(compiler);
@@ -45,27 +49,59 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Slice 3 ships without auth: `POST /__api/routes` is fully open. To
-/// prevent that from being deployed by accident, the host refuses to start
-/// unless `WM_INSECURE_NO_AUTH=1` acknowledges the foot-gun. Real bearer-
-/// token auth lands in a follow-up slice; once it does, this gate is
-/// either retired or kept as an opt-in for trusted networks.
-fn require_insecure_no_auth_acknowledgement() -> anyhow::Result<()> {
-    match env::var("WM_INSECURE_NO_AUTH").as_deref() {
-        Ok("1") => {
-            tracing::warn!(
-                "WM_INSECURE_NO_AUTH=1: REST API is open without authentication. \
-                 Do not expose this host to untrusted networks."
-            );
+/// Honour `WM_BOOTSTRAP_TOKEN` on first startup: create an admin user
+/// named `bootstrap` whose token is the supplied plaintext. Idempotent —
+/// subsequent starts with the same env var are no-ops.
+///
+/// The host will start without `WM_BOOTSTRAP_TOKEN` if at least one user
+/// already exists; otherwise it errors so a fresh deployment doesn't
+/// silently come up with no way to authenticate.
+fn bootstrap_admin_if_requested(auth: &Auth) -> anyhow::Result<()> {
+    match env::var("WM_BOOTSTRAP_TOKEN") {
+        Ok(plaintext) if plaintext.is_empty() => Err(anyhow!(
+            "WM_BOOTSTRAP_TOKEN is set but empty. Either supply a non-empty token or unset the variable."
+        )),
+        Ok(plaintext) => {
+            if !plaintext.starts_with("wmt_") {
+                tracing::warn!(
+                    "WM_BOOTSTRAP_TOKEN does not start with `wmt_`; tokens by convention use that prefix"
+                );
+            }
+            let created = auth
+                .bootstrap_admin(BOOTSTRAP_USER_NAME, &plaintext)
+                .map_err(|e| anyhow!("failed to bootstrap admin: {e}"))?;
+            if created {
+                tracing::warn!(
+                    "Bootstrapped admin user {BOOTSTRAP_USER_NAME:?}; the supplied token is now its API token. \
+                     Treat WM_BOOTSTRAP_TOKEN like a credential."
+                );
+            } else {
+                tracing::info!(
+                    "WM_BOOTSTRAP_TOKEN provided but bootstrap user already exists; ignoring \
+                     (rotate via /__api/tokens or by deleting the bootstrap user first)"
+                );
+            }
             Ok(())
         }
-        _ => Err(anyhow!(
-            "WM_INSECURE_NO_AUTH is not set to 1.\n\n  \
-             This build of WireMirage has no authentication on its REST API.\n  \
-             Anyone who can reach the listener can create and delete routes.\n\n  \
-             Set WM_INSECURE_NO_AUTH=1 to acknowledge this and continue, or\n  \
-             wait for the auth slice to land."
-        )),
+        Err(_) => {
+            // No bootstrap token supplied. Fine if some user already
+            // exists (e.g., this is a restart against a populated
+            // backing store); otherwise refuse to start so a fresh
+            // deployment doesn't silently come up with no way to
+            // authenticate.
+            if auth
+                .any_user_exists()
+                .map_err(|e| anyhow!("failed to check user count: {e}"))?
+            {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "no users exist and WM_BOOTSTRAP_TOKEN is not set. \
+                     Set WM_BOOTSTRAP_TOKEN=wmt_<plaintext> on first startup \
+                     to provision an admin user named {BOOTSTRAP_USER_NAME:?}."
+                ))
+            }
+        }
     }
 }
 

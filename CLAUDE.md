@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–4 landed. The WIT contract is live at
+**Status:** slices 1–5 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -17,8 +17,12 @@ in-memory and Valkey backends, and routes are stored in a `Registry` +
 REST API at `/__api/routes` supports POST/GET/DELETE for both
 pre-compiled wasm uploads and TypeScript source — the source path goes
 through a separate Node sidecar at `compiler/typescript/`
-(componentize-js + jco), reachable via `WM_COMPILER_URL`. No real auth
-yet — the host refuses to start without `WM_INSECURE_NO_AUTH=1`.
+(componentize-js + jco), reachable via `WM_COMPILER_URL`. The
+`/__api/*` surface is gated by bearer-token auth (bootstrap via
+`WM_BOOTSTRAP_TOKEN=wmt_...` on first startup); mock traffic to user
+routes stays open by design. Public probes: `GET /__health`,
+`GET /__ready`. Token CRUD lives at `/__api/tokens`; routes carry
+`owner_id` and DELETE checks owner-or-admin.
 
 ## Where the design lives
 
@@ -87,7 +91,7 @@ To run the host with sidecar (for TypeScript handlers):
 
 ```sh
 docker compose up -d   # starts valkey + compiler-typescript
-WM_INSECURE_NO_AUTH=1 \
+WM_BOOTSTRAP_TOKEN=wmt_dev_local \
   WM_STORAGE=redis://localhost:6379 \
   WM_COMPILER_URL=http://localhost:9100 \
   cargo run -p wm-host
@@ -96,27 +100,31 @@ WM_INSECURE_NO_AUTH=1 \
 Or in-memory + no compiler (pre-compiled `language: "wasm"` only):
 
 ```sh
-WM_INSECURE_NO_AUTH=1 WM_STORAGE=memory cargo run -p wm-host
+WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_STORAGE=memory cargo run -p wm-host
 ```
 
 Register a TypeScript route and call it:
 
 ```sh
-curl -X POST localhost:8080/__api/routes -H content-type:application/json \
+curl -X POST localhost:8080/__api/routes \
+  -H 'authorization: Bearer wmt_dev_local' \
+  -H content-type:application/json \
   -d '{
     "methods": ["POST"],
     "path": "/v1/charges",
     "language": "typescript",
     "source": "export function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"
   }'
+# Mock traffic does not need an Authorization header.
 curl -X POST localhost:8080/v1/charges -d '{}'
 ```
 
 Env vars (no silent fallbacks; missing required → fail-fast):
 
 - `WM_STORAGE` (required) — `memory`, `redis://...`, or `rediss://...`
-- `WM_INSECURE_NO_AUTH=1` (required) — acknowledges that the REST API
-  is open without authentication
+- `WM_BOOTSTRAP_TOKEN` (required on first startup, optional on
+  restarts once at least one user exists) — plaintext for the admin
+  user named `bootstrap`. Treat like a credential.
 - `WM_COMPILER_URL` (optional) — URL of the TypeScript sidecar. If
   unset, source-based POSTs return `compile_failed`; pre-compiled
   uploads still work.

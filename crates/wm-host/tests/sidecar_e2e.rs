@@ -15,6 +15,7 @@ use serde_json::json;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage};
+use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
@@ -22,6 +23,20 @@ use wm_host::{AppState, Runtime, Storage, router};
 
 const SIDECAR_IMAGE: &str = "wiremirage/compiler-typescript";
 const SIDECAR_TAG: &str = "dev";
+const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
+
+fn authorized_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {BOOTSTRAP_TOKEN}"))
+            .expect("header value"),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("build client")
+}
 
 async fn start_sidecar() -> (ContainerAsync<GenericImage>, String) {
     let container = GenericImage::new(SIDECAR_IMAGE, SIDECAR_TAG)
@@ -44,10 +59,14 @@ async fn typescript_source_compiles_and_dispatches_end_to_end() {
     let (_container, sidecar_url) = start_sidecar().await;
 
     let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
+        .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let registry = Arc::new(Registry::new(storage));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-    let state = AppState::new(runtime, routes).with_compiler(CompilerClient::new(sidecar_url));
+    let state =
+        AppState::new(runtime, routes, auth).with_compiler(CompilerClient::new(sidecar_url));
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -57,7 +76,7 @@ async fn typescript_source_compiles_and_dispatches_end_to_end() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("axum::serve");
     });
-    let client = reqwest::Client::new();
+    let client = authorized_client();
 
     let source = r#"
         export function handle(req, _route, _group) {
@@ -109,10 +128,14 @@ async fn malformed_typescript_surfaces_diagnostics() {
     let (_container, sidecar_url) = start_sidecar().await;
 
     let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
+        .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let registry = Arc::new(Registry::new(storage));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-    let state = AppState::new(runtime, routes).with_compiler(CompilerClient::new(sidecar_url));
+    let state =
+        AppState::new(runtime, routes, auth).with_compiler(CompilerClient::new(sidecar_url));
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -122,7 +145,7 @@ async fn malformed_typescript_surfaces_diagnostics() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("axum::serve");
     });
-    let client = reqwest::Client::new();
+    let client = authorized_client();
 
     let resp = client
         .post(format!("http://{addr}/__api/routes"))

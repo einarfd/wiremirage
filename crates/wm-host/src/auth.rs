@@ -1,0 +1,594 @@
+//! Authentication via bearer tokens.
+//!
+//! Storage layout per `storage-model.md`:
+//!
+//!   user:{ulid}                          hash with user fields
+//!   user:by-name:{name}                  string -> user ulid
+//!   user:all                             set of all user ulids
+//!
+//!   token:{ulid}                         hash with token fields (incl. hash; never plaintext)
+//!   token:by-hash:{sha256-hex}           string -> token ulid (fast auth lookup)
+//!   token:by-name:{owner_ulid}:{name}    string -> token ulid (revoke by name)
+//!   token:by-owner:{owner_ulid}          set of token ulids
+//!
+//! Token plaintext format `wmt_<base64-no-padding-of-32-random-bytes>` per
+//! ADR-0012. We never persist plaintext; only its SHA-256 (hex). Token
+//! authenticate compares hashes.
+//!
+//! Slice 5 scope: bearer-token auth only. OAuth login flow, sessions,
+//! identity linking, and `/__api/users` CRUD all land in a follow-up
+//! slice.
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use chrono::{DateTime, Duration, Utc};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use ulid::Ulid;
+
+use crate::store::{Bucket, Storage, StoreError};
+
+#[derive(Debug, Error)]
+pub enum AuthError {
+    #[error("storage backend error: {0}")]
+    Storage(#[from] StoreError),
+    #[error("user or token not found")]
+    NotFound,
+    #[error("name already in use: {0}")]
+    NameTaken(String),
+    #[error("malformed record in storage: {0}")]
+    Malformed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct User {
+    pub id: String,
+    pub name: String,
+    pub is_admin: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
+    pub id: String,
+    pub name: String,
+    pub owner_id: String,
+    /// SHA-256 of the plaintext, hex-encoded. Plaintext is never stored.
+    pub hash: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Caller identity resolved from a successful bearer-token check.
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub user_id: String,
+    pub user_name: String,
+    pub is_admin: bool,
+    pub token_id: String,
+}
+
+#[derive(Clone)]
+pub struct Auth {
+    storage: Storage,
+}
+
+impl Auth {
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
+    }
+
+    fn bucket(&self) -> Result<Bucket, AuthError> {
+        Ok(self.storage.admin_bucket()?)
+    }
+
+    // -- Bootstrap --------------------------------------------------------
+
+    /// Idempotently ensure an admin user exists with `name`, owning a
+    /// token derived from the supplied plaintext. Returns `true` if a
+    /// new user was created, `false` if the user already existed.
+    pub fn bootstrap_admin(&self, name: &str, plaintext: &str) -> Result<bool, AuthError> {
+        let mut bucket = self.bucket()?;
+        if let Some(_existing) = self.read_user_by_name(&mut bucket, name)? {
+            return Ok(false);
+        }
+        let user = self.write_new_user(&mut bucket, name, true)?;
+        self.write_new_token(&mut bucket, &user.id, "bootstrap", plaintext, None)?;
+        Ok(true)
+    }
+
+    // -- User CRUD --------------------------------------------------------
+
+    /// Returns `true` if at least one user exists. Used by the host's
+    /// startup gate: a fresh deployment with no bootstrap token has no
+    /// way to authenticate, so we refuse to start in that case.
+    pub fn any_user_exists(&self) -> Result<bool, AuthError> {
+        let mut bucket = self.bucket()?;
+        let ids = bucket.set_members("user:all")?;
+        Ok(!ids.is_empty())
+    }
+
+    pub fn create_user(&self, name: &str, is_admin: bool) -> Result<User, AuthError> {
+        let mut bucket = self.bucket()?;
+        if self.read_user_by_name(&mut bucket, name)?.is_some() {
+            return Err(AuthError::NameTaken(name.to_string()));
+        }
+        self.write_new_user(&mut bucket, name, is_admin)
+    }
+
+    pub fn get_user_by_id(&self, id: &str) -> Result<User, AuthError> {
+        let mut bucket = self.bucket()?;
+        self.read_user_by_id(&mut bucket, id)?
+            .ok_or(AuthError::NotFound)
+    }
+
+    fn read_user_by_id(&self, bucket: &mut Bucket, id: &str) -> Result<Option<User>, AuthError> {
+        let fields = bucket.hash_get_all(&format!("user:{id}"))?;
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(decode_user(&fields)?))
+    }
+
+    fn read_user_by_name(
+        &self,
+        bucket: &mut Bucket,
+        name: &str,
+    ) -> Result<Option<User>, AuthError> {
+        let Some(bytes) = bucket.get(&format!("user:by-name:{name}"))? else {
+            return Ok(None);
+        };
+        let id = String::from_utf8(bytes)
+            .map_err(|_| AuthError::Malformed("user:by-name value".into()))?;
+        self.read_user_by_id(bucket, &id)
+    }
+
+    fn write_new_user(
+        &self,
+        bucket: &mut Bucket,
+        name: &str,
+        is_admin: bool,
+    ) -> Result<User, AuthError> {
+        let user = User {
+            id: Ulid::new().to_string(),
+            name: name.to_string(),
+            is_admin,
+            created_at: Utc::now(),
+        };
+        let key = format!("user:{}", user.id);
+        bucket.hash_set(&key, "id", user.id.as_bytes().to_vec())?;
+        bucket.hash_set(&key, "name", user.name.as_bytes().to_vec())?;
+        bucket.hash_set(
+            &key,
+            "is_admin",
+            if user.is_admin { b"1" } else { b"0" }.to_vec(),
+        )?;
+        bucket.hash_set(
+            &key,
+            "created_at",
+            user.created_at.to_rfc3339().into_bytes(),
+        )?;
+        bucket.set(
+            &format!("user:by-name:{}", user.name),
+            user.id.as_bytes().to_vec(),
+        )?;
+        bucket.set_add("user:all", &user.id)?;
+        Ok(user)
+    }
+
+    // -- Token CRUD --------------------------------------------------------
+
+    /// Create a new token for `owner_id`. Returns the persisted record
+    /// and the plaintext token (only available here — never persisted).
+    pub fn create_token(
+        &self,
+        owner_id: &str,
+        name: &str,
+        ttl_seconds: Option<u64>,
+    ) -> Result<(Token, String), AuthError> {
+        let mut bucket = self.bucket()?;
+        // Owner must exist.
+        if self.read_user_by_id(&mut bucket, owner_id)?.is_none() {
+            return Err(AuthError::NotFound);
+        }
+        // Names are unique per owner.
+        if bucket
+            .get(&format!("token:by-name:{owner_id}:{name}"))?
+            .is_some()
+        {
+            return Err(AuthError::NameTaken(name.to_string()));
+        }
+        let plaintext = generate_plaintext_token();
+        let token = self.write_new_token(&mut bucket, owner_id, name, &plaintext, ttl_seconds)?;
+        Ok((token, plaintext))
+    }
+
+    fn write_new_token(
+        &self,
+        bucket: &mut Bucket,
+        owner_id: &str,
+        name: &str,
+        plaintext: &str,
+        ttl_seconds: Option<u64>,
+    ) -> Result<Token, AuthError> {
+        let hash = sha256_hex(plaintext);
+        let now = Utc::now();
+        let token = Token {
+            id: Ulid::new().to_string(),
+            name: name.to_string(),
+            owner_id: owner_id.to_string(),
+            hash: hash.clone(),
+            created_at: now,
+            last_used_at: None,
+            expires_at: ttl_seconds.map(|s| now + Duration::seconds(s as i64)),
+        };
+        let key = format!("token:{}", token.id);
+        bucket.hash_set(&key, "id", token.id.as_bytes().to_vec())?;
+        bucket.hash_set(&key, "name", token.name.as_bytes().to_vec())?;
+        bucket.hash_set(&key, "owner_id", token.owner_id.as_bytes().to_vec())?;
+        bucket.hash_set(&key, "hash", token.hash.as_bytes().to_vec())?;
+        bucket.hash_set(
+            &key,
+            "created_at",
+            token.created_at.to_rfc3339().into_bytes(),
+        )?;
+        if let Some(ts) = token.expires_at {
+            bucket.hash_set(&key, "expires_at", ts.to_rfc3339().into_bytes())?;
+        }
+
+        bucket.set(
+            &format!("token:by-hash:{hash}"),
+            token.id.as_bytes().to_vec(),
+        )?;
+        bucket.set(
+            &format!("token:by-name:{owner_id}:{name}"),
+            token.id.as_bytes().to_vec(),
+        )?;
+        bucket.set_add(&format!("token:by-owner:{owner_id}"), &token.id)?;
+        Ok(token)
+    }
+
+    /// Look up one of `owner_id`'s tokens by name. Returns `Ok(None)` if
+    /// the owner has no token with that name.
+    pub fn get_token_by_name(
+        &self,
+        owner_id: &str,
+        name: &str,
+    ) -> Result<Option<Token>, AuthError> {
+        let mut bucket = self.bucket()?;
+        let Some(bytes) = bucket.get(&format!("token:by-name:{owner_id}:{name}"))? else {
+            return Ok(None);
+        };
+        let token_id = String::from_utf8(bytes)
+            .map_err(|_| AuthError::Malformed("token:by-name value".into()))?;
+        self.read_token_by_id(&mut bucket, &token_id)
+    }
+
+    pub fn list_tokens_for(&self, owner_id: &str) -> Result<Vec<Token>, AuthError> {
+        let mut bucket = self.bucket()?;
+        let ids = bucket.set_members(&format!("token:by-owner:{owner_id}"))?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(t) = self.read_token_by_id(&mut bucket, &id)? {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn revoke_token_by_name(&self, owner_id: &str, name: &str) -> Result<bool, AuthError> {
+        let mut bucket = self.bucket()?;
+        let Some(bytes) = bucket.get(&format!("token:by-name:{owner_id}:{name}"))? else {
+            return Ok(false);
+        };
+        let token_id = String::from_utf8(bytes)
+            .map_err(|_| AuthError::Malformed("token:by-name value".into()))?;
+        let Some(token) = self.read_token_by_id(&mut bucket, &token_id)? else {
+            return Ok(false);
+        };
+        self.delete_token(&mut bucket, &token)?;
+        Ok(true)
+    }
+
+    fn read_token_by_id(&self, bucket: &mut Bucket, id: &str) -> Result<Option<Token>, AuthError> {
+        let fields = bucket.hash_get_all(&format!("token:{id}"))?;
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(decode_token(&fields)?))
+    }
+
+    fn delete_token(&self, bucket: &mut Bucket, token: &Token) -> Result<(), AuthError> {
+        bucket.delete(&format!("token:by-hash:{}", token.hash))?;
+        bucket.delete(&format!("token:by-name:{}:{}", token.owner_id, token.name))?;
+        bucket.set_remove(&format!("token:by-owner:{}", token.owner_id), &token.id)?;
+        for field in [
+            "id",
+            "name",
+            "owner_id",
+            "hash",
+            "created_at",
+            "expires_at",
+            "last_used_at",
+        ] {
+            bucket.hash_delete(&format!("token:{}", token.id), field)?;
+        }
+        Ok(())
+    }
+
+    // -- Authenticate -----------------------------------------------------
+
+    /// Resolve a plaintext token to an `AuthContext`. Returns `Ok(None)`
+    /// if the token doesn't exist or has expired.
+    pub fn authenticate(&self, plaintext: &str) -> Result<Option<AuthContext>, AuthError> {
+        if !plaintext.starts_with("wmt_") {
+            return Ok(None);
+        }
+        let mut bucket = self.bucket()?;
+        let hash = sha256_hex(plaintext);
+        let Some(token_id_bytes) = bucket.get(&format!("token:by-hash:{hash}"))? else {
+            return Ok(None);
+        };
+        let token_id = String::from_utf8(token_id_bytes)
+            .map_err(|_| AuthError::Malformed("token:by-hash value".into()))?;
+        let Some(token) = self.read_token_by_id(&mut bucket, &token_id)? else {
+            return Ok(None);
+        };
+        if let Some(expires) = token.expires_at
+            && expires < Utc::now()
+        {
+            return Ok(None);
+        }
+        let Some(user) = self.read_user_by_id(&mut bucket, &token.owner_id)? else {
+            return Ok(None);
+        };
+        // Best-effort touch of last_used_at; a failure here is logged but
+        // doesn't block the auth result.
+        let _ = bucket.hash_set(
+            &format!("token:{}", token.id),
+            "last_used_at",
+            Utc::now().to_rfc3339().into_bytes(),
+        );
+        Ok(Some(AuthContext {
+            user_id: user.id,
+            user_name: user.name,
+            is_admin: user.is_admin,
+            token_id: token.id,
+        }))
+    }
+}
+
+// -- Encoding helpers ---------------------------------------------------------
+
+fn generate_plaintext_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    format!("wmt_{}", B64URL.encode(bytes))
+}
+
+fn sha256_hex(s: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    hex::encode(h.finalize())
+}
+
+fn decode_user(fields: &std::collections::HashMap<String, Vec<u8>>) -> Result<User, AuthError> {
+    Ok(User {
+        id: utf8(fields, "id")?,
+        name: utf8(fields, "name")?,
+        is_admin: utf8(fields, "is_admin")? == "1",
+        created_at: parse_ts(&utf8(fields, "created_at")?)?,
+    })
+}
+
+fn decode_token(fields: &std::collections::HashMap<String, Vec<u8>>) -> Result<Token, AuthError> {
+    let expires_at = match fields.get("expires_at") {
+        None => None,
+        Some(b) => {
+            let s = std::str::from_utf8(b)
+                .map_err(|_| AuthError::Malformed("token.expires_at not utf-8".into()))?;
+            Some(parse_ts(s)?)
+        }
+    };
+    let last_used_at = match fields.get("last_used_at") {
+        None => None,
+        Some(b) => {
+            let s = std::str::from_utf8(b)
+                .map_err(|_| AuthError::Malformed("token.last_used_at not utf-8".into()))?;
+            Some(parse_ts(s)?)
+        }
+    };
+    Ok(Token {
+        id: utf8(fields, "id")?,
+        name: utf8(fields, "name")?,
+        owner_id: utf8(fields, "owner_id")?,
+        hash: utf8(fields, "hash")?,
+        created_at: parse_ts(&utf8(fields, "created_at")?)?,
+        last_used_at,
+        expires_at,
+    })
+}
+
+fn utf8(
+    fields: &std::collections::HashMap<String, Vec<u8>>,
+    name: &str,
+) -> Result<String, AuthError> {
+    let bytes = fields
+        .get(name)
+        .ok_or_else(|| AuthError::Malformed(format!("field {name} missing")))?;
+    String::from_utf8(bytes.clone())
+        .map_err(|_| AuthError::Malformed(format!("field {name} not utf-8")))
+}
+
+fn parse_ts(s: &str) -> Result<DateTime<Utc>, AuthError> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| AuthError::Malformed(format!("timestamp: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh() -> Auth {
+        Auth::new(Storage::in_memory())
+    }
+
+    #[test]
+    fn bootstrap_creates_admin_user_first_time() {
+        let auth = fresh();
+        let created = auth.bootstrap_admin("bootstrap", "wmt_test").unwrap();
+        assert!(created);
+        let user = auth
+            .get_user_by_id(
+                &auth
+                    .read_user_by_name(&mut auth.bucket().unwrap(), "bootstrap")
+                    .unwrap()
+                    .unwrap()
+                    .id,
+            )
+            .unwrap();
+        assert!(user.is_admin);
+    }
+
+    #[test]
+    fn bootstrap_is_idempotent() {
+        let auth = fresh();
+        assert!(auth.bootstrap_admin("bootstrap", "wmt_a").unwrap());
+        assert!(!auth.bootstrap_admin("bootstrap", "wmt_a").unwrap());
+        // Idempotent in the sense of "don't re-create"; doesn't overwrite
+        // the existing token even with a different plaintext.
+        assert!(!auth.bootstrap_admin("bootstrap", "wmt_b").unwrap());
+    }
+
+    #[test]
+    fn authenticate_with_correct_token() {
+        let auth = fresh();
+        auth.bootstrap_admin("bootstrap", "wmt_secret").unwrap();
+        let ctx = auth.authenticate("wmt_secret").unwrap().unwrap();
+        assert_eq!(ctx.user_name, "bootstrap");
+        assert!(ctx.is_admin);
+    }
+
+    #[test]
+    fn authenticate_with_wrong_token_returns_none() {
+        let auth = fresh();
+        auth.bootstrap_admin("bootstrap", "wmt_secret").unwrap();
+        assert!(auth.authenticate("wmt_wrong").unwrap().is_none());
+    }
+
+    #[test]
+    fn authenticate_rejects_non_wmt_prefix() {
+        let auth = fresh();
+        auth.bootstrap_admin("bootstrap", "wmt_secret").unwrap();
+        assert!(auth.authenticate("Bearer wmt_secret").unwrap().is_none());
+        assert!(auth.authenticate("plain-secret").unwrap().is_none());
+    }
+
+    #[test]
+    fn create_and_revoke_token() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        let (token, plaintext) = auth.create_token(&user.id, "ci-runner", None).unwrap();
+        assert!(plaintext.starts_with("wmt_"));
+        assert_eq!(token.owner_id, user.id);
+        // Token works.
+        let ctx = auth.authenticate(&plaintext).unwrap().unwrap();
+        assert_eq!(ctx.user_id, user.id);
+        // Revoke and confirm it stops working.
+        assert!(auth.revoke_token_by_name(&user.id, "ci-runner").unwrap());
+        assert!(auth.authenticate(&plaintext).unwrap().is_none());
+        // Idempotent: second revoke returns false.
+        assert!(!auth.revoke_token_by_name(&user.id, "ci-runner").unwrap());
+    }
+
+    #[test]
+    fn token_with_ttl_expires() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        // Negative TTL → already expired.
+        let mut bucket = auth.bucket().unwrap();
+        let token = Token {
+            id: Ulid::new().to_string(),
+            name: "expired".into(),
+            owner_id: user.id.clone(),
+            hash: sha256_hex("wmt_expired"),
+            created_at: Utc::now() - Duration::hours(2),
+            last_used_at: None,
+            expires_at: Some(Utc::now() - Duration::hours(1)),
+        };
+        // Manually write since create_token won't accept past expires_at.
+        let key = format!("token:{}", token.id);
+        bucket
+            .hash_set(&key, "id", token.id.as_bytes().to_vec())
+            .unwrap();
+        bucket
+            .hash_set(&key, "name", token.name.as_bytes().to_vec())
+            .unwrap();
+        bucket
+            .hash_set(&key, "owner_id", token.owner_id.as_bytes().to_vec())
+            .unwrap();
+        bucket
+            .hash_set(&key, "hash", token.hash.as_bytes().to_vec())
+            .unwrap();
+        bucket
+            .hash_set(
+                &key,
+                "created_at",
+                token.created_at.to_rfc3339().into_bytes(),
+            )
+            .unwrap();
+        bucket
+            .hash_set(
+                &key,
+                "expires_at",
+                token.expires_at.unwrap().to_rfc3339().into_bytes(),
+            )
+            .unwrap();
+        bucket
+            .set(
+                &format!("token:by-hash:{}", token.hash),
+                token.id.as_bytes().to_vec(),
+            )
+            .unwrap();
+        assert!(auth.authenticate("wmt_expired").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_tokens_returns_owners_tokens() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        auth.create_token(&user.id, "one", None).unwrap();
+        auth.create_token(&user.id, "two", None).unwrap();
+        let tokens = auth.list_tokens_for(&user.id).unwrap();
+        // 2 created here + 1 from bootstrap = 3.
+        assert_eq!(tokens.len(), 3);
+    }
+
+    #[test]
+    fn create_token_rejects_duplicate_name() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        auth.create_token(&user.id, "ci", None).unwrap();
+        let err = auth.create_token(&user.id, "ci", None).unwrap_err();
+        assert!(matches!(err, AuthError::NameTaken(_)));
+    }
+}

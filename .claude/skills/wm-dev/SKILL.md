@@ -101,17 +101,36 @@ because the WIT directory is COPYed in at image-build time. The `dev`
 tag is a moving target — always rebuild after a WIT change before
 running `just test-sidecar`.
 
-## Auth / WM_INSECURE_NO_AUTH
+## Auth (slice 5)
 
-Slice 3 ships without auth: `POST /__api/routes` is fully open. To prevent
-that from being deployed unintentionally, the host refuses to start unless
-`WM_INSECURE_NO_AUTH=1` is set. Until the auth slice lands, every dev /
-test invocation needs both `WM_STORAGE=...` and `WM_INSECURE_NO_AUTH=1`.
+Bearer tokens gate every `/__api/*` endpoint. Mock-traffic dispatch
+(everything not under a reserved prefix) stays open by design — SUTs
+don't have tokens. The unauthenticated probes `GET /__health` and
+`GET /__ready` are explicitly public.
 
-When auth lands, this gate is either retired or kept as an opt-out for
-trusted networks. **Don't add code paths that bypass the gate** — the
-fail-fast intent is to prevent a deployer from accidentally running an
-open instance.
+- **Bootstrap.** On first startup, set `WM_BOOTSTRAP_TOKEN=wmt_...`. The
+  host creates an admin user named `bootstrap` whose API token is the
+  supplied plaintext. Subsequent starts with the same env var are
+  no-ops; rotate by deleting the bootstrap user or revoking via
+  `/__api/tokens`. The host **refuses to start** if no users exist and
+  `WM_BOOTSTRAP_TOKEN` is unset — this prevents a fresh deployment from
+  silently coming up with no way to authenticate.
+- **Token shape.** Plaintext: `wmt_<base64-url-no-pad-of-32-random-bytes>`,
+  per ADR-0012. Hashed at rest as SHA-256(plaintext); plaintext appears
+  exactly once, in the response to `POST /__api/tokens`.
+- **Test harness.** `crates/wm-host/tests/api_routes.rs` calls
+  `Auth::bootstrap_admin("bootstrap", "wmt_test_bootstrap_token")` and
+  builds a default `reqwest::Client` carrying that token. Tests that
+  drive 401 / 403 paths construct their own clients via
+  `Harness::unauthenticated_client()` or `Harness::provision_user()`.
+  `start_with_seeded_route` in `tests/http_smoke.rs` and the Valkey /
+  sidecar integration tests do the same.
+- **Ownership.** `Route` records carry `owner_id` (set from `auth.user_id`
+  at create time). DELETE requires `route.owner_id == caller || caller.is_admin`;
+  unauthorized callers get 403 `forbidden`. PATCH and admin "act on behalf of"
+  flows for tokens land later.
+
+The legacy `WM_INSECURE_NO_AUTH` gate is gone. Don't reintroduce it.
 
 ## Route table architecture
 

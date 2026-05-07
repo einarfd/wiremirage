@@ -32,6 +32,9 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via

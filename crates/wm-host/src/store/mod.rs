@@ -90,6 +90,23 @@ impl Storage {
         self.bucket_with_prefix(String::new())
     }
 
+    /// Round-trip a no-op against the backend. Always Ok for in-memory;
+    /// for Valkey, performs a `PING`. Used by `/__ready`.
+    pub fn ping(&self) -> Result<(), StoreError> {
+        match self {
+            Storage::InMemory(_) => Ok(()),
+            Storage::Valkey(client) => {
+                let mut conn = client
+                    .get_connection()
+                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
+                let _: String = redis::cmd("PING")
+                    .query(&mut conn)
+                    .map_err(|e| StoreError::Backend(format!("ping: {e}")))?;
+                Ok(())
+            }
+        }
+    }
+
     fn bucket_with_prefix(&self, prefix: String) -> Result<Bucket, StoreError> {
         match self {
             Storage::InMemory(store) => Ok(Bucket::InMemory {

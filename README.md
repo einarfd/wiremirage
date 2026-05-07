@@ -18,8 +18,9 @@ place, the host runs components against it, storage is abstracted behind
 in-memory and Valkey backends, routes are stored in a registry keyed by
 `{group}/{n}`, and the REST API accepts both pre-compiled wasm uploads
 and TypeScript source (the latter goes through a Node sidecar at
-`compiler/typescript/`). No real auth yet — the host requires
-`WM_INSECURE_NO_AUTH=1` to acknowledge that.
+`compiler/typescript/`). Bearer-token auth gates the `/__api/*` surface;
+mock traffic to user routes stays open by design (SUTs don't have
+tokens). Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup.
 
 ## Layout
 
@@ -57,22 +58,33 @@ To run the host with the TypeScript sidecar:
 
 ```
 docker compose up -d   # starts Valkey + compiler-typescript
-WM_INSECURE_NO_AUTH=1 \
+WM_BOOTSTRAP_TOKEN=wmt_dev_local \
   WM_STORAGE=redis://localhost:6379 \
   WM_COMPILER_URL=http://localhost:9100 \
   cargo run -p wm-host
 # In another shell:
-curl -X POST localhost:8080/__api/routes -H content-type:application/json \
+curl -X POST localhost:8080/__api/routes \
+  -H 'authorization: Bearer wmt_dev_local' \
+  -H content-type:application/json \
   -d '{"methods":["POST"],"path":"/v1/charges","language":"typescript",
        "source":"export function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"}'
+# Mock traffic does not need an Authorization header.
 curl -X POST localhost:8080/v1/charges -d '{}'
 ```
+
+The host exposes two unauthenticated probe endpoints for orchestrators:
+`GET /__health` (liveness, always 200) and `GET /__ready` (readiness;
+checks the configured backends).
 
 Required env vars (no silent fallbacks):
 
 - `WM_STORAGE` — `memory`, `redis://host:port[/db]`, or `rediss://...` for TLS.
-- `WM_INSECURE_NO_AUTH=1` — acknowledges that the REST API is open
-  without authentication.
+
+On first startup, set `WM_BOOTSTRAP_TOKEN=wmt_...` to provision an admin
+user named `bootstrap` whose API token is the supplied plaintext. The
+variable is idempotent — set it once, rotate later via `/__api/tokens`.
+The host refuses to start if no users exist and no bootstrap token is
+supplied.
 
 Optional:
 
