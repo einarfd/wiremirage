@@ -2,22 +2,18 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
-use tracing_subscriber::EnvFilter;
 use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
+use wm_host::telemetry;
 use wm_host::{AppState, Runtime, Storage, router};
 
 const BOOTSTRAP_USER_NAME: &str = "bootstrap";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    let mut telemetry_guard = telemetry::init()?;
 
     let listen_addr = env::var("WM_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let storage = build_storage()?;
@@ -45,8 +41,39 @@ async fn main() -> anyhow::Result<()> {
     let local = listener.local_addr()?;
     tracing::info!(addr = %local, "wm-host listening");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Flush in-flight spans before the process exits. The Drop impl
+    // would catch this too, but doing it explicitly surfaces any flush
+    // error in the logs while logging is still wired up.
+    telemetry_guard.shutdown();
     Ok(())
+}
+
+/// Resolves on Ctrl-C or SIGTERM. axum drains in-flight requests, then
+/// `main` returns and the telemetry guard flushes.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl-C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received Ctrl-C, shutting down"),
+        _ = terminate => tracing::info!("received SIGTERM, shutting down"),
+    }
 }
 
 /// Honour `WM_BOOTSTRAP_TOKEN` on first startup: create an admin user

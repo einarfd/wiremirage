@@ -92,6 +92,12 @@ Optional:
 
 - `WM_COMPILER_URL` — sidecar endpoint. Without it, source-based
   requests fail; pre-compiled `language: "wasm"` uploads still work.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — URL of an OTLP/gRPC collector. When
+  set, the host exports spans for the request → handler → backend
+  path; when unset, host logging is stderr-only. The standard
+  `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` env vars are
+  honored. W3C `traceparent` is extracted from incoming requests and
+  injected on outbound calls to the sidecar.
 
 Tier-3 tests require Docker:
 

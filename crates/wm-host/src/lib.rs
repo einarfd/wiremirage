@@ -16,6 +16,7 @@ pub mod route_table;
 pub mod runtime;
 pub mod server;
 pub mod store;
+pub mod telemetry;
 
 /// Handler bindings version this build of the host accepts. Compilers
 /// (sidecar) and pre-compiled-component uploads must declare this exact

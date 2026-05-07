@@ -21,6 +21,10 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
 wasmtime = { workspace = true, features = ["component-model", "runtime", "cranelift"] }
 axum.workspace = true
 http.workspace = true

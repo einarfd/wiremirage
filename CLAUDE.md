@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–5 landed. The WIT contract is live at
+**Status:** slices 1–6 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -130,6 +130,11 @@ Env vars (no silent fallbacks; missing required → fail-fast):
 - `WM_COMPILER_URL` (optional) — URL of the TypeScript sidecar. If
   unset, source-based POSTs return `compile_failed`; pre-compiled
   uploads still work.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (optional) — URL of an OTLP/gRPC
+  collector (e.g. `http://localhost:4317`). When unset, the host logs
+  to stderr only; when set, spans are exported in addition.
+  `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` are honored too
+  (standard OTel SDK behavior).
 
 ## Required tooling
 

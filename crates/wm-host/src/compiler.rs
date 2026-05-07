@@ -7,10 +7,13 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use opentelemetry::global;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::SUPPORTED_BINDINGS_VERSION;
+use crate::telemetry::HeaderInjector;
 
 /// Sidecar HTTP client. Cheap to clone (the inner reqwest client is
 /// internally Arc-backed).
@@ -106,15 +109,31 @@ impl CompilerClient {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "compiler.compile",
+        skip(self, source),
+        fields(compiler.language = language, compiler.source_bytes = source.len()),
+    )]
     pub async fn compile(
         &self,
         language: &str,
         source: &str,
     ) -> Result<CompiledArtifact, CompilerError> {
         let url = format!("{}/compile", self.base_url.trim_end_matches('/'));
+
+        // Inject W3C trace context so the sidecar — once it's
+        // instrumented — can chain its spans under ours. No-op when no
+        // OTel propagator is installed.
+        let mut headers = reqwest::header::HeaderMap::new();
+        let cx = tracing::Span::current().context();
+        global::get_text_map_propagator(|prop| {
+            prop.inject_context(&cx, &mut HeaderInjector(&mut headers))
+        });
+
         let response = self
             .http
             .post(&url)
+            .headers(headers)
             .json(&CompileRequest { language, source })
             .send()
             .await

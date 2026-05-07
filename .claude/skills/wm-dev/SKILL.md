@@ -145,6 +145,37 @@ don't have tokens. The unauthenticated probes `GET /__health` and
 
 The legacy `WM_INSECURE_NO_AUTH` gate is gone. Don't reintroduce it.
 
+## Observability (slice 6)
+
+OTel via the standard OTLP/gRPC exporter, opt-in. The host always logs
+JSON to stderr; OTel spans flow only when `OTEL_EXPORTER_OTLP_ENDPOINT`
+is set. There is no localhost:4317 fallback — operators who don't run a
+collector get a clean stderr-only experience.
+
+- **Init.** `wm_host::telemetry::init()` builds the layered subscriber
+  and returns a `TelemetryGuard` that the binary's `main` holds for the
+  process lifetime. Drop / `shutdown()` flushes in-flight spans; `main`
+  hooks SIGTERM/Ctrl-C so the last batch reaches the collector.
+- **What's instrumented.** `dispatch_inner` (the request entry span,
+  fields: `http.method`, `route.matched_pattern`, `route.id`,
+  `outcome`); `wasmtime.instantiate` + `wasmtime.call_handle` as
+  children of dispatch; `Auth::authenticate`; `Registry::create_route`
+  / `delete_route`; `CompilerClient::compile`. **Avoid** putting the
+  raw URL `path` in span attributes — path-param values explode
+  cardinality. Use `route.matched_pattern` instead.
+- **Propagation.** W3C `traceparent` is extracted from incoming axum
+  headers (`HeaderExtractor` adapter) and applied as the dispatch
+  span's parent. Outbound sidecar calls inject `traceparent` via
+  `HeaderInjector` so the sidecar — once instrumented — chains under
+  our span. Both adapters live in `telemetry.rs`.
+- **What's not in slice 6.** Metrics (request count, latency
+  histogram, fuel) are deferred until we feel the lack. Sidecar OTel
+  is out of scope — it's a slim Hono app whose latency is dominated
+  by the actual compile work, which our compile span already times
+  end-to-end. The per-request *journal* in Valkey (agent-debugging
+  surface) is its own future slice; OTel and the journal are
+  complementary, not redundant.
+
 ## Route table architecture
 
 Three layers in `wm-host`:

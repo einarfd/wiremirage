@@ -8,11 +8,14 @@ use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use http::header;
+use opentelemetry::global;
 use serde_json::json;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::Runtime;
 use crate::bindings::wiremirage::handler::http::{Header, Request as WitRequest};
 use crate::route_table::RouteTable;
+use crate::telemetry::HeaderExtractor;
 
 /// Path prefixes the host owns; user routes can never claim them. Requests
 /// that don't match any actual host endpoint under these prefixes return
@@ -132,10 +135,34 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     }
 }
 
+// Span fields kept low-cardinality on purpose: `http.method` and
+// `route.matched_pattern` are bounded; the raw URL path with path-param
+// values is deliberately omitted so OTel attribute cardinality stays
+// finite. `route.id` is recorded after a match so a span can be located
+// by route ULID, but it's only on matched-route spans.
+#[tracing::instrument(
+    name = "dispatch",
+    skip_all,
+    fields(
+        http.method = %req.method(),
+        route.matched_pattern = tracing::field::Empty,
+        route.id = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    ),
+)]
 async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Response> {
+    let span = tracing::Span::current();
     let method = req.method().clone();
     let uri = req.uri().clone();
     let header_map = req.headers().clone();
+
+    // Adopt the upstream W3C trace context, if present, as our span's
+    // parent. No-op when nothing is configured (the propagator returns
+    // an empty Context) or when the headers carry no traceparent.
+    let parent_cx =
+        global::get_text_map_propagator(|prop| prop.extract(&HeaderExtractor(&header_map)));
+    let _ = span.set_parent(parent_cx);
+
     let body_bytes = read_body(req.into_body()).await?;
 
     let path = uri.path();
@@ -144,13 +171,20 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // mounts /__api/* here) takes precedence; if nothing else matched, a
     // request under a reserved prefix is a typo, not mock traffic.
     if is_reserved_path(path) {
+        span.record("outcome", "reserved_path_404");
         return Ok(not_found_response("reserved path"));
     }
 
     let matched = match state.routes.find_match(method.as_str(), path) {
         Some(m) => m,
-        None => return Ok(not_found_response("no route matched")),
+        None => {
+            span.record("outcome", "unmatched_404");
+            return Ok(not_found_response("no route matched"));
+        }
     };
+
+    span.record("route.matched_pattern", &matched.matched_pattern);
+    span.record("route.id", &matched.route.id);
 
     let component = state.routes.component_for(&matched.route)?;
     let wit_request = build_wit_request(
@@ -166,13 +200,23 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let group_id = matched.route.group_id.clone();
     let route_id = matched.route.id.clone();
 
+    // spawn_blocking moves out of the async task's tracing context, so
+    // capture the current span and re-enter it inside the closure to
+    // keep the wasmtime spans children of the dispatch span.
+    let parent_span = tracing::Span::current();
     let wit_response = tokio::task::spawn_blocking(move || {
+        let _enter = parent_span.enter();
+        let instantiate_span =
+            tracing::info_span!("wasmtime.instantiate", route.id = %route_id).entered();
         let (handler, mut store, handles) =
             runtime.instantiate(&component, &group_id, &route_id)?;
+        drop(instantiate_span);
+        let _call = tracing::info_span!("wasmtime.call_handle", route.id = %route_id).entered();
         handler.call_handle(&mut store, &wit_request, handles.route, handles.group)
     })
     .await??;
 
+    span.record("outcome", "ok");
     Ok(build_axum_response(wit_response))
 }
 

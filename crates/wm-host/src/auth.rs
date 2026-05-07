@@ -389,6 +389,7 @@ impl Auth {
 
     /// Resolve a plaintext token to an `AuthContext`. Returns `Ok(None)`
     /// if the token doesn't exist or has expired.
+    #[tracing::instrument(name = "auth.authenticate", skip_all)]
     pub fn authenticate(&self, plaintext: &str) -> Result<Option<AuthContext>, AuthError> {
         if !plaintext.starts_with("wmt_") {
             return Ok(None);

@@ -158,6 +158,11 @@ impl Registry {
 
     // -- Route operations --------------------------------------------------
 
+    #[tracing::instrument(
+        name = "registry.create_route",
+        skip_all,
+        fields(route.path = %params.path, route.owner_id = %params.owner_id),
+    )]
     pub fn create_route(&self, params: NewRoute) -> Result<Route, RegistryError> {
         // Validate inputs before touching storage.
         let new_pattern = Pattern::parse(&params.path)?;
@@ -275,6 +280,11 @@ impl Registry {
         Ok(out)
     }
 
+    #[tracing::instrument(
+        name = "registry.delete_route",
+        skip_all,
+        fields(route.slug = format!("{group_ref}/{number}")),
+    )]
     pub fn delete_route(&self, group_ref: &str, number: u32) -> Result<(), RegistryError> {
         let mut bucket = self.bucket()?;
         let group_id = self
