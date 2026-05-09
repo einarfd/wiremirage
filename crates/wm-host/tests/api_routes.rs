@@ -1355,6 +1355,91 @@ async fn trace_id_is_stamped_from_inbound_traceparent() {
 }
 
 #[tokio::test]
+async fn response_carries_x_trace_id_back_to_sut() {
+    let h = Harness::start().await;
+    h.create_route_body(json!({
+        "methods": ["POST"],
+        "path": "/v1/echo",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+
+    let trace_id = "0123456789abcdef0123456789abcdef";
+    let inbound = format!("00-{trace_id}-aaaaaaaaaaaaaaaa-01");
+    let unauth = Client::new();
+    let resp = unauth
+        .post(h.url("/v1/echo"))
+        .header("traceparent", &inbound)
+        .body("{}")
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let outbound = resp
+        .headers()
+        .get("x-trace-id")
+        .expect("response carries X-Trace-Id")
+        .to_str()
+        .expect("ascii");
+    // Same trace_id the SUT sent in `traceparent`. We don't echo
+    // `traceparent` itself because W3C only specifies that header on
+    // the request side; X-Trace-Id is honest about being a correlation
+    // hint, not a propagation primitive.
+    assert_eq!(outbound, trace_id);
+}
+
+#[tokio::test]
+async fn unmatched_response_carries_x_trace_id() {
+    let h = Harness::start().await;
+    let trace_id = "0123456789abcdef0123456789abcdef";
+    let inbound = format!("00-{trace_id}-aaaaaaaaaaaaaaaa-01");
+    let unauth = Client::new();
+    let resp = unauth
+        .get(h.url("/no-such"))
+        .header("traceparent", &inbound)
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+    let outbound = resp
+        .headers()
+        .get("x-trace-id")
+        .expect("response carries X-Trace-Id on unmatched too")
+        .to_str()
+        .unwrap();
+    assert_eq!(outbound, trace_id);
+}
+
+#[tokio::test]
+async fn response_without_inbound_traceparent_has_no_x_trace_id() {
+    let h = Harness::start().await;
+    h.create_route_body(json!({
+        "methods": ["POST"],
+        "path": "/v1/no-trace",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+    let unauth = Client::new();
+    let resp = unauth
+        .post(h.url("/v1/no-trace"))
+        .body("{}")
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(
+        resp.headers().get("x-trace-id").is_none(),
+        "host should not manufacture an X-Trace-Id when no inbound traceparent was present"
+    );
+    // And no spurious `traceparent` either.
+    assert!(resp.headers().get("traceparent").is_none());
+}
+
+#[tokio::test]
 async fn cursor_pagination_round_trips() {
     let h = Harness::start().await;
     let group = seed_one_request(&h).await;

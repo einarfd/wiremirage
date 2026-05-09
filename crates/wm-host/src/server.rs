@@ -181,7 +181,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
 
     // Adopt the upstream W3C trace context, if present, as our span's
     // parent. No-op when nothing is configured (the propagator returns
-    // an empty Context) or when the headers carry no traceparent.
+    // an empty Context) or when the headers carry no traceparent. We
+    // keep `trace_id` separately so we can stamp it on the journal
+    // record AND set `X-Trace-Id` on the response — both work even when
+    // no OTel exporter is active.
     let parent_cx =
         global::get_text_map_propagator(|prop| prop.extract(&HeaderExtractor(&header_map)));
     let trace_id = extract_trace_id(&parent_cx);
@@ -198,7 +201,9 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // unmatched log; if operators want them, they're in stderr/OTel).
     if is_reserved_path(path) {
         span.record("outcome", "reserved_path_404");
-        return Ok(not_found_response("reserved path"));
+        let mut resp = not_found_response("reserved path");
+        inject_response_trace_id(&trace_id, resp.headers_mut());
+        return Ok(resp);
     }
 
     let matched = match state.routes.find_match(method.as_str(), path) {
@@ -220,7 +225,9 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             }) {
                 tracing::warn!(error = %e, "failed to record unmatched journal entry");
             }
-            return Ok(not_found_response("no route matched"));
+            let mut resp = not_found_response("no route matched");
+            inject_response_trace_id(&trace_id, resp.headers_mut());
+            return Ok(resp);
         }
     };
 
@@ -329,7 +336,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // Best-effort journal write: a failure here is logged but doesn't
     // change what the SUT sees.
     let entry = NewJournalEntry {
-        trace_id,
+        trace_id: trace_id.clone(),
         group_id: matched.route.group_id.clone(),
         group_name: matched.route.group_name.clone(),
         route_id: matched.route.id.clone(),
@@ -349,7 +356,30 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         tracing::warn!(error = %e, "failed to record journal entry");
     }
 
+    let mut axum_response = axum_response;
+    inject_response_trace_id(&trace_id, axum_response.headers_mut());
     Ok(axum_response)
+}
+
+/// Set `X-Trace-Id` to the inbound trace_id so the SUT can correlate
+/// request <-> response by grepping its own logs without an external
+/// trace store. No-op when no inbound `traceparent` was present — the
+/// host doesn't manufacture one.
+///
+/// Why a custom header rather than echoing `traceparent` back? W3C
+/// Trace Context only specifies `traceparent` on the request side; the
+/// response-side `traceresponse` proposal is still draft and not
+/// widely supported. Echoing `traceparent` would be a layering misuse
+/// (semantically it claims to be a parent of a downstream span). A
+/// plain `X-Trace-Id` is honest about being a correlation hint, not a
+/// propagation primitive. If `traceresponse` finalizes, swap it in.
+fn inject_response_trace_id(trace_id: &Option<String>, headers: &mut HeaderMap) {
+    let Some(tid) = trace_id else {
+        return;
+    };
+    if let Ok(value) = http::HeaderValue::from_str(tid) {
+        headers.insert(HeaderName::from_static("x-trace-id"), value);
+    }
 }
 
 /// Pull the W3C trace_id out of an OTel context, returning the
