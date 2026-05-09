@@ -185,6 +185,27 @@ impl Bucket {
         }
     }
 
+    /// Set a TTL (in seconds) on `key`. No-op for the in-memory backend
+    /// because tests don't need wall-clock-driven expiry; the journal /
+    /// session lifecycles fall back to manual cleanup or the natural
+    /// end of the test process. Valkey runs `EXPIRE`. The key must
+    /// already exist; `EXPIRE` on a missing key returns 0 in Valkey
+    /// and is silently ignored here.
+    pub fn set_ttl(&mut self, key: &str, ttl_seconds: u64) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { .. } => Ok(()),
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let _: i64 = redis::cmd("EXPIRE")
+                    .arg(&fk)
+                    .arg(ttl_seconds)
+                    .query(conn)
+                    .map_err(|e| StoreError::Backend(format!("EXPIRE: {e}")))?;
+                Ok(())
+            }
+        }
+    }
+
     pub fn incr(&mut self, key: &str, by: i64) -> Result<i64, StoreError> {
         match self {
             Bucket::InMemory { store, prefix } => {

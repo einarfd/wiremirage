@@ -18,6 +18,7 @@ use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage};
 use wm_host::auth::Auth;
 use wm_host::bindings::wiremirage::handler::http::Request as WitRequest;
+use wm_host::journal::Journal;
 use wm_host::registry::{NewRoute, Registry};
 use wm_host::route_table::RouteTable;
 use wm_host::store::tests as cases;
@@ -87,7 +88,7 @@ async fn counter_persists_across_requests_via_http() {
     auth.bootstrap_admin("bootstrap", "wmt_test")
         .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
-    let registry = Arc::new(Registry::new(storage));
+    let registry = Arc::new(Registry::new(storage.clone()));
     let route = registry
         .create_route(NewRoute {
             group: None,
@@ -101,7 +102,8 @@ async fn counter_persists_across_requests_via_http() {
         .expect("create route");
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
-    let app = router(AppState::new(runtime, routes, auth));
+    let journal = Journal::new(storage);
+    let app = router(AppState::new(runtime, routes, auth, journal));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

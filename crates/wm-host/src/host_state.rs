@@ -192,10 +192,7 @@ impl From<Level> for LogLevel {
 
 impl LogHost for HostState {
     fn emit(&mut self, level: Level, message: String) -> Result<()> {
-        self.logs.push(LogRecord {
-            level: level.into(),
-            message,
-        });
+        self.logs.push_now(level.into(), message);
         Ok(())
     }
 }

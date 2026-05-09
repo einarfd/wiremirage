@@ -13,7 +13,14 @@ use serde_json::json;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::Runtime;
-use crate::bindings::wiremirage::handler::http::{Header, Request as WitRequest};
+use crate::bindings::wiremirage::handler::http::{
+    Header, Request as WitRequest, Response as WitResponse,
+};
+use crate::journal::{
+    HANDLED_BODY_LIMIT, HandlerLogEntry, NewJournalEntry, NewUnmatchedEntry, RequestEnvelope,
+    ResourceUsage, ResponseEnvelope, UNMATCHED_BODY_LIMIT, truncate_body,
+};
+use crate::log::LogRecord;
 use crate::route_table::RouteTable;
 use crate::telemetry::HeaderExtractor;
 
@@ -29,6 +36,7 @@ pub struct AppState {
     runtime: Arc<Runtime>,
     routes: Arc<RouteTable>,
     auth: crate::auth::Auth,
+    journal: crate::journal::Journal,
     /// Optional compiler-sidecar client. `None` means the host hasn't
     /// been configured with `WM_COMPILER_URL`; source-based POSTs to
     /// `/__api/routes` are rejected with `compile_failed` in that case.
@@ -36,11 +44,17 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(runtime: Arc<Runtime>, routes: Arc<RouteTable>, auth: crate::auth::Auth) -> Self {
+    pub fn new(
+        runtime: Arc<Runtime>,
+        routes: Arc<RouteTable>,
+        auth: crate::auth::Auth,
+        journal: crate::journal::Journal,
+    ) -> Self {
         Self {
             runtime,
             routes,
             auth,
+            journal,
             compiler: None,
         }
     }
@@ -60,6 +74,10 @@ impl AppState {
 
     pub fn auth(&self) -> &crate::auth::Auth {
         &self.auth
+    }
+
+    pub fn journal(&self) -> &crate::journal::Journal {
+        &self.journal
     }
 
     pub fn compiler(&self) -> Option<&crate::compiler::CompilerClient> {
@@ -129,7 +147,11 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     match dispatch_inner(state, req).await {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::error!(error = %e, "handler invocation failed");
+            // dispatch_inner handles handler-trap errors itself (so they
+            // can be journaled). Reaching this arm means an
+            // infrastructural failure — request body read, spawn_blocking
+            // join, etc. — that there's nothing useful to journal about.
+            tracing::error!(error = %e, "dispatch infrastructure failed");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"))
         }
     }
@@ -152,6 +174,7 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
 )]
 async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Response> {
     let span = tracing::Span::current();
+    let started = std::time::Instant::now();
     let method = req.method().clone();
     let uri = req.uri().clone();
     let header_map = req.headers().clone();
@@ -161,6 +184,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // an empty Context) or when the headers carry no traceparent.
     let parent_cx =
         global::get_text_map_propagator(|prop| prop.extract(&HeaderExtractor(&header_map)));
+    let trace_id = extract_trace_id(&parent_cx);
     let _ = span.set_parent(parent_cx);
 
     let body_bytes = read_body(req.into_body()).await?;
@@ -169,7 +193,9 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
 
     // Reserved paths never reach user routes. Any sub-router (slice 3+
     // mounts /__api/* here) takes precedence; if nothing else matched, a
-    // request under a reserved prefix is a typo, not mock traffic.
+    // request under a reserved prefix is a typo, not mock traffic — and
+    // intentionally NOT journaled (typos shouldn't pollute the
+    // unmatched log; if operators want them, they're in stderr/OTel).
     if is_reserved_path(path) {
         span.record("outcome", "reserved_path_404");
         return Ok(not_found_response("reserved path"));
@@ -179,12 +205,38 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         Some(m) => m,
         None => {
             span.record("outcome", "unmatched_404");
+            // Journal the unmatched request. Best-effort: a journal
+            // failure is logged but doesn't change what the SUT sees.
+            let envelope = build_request_envelope(
+                &method,
+                &uri,
+                &header_map,
+                body_bytes,
+                UNMATCHED_BODY_LIMIT,
+            );
+            if let Err(e) = state.journal().record_unmatched(NewUnmatchedEntry {
+                trace_id: trace_id.clone(),
+                request: envelope,
+            }) {
+                tracing::warn!(error = %e, "failed to record unmatched journal entry");
+            }
             return Ok(not_found_response("no route matched"));
         }
     };
 
     span.record("route.matched_pattern", &matched.matched_pattern);
     span.record("route.id", &matched.route.id);
+
+    // Capture the request envelope before `body_bytes` is moved into
+    // the wit_request — we need it for the journal regardless of how
+    // the handler call turns out.
+    let request_envelope = build_request_envelope(
+        &method,
+        &uri,
+        &header_map,
+        body_bytes.clone(),
+        HANDLED_BODY_LIMIT,
+    );
 
     let component = state.routes.component_for(&matched.route)?;
     let wit_request = build_wit_request(
@@ -202,22 +254,174 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
 
     // spawn_blocking moves out of the async task's tracing context, so
     // capture the current span and re-enter it inside the closure to
-    // keep the wasmtime spans children of the dispatch span.
+    // keep the wasmtime spans children of the dispatch span. The
+    // closure returns BOTH the call result and any captured handler
+    // logs — we want the logs in the journal even when the handler
+    // traps, so propagating an Err the usual way would lose them.
     let parent_span = tracing::Span::current();
-    let wit_response = tokio::task::spawn_blocking(move || {
+    type Outcome = (Result<WitResponse, wasmtime::Error>, Vec<LogRecord>);
+    let outcome: Outcome = tokio::task::spawn_blocking(move || -> Outcome {
         let _enter = parent_span.enter();
         let instantiate_span =
             tracing::info_span!("wasmtime.instantiate", route.id = %route_id).entered();
         let (handler, mut store, handles) =
-            runtime.instantiate(&component, &group_id, &route_id)?;
+            match runtime.instantiate(&component, &group_id, &route_id) {
+                Ok(t) => t,
+                Err(e) => return (Err(e), Vec::new()),
+            };
         drop(instantiate_span);
         let _call = tracing::info_span!("wasmtime.call_handle", route.id = %route_id).entered();
-        handler.call_handle(&mut store, &wit_request, handles.route, handles.group)
+        let result = handler.call_handle(&mut store, &wit_request, handles.route, handles.group);
+        let logs = store.data_mut().take_logs();
+        (result, logs)
     })
-    .await??;
+    .await?;
 
-    span.record("outcome", "ok");
-    Ok(build_axum_response(wit_response))
+    let (call_result, handler_logs) = outcome;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let resources = ResourceUsage {
+        wall_clock_ms: duration_ms,
+        ..ResourceUsage::default()
+    };
+    let handler_log_entries: Vec<HandlerLogEntry> = handler_logs
+        .into_iter()
+        .map(|r| HandlerLogEntry {
+            level: r.level.as_str().to_string(),
+            message: r.message,
+            timestamp: r.timestamp,
+        })
+        .collect();
+
+    let (response_envelope, dropped_response_headers, axum_response, error_msg, outcome_label) =
+        match &call_result {
+            Ok(wit_response) => {
+                let (envelope, dropped) = summarize_response(
+                    wit_response.status,
+                    &wit_response.headers,
+                    &wit_response.body,
+                );
+                let axum = build_axum_response_owned(wit_response);
+                (envelope, dropped, axum, None, "ok")
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let body = msg.clone().into_bytes();
+                let envelope = ResponseEnvelope {
+                    status: 500,
+                    headers: vec![],
+                    body: body.clone(),
+                    body_truncated: false,
+                    original_body_size: body.len(),
+                };
+                tracing::error!(error = %e, "handler invocation failed");
+                (
+                    envelope,
+                    Vec::new(),
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg),
+                    Some(msg),
+                    "handler_error",
+                )
+            }
+        };
+
+    span.record("outcome", outcome_label);
+
+    // Best-effort journal write: a failure here is logged but doesn't
+    // change what the SUT sees.
+    let entry = NewJournalEntry {
+        trace_id,
+        group_id: matched.route.group_id.clone(),
+        group_name: matched.route.group_name.clone(),
+        route_id: matched.route.id.clone(),
+        route_number: matched.route.number,
+        matched_pattern: matched.matched_pattern.clone(),
+        request: request_envelope,
+        response: response_envelope,
+        path_params: matched.path_params.clone(),
+        query: vec![],
+        handler_logs: handler_log_entries,
+        duration_ms,
+        resources,
+        error: error_msg,
+        dropped_response_headers,
+    };
+    if let Err(e) = state.journal().record_handled(entry) {
+        tracing::warn!(error = %e, "failed to record journal entry");
+    }
+
+    Ok(axum_response)
+}
+
+/// Pull the W3C trace_id out of an OTel context, returning the
+/// 32-hex-char string when present and `None` when the context carries
+/// the invalid sentinel (i.e., no inbound `traceparent`). Used to
+/// stamp `trace_id` on journal records so they correlate with traces
+/// in the OTel backend when both are configured.
+fn extract_trace_id(cx: &opentelemetry::Context) -> Option<String> {
+    use opentelemetry::trace::TraceContextExt;
+    let tid = cx.span().span_context().trace_id();
+    if tid == opentelemetry::trace::TraceId::INVALID {
+        None
+    } else {
+        Some(tid.to_string())
+    }
+}
+
+fn build_request_envelope(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+    body_limit: usize,
+) -> RequestEnvelope {
+    let header_pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_lowercase(), s.to_string()))
+        })
+        .collect();
+    let (body, original_size, truncated) = truncate_body(body, body_limit);
+    RequestEnvelope {
+        method: method.as_str().to_uppercase(),
+        path: uri.path().to_string(),
+        headers: header_pairs,
+        body,
+        body_truncated: truncated,
+        original_body_size: original_size,
+    }
+}
+
+/// Decide which response headers the host will *send* (the journal
+/// records the same set the SUT sees) and which it will *drop* (per
+/// `reserved_response_header`). Returns the journal envelope and the
+/// list of dropped header names.
+fn summarize_response(
+    status: u16,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> (ResponseEnvelope, Vec<String>) {
+    let mut kept = Vec::with_capacity(headers.len());
+    let mut dropped = Vec::new();
+    for (name, value) in headers {
+        if reserved_response_header(name) {
+            dropped.push(name.clone());
+        } else {
+            kept.push((name.clone(), value.clone()));
+        }
+    }
+    let (body_bytes, original_size, truncated) = truncate_body(body.to_vec(), HANDLED_BODY_LIMIT);
+    (
+        ResponseEnvelope {
+            status,
+            headers: kept,
+            body: body_bytes,
+            body_truncated: truncated,
+            original_body_size: original_size,
+        },
+        dropped,
+    )
 }
 
 async fn read_body(body: Body) -> anyhow::Result<Vec<u8>> {
@@ -259,13 +463,13 @@ fn build_wit_request(
     }
 }
 
-fn build_axum_response(resp: crate::bindings::wiremirage::handler::http::Response) -> Response {
+fn build_axum_response_owned(resp: &WitResponse) -> Response {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = Bytes::from(resp.body);
+    let body = Bytes::copy_from_slice(&resp.body);
 
     let mut builder = Response::builder().status(status);
-    for (name, value) in resp.headers {
-        if reserved_response_header(&name) {
+    for (name, value) in &resp.headers {
+        if reserved_response_header(name) {
             continue;
         }
         builder = builder.header(name, value);

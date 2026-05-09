@@ -254,6 +254,18 @@ impl Registry {
         self.read_route(&mut bucket, &route_id)
     }
 
+    /// Resolve a group reference (name or ULID) and return the group
+    /// record, or `NotFound` if no such group exists. Used by
+    /// `/__api/journal/{group}` so callers can refer to groups by
+    /// either form.
+    pub fn read_group_by_ref(&self, reference: &str) -> Result<Group, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let id = self
+            .resolve_group(&mut bucket, reference)?
+            .ok_or(RegistryError::NotFound)?;
+        self.read_group(&mut bucket, &id)
+    }
+
     pub fn list_routes(&self) -> Result<Vec<Route>, RegistryError> {
         let mut bucket = self.bucket()?;
         self.list_routes_internal(&mut bucket)

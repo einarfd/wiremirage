@@ -17,7 +17,7 @@
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthContext, AuthError, Token, User};
+use crate::journal::{JournalError, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedRecord};
 use crate::registry::{NewRoute, RegistryError, Route, render_slug};
 use crate::server::is_reserved_path;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
@@ -50,6 +51,12 @@ pub fn router() -> Router<AppState> {
             "/__api/users/{name}",
             get(get_user).patch(patch_user).delete(delete_user),
         )
+        // Journal — list/get per group (admin or any group-route owner).
+        .route("/__api/journal/{group}", get(list_journal))
+        .route("/__api/journal/{group}/{number}", get(get_journal_entry))
+        // Unmatched — admin-only (host-wide and may include probing traffic).
+        .route("/__api/unmatched", get(list_unmatched))
+        .route("/__api/unmatched/{number}", get(get_unmatched_entry))
 }
 
 // -- Request / response shapes ------------------------------------------------
@@ -259,6 +266,18 @@ impl From<AuthError> for ApiError {
             }
             AuthError::Storage(e) => ApiError::internal(format!("storage: {e}")),
             AuthError::Malformed(msg) => ApiError::internal(format!("malformed record: {msg}")),
+        }
+    }
+}
+
+impl From<JournalError> for ApiError {
+    fn from(err: JournalError) -> Self {
+        match err {
+            JournalError::NotFound => ApiError::not_found(),
+            JournalError::Storage(e) => ApiError::internal(format!("storage: {e}")),
+            JournalError::Malformed(msg) => {
+                ApiError::internal(format!("malformed journal record: {msg}"))
+            }
         }
     }
 }
@@ -689,4 +708,142 @@ async fn delete_user(
     }
     state.auth().delete_user(&user.id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// -- /__api/journal -----------------------------------------------------------
+//
+// Per-request audit trail for mock traffic. The journal is the
+// agent-debugging surface ("did the SUT call my mock, and what
+// happened?") and is kept distinct from OTel observability (which is
+// the SRE/ops surface). See ADR-0017 for the split.
+//
+// Authorization: a caller may read a group's journal if they're admin
+// OR if they own at least one route in that group. The unmatched-log
+// is admin-only because it's host-wide and may include
+// probing/scanning traffic from the network.
+
+#[derive(Debug, Deserialize, Default)]
+struct JournalListQuery {
+    /// Return entries strictly older than this journal number. `None`
+    /// (i.e., not supplied) starts from the newest.
+    before: Option<u32>,
+    /// Cap on entries returned. The journal clamps to its own max
+    /// (currently 100). `None` defaults to that cap.
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct UnmatchedListQuery {
+    before: Option<u64>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListJournalResponse {
+    entries: Vec<JournalRecord>,
+    /// Pass back as `?before=` to fetch the next page; absent when the
+    /// returned page reached the oldest entry.
+    next_before: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListUnmatchedResponse {
+    entries: Vec<UnmatchedRecord>,
+    next_before: Option<u64>,
+}
+
+/// `true` if the caller is admin or owns at least one route in
+/// `group_id`. Non-admin members of a group can read its journal —
+/// admin-only would lock out the very users who created the routes.
+fn caller_can_read_journal(
+    state: &AppState,
+    auth: &AuthContext,
+    group_id: &str,
+) -> Result<bool, ApiError> {
+    if auth.is_admin {
+        return Ok(true);
+    }
+    let owned = state
+        .routes()
+        .registry()
+        .list_routes_by_owner(&auth.user_id)?;
+    Ok(owned.iter().any(|r| r.group_id == group_id))
+}
+
+async fn list_journal(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group): Path<String>,
+    Query(q): Query<JournalListQuery>,
+) -> Result<Json<ListJournalResponse>, ApiError> {
+    // Resolve the group reference (name or ULID) to its ULID; 404 if
+    // the group doesn't exist so callers can't probe for groups they
+    // don't own without a matching ownership check.
+    let group_record = state
+        .routes()
+        .registry()
+        .read_group_by_ref(&group)
+        .map_err(|_| ApiError::not_found())?;
+    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+        return Err(ApiError::forbidden(
+            "must be an admin or own a route in this group to read its journal",
+        ));
+    }
+    let cursor = ListCursor {
+        before: q.before,
+        limit: q.limit.unwrap_or(100),
+    };
+    let entries = state.journal().list_for_group(&group_record.id, cursor)?;
+    let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+    Ok(Json(ListJournalResponse {
+        entries,
+        next_before,
+    }))
+}
+
+async fn get_journal_entry(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+) -> Result<Json<JournalRecord>, ApiError> {
+    let group_record = state
+        .routes()
+        .registry()
+        .read_group_by_ref(&group)
+        .map_err(|_| ApiError::not_found())?;
+    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+        return Err(ApiError::forbidden(
+            "must be an admin or own a route in this group to read its journal",
+        ));
+    }
+    let entry = state.journal().get(&group_record.id, number)?;
+    Ok(Json(entry))
+}
+
+async fn list_unmatched(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<UnmatchedListQuery>,
+) -> Result<Json<ListUnmatchedResponse>, ApiError> {
+    require_admin(&auth)?;
+    let cursor = UnmatchedCursor {
+        before: q.before,
+        limit: q.limit.unwrap_or(100),
+    };
+    let entries = state.journal().list_unmatched(cursor)?;
+    let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+    Ok(Json(ListUnmatchedResponse {
+        entries,
+        next_before,
+    }))
+}
+
+async fn get_unmatched_entry(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(number): Path<u64>,
+) -> Result<Json<UnmatchedRecord>, ApiError> {
+    require_admin(&auth)?;
+    let entry = state.journal().get_unmatched(number)?;
+    Ok(Json(entry))
 }

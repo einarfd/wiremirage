@@ -9,6 +9,7 @@ pub mod auth;
 pub mod bindings;
 pub mod compiler;
 pub mod host_state;
+pub mod journal;
 pub mod log;
 pub mod pattern;
 pub mod registry;

@@ -23,6 +23,9 @@ mock traffic to user routes stays open by design (SUTs don't have
 tokens). Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup.
 Token and user management live at `/__api/tokens` and `/__api/users`
 (admin-only for cross-user actions; `GET /__api/users/me` for self).
+Every dispatched mock request and every unmatched request is journaled
+in Valkey (default 1h TTL); fetch via `GET /__api/journal/{group}` and
+`GET /__api/unmatched` (admin-only).
 
 ## Layout
 

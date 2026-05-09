@@ -176,6 +176,47 @@ collector get a clean stderr-only experience.
   surface) is its own future slice; OTel and the journal are
   complementary, not redundant.
 
+## Per-request journal (slice 7)
+
+Every successful or failed mock-traffic dispatch writes a JSON-encoded
+record to Valkey, plus an `unmatched:*` record for any request that
+reached `dispatch_inner` and didn't match a user route. Reserved-prefix
+404s (typos under `/__api/*`, `/__ui/*`, etc.) are intentionally **not**
+journaled — those go to stderr/OTel as host operational logs.
+
+- **Module:** `crates/wm-host/src/journal.rs`. `Journal::record_handled`
+  / `record_unmatched` write the record; `list_for_group(group_id,
+  ListCursor)` / `get(group_id, n)` / `list_unmatched` / `get_unmatched`
+  read it back. Cursor pagination via `?before={n}&limit={n}`, capped
+  at 100 entries per page, newest-first.
+- **Endpoints:** `GET /__api/journal/{group}` (list, admin or any
+  group-route owner), `GET /__api/journal/{group}/{n}` (one),
+  `GET /__api/unmatched` (list, admin-only), `GET /__api/unmatched/{n}`
+  (one). Group reference accepts name or ULID.
+- **Storage layout:** `journal:{group_ulid}:{ulid}` is a JSON blob with
+  TTL; `journal:by-number:{group_ulid}:{n}` indexes per-group sequence;
+  `unmatched:{ulid}` plus `unmatched:by-number:{n}` and
+  `unmatched:counter` for the host-wide log.
+- **TTL:** hardcoded at 1h for both record types in slice 7. Env-var
+  configurable later. The in-memory backend treats `Bucket::set_ttl` as
+  a no-op so tests don't depend on wall-clock expiry; tier-3 Valkey
+  tests verify real TTL when needed.
+- **Body truncation:** 16 KiB for handled records, 4 KiB for unmatched.
+  Both carry `body_truncated: bool` and `original_body_size: usize` so
+  consumers can flag what they're missing.
+- **Resource fields:** `wall_clock_ms` is real; `fuel_consumed` and
+  `memory_peak_bytes` are `0` placeholders until per-route resource
+  limits land. Schema is stable so consumers don't migrate later.
+- **Trace ID:** the dispatcher pulls the W3C trace_id from the inbound
+  `traceparent` header (via the OTel propagator installed in
+  `telemetry::init`) and stamps it on the record. Tests that exercise
+  this path call `wm_host::telemetry::install_propagator()` because the
+  global subscriber is set-once and the test harnesses don't run
+  `init`.
+- **What's deferred:** SSE tail (`/__api/journal/{group}/tail`),
+  near-misses computation on unmatched records (currently `[]`),
+  configurable TTLs, OTel logs export.
+
 ## Route table architecture
 
 Three layers in `wm-host`:

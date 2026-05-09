@@ -17,6 +17,7 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage};
 use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
+use wm_host::journal::Journal;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
@@ -63,10 +64,11 @@ async fn typescript_source_compiles_and_dispatches_end_to_end() {
     auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
         .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
-    let registry = Arc::new(Registry::new(storage));
+    let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-    let state =
-        AppState::new(runtime, routes, auth).with_compiler(CompilerClient::new(sidecar_url));
+    let journal = Journal::new(storage);
+    let state = AppState::new(runtime, routes, auth, journal)
+        .with_compiler(CompilerClient::new(sidecar_url));
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -132,10 +134,11 @@ async fn malformed_typescript_surfaces_diagnostics() {
     auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
         .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
-    let registry = Arc::new(Registry::new(storage));
+    let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-    let state =
-        AppState::new(runtime, routes, auth).with_compiler(CompilerClient::new(sidecar_url));
+    let journal = Journal::new(storage);
+    let state = AppState::new(runtime, routes, auth, journal)
+        .with_compiler(CompilerClient::new(sidecar_url));
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

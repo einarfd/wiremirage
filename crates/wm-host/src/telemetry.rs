@@ -109,6 +109,13 @@ pub fn init() -> anyhow::Result<TelemetryGuard> {
         .json()
         .with_writer(std::io::stderr);
 
+    // Install the W3C Trace Context propagator unconditionally. The
+    // host wants inbound traceparent headers extracted even when OTLP
+    // export is disabled — the journal stamps trace_ids on records, and
+    // that's useful for log correlation regardless of whether spans
+    // are also being exported.
+    install_propagator();
+
     let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
 
     let tracer_provider = match otlp_endpoint.as_deref() {
@@ -118,7 +125,6 @@ pub fn init() -> anyhow::Result<TelemetryGuard> {
 
     if let Some(provider) = tracer_provider.as_ref() {
         global::set_tracer_provider(provider.clone());
-        global::set_text_map_propagator(TraceContextPropagator::new());
 
         let tracer = provider.tracer(SERVICE_NAME);
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -142,6 +148,14 @@ pub fn init() -> anyhow::Result<TelemetryGuard> {
     }
 
     Ok(TelemetryGuard { tracer_provider })
+}
+
+/// Install the W3C Trace Context propagator on the OTel global. Called
+/// from `init()` in production; tests that exercise traceparent
+/// extraction without going through `init()` (because the global
+/// subscriber is set-once) call it explicitly. Idempotent.
+pub fn install_propagator() {
+    global::set_text_map_propagator(TraceContextPropagator::new());
 }
 
 fn build_tracer_provider(endpoint: &str) -> anyhow::Result<SdkTracerProvider> {

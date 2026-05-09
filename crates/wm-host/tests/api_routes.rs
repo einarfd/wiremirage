@@ -15,6 +15,7 @@ use reqwest::Client;
 use serde_json::json;
 use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
+use wm_host::journal::Journal;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
@@ -110,14 +111,22 @@ impl Harness {
     }
 
     async fn start_with_compiler(compiler: Option<CompilerClient>) -> Self {
+        // Install the W3C propagator once per process so the tier-2
+        // tests that send `traceparent` headers see the trace_id
+        // stamped on journal records. Idempotent; the global subscriber
+        // is set-once but the propagator is just a swap.
+        static PROPAGATOR_ONCE: std::sync::Once = std::sync::Once::new();
+        PROPAGATOR_ONCE.call_once(wm_host::telemetry::install_propagator);
+
         let storage = Storage::in_memory();
         let auth = Auth::new(storage.clone());
         auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
             .expect("bootstrap admin");
         let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
-        let registry = Arc::new(Registry::new(storage));
+        let registry = Arc::new(Registry::new(storage.clone()));
         let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-        let mut state = AppState::new(runtime, routes, auth.clone());
+        let journal = Journal::new(storage);
+        let mut state = AppState::new(runtime, routes, auth.clone(), journal);
         if let Some(c) = compiler {
             state = state.with_compiler(c);
         }
@@ -1180,6 +1189,297 @@ async fn user_endpoints_require_auth() {
     let h = Harness::start().await;
     let unauth = h.unauthenticated_client();
     for path in ["/__api/users", "/__api/users/me", "/__api/users/alice"] {
+        let resp = unauth.get(h.url(path)).send().await.expect("get");
+        assert_eq!(resp.status().as_u16(), 401, "GET {path}");
+    }
+}
+
+// -- /__api/journal -----------------------------------------------------------
+
+/// Create a route, hit it once with mock traffic, and return the route's
+/// group name so tests can inspect the journal that should now hold one
+/// entry. Mock traffic doesn't need an auth header.
+async fn seed_one_request(h: &Harness) -> String {
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap().to_string();
+    let unauth = Client::new();
+    let resp = unauth
+        .post(h.url("/v1/charges"))
+        .body(r#"{"amount":1000}"#)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    group
+}
+
+#[tokio::test]
+async fn dispatched_request_produces_journal_entry() {
+    let h = Harness::start().await;
+    let group = seed_one_request(&h).await;
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/__api/journal/{group}")))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let entries = listed["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["request"]["method"], "POST");
+    assert_eq!(entry["request"]["path"], "/v1/charges");
+    assert_eq!(entry["response"]["status"], 200);
+    assert_eq!(entry["matched_pattern"], "/v1/charges");
+    assert_eq!(entry["number"], 1);
+    // Echo handler returns "echo: METHOD PATH" — verify the response
+    // body was journaled too.
+    let body_bytes = entry["response"]["body"]
+        .as_array()
+        .expect("body")
+        .iter()
+        .map(|n| n.as_u64().unwrap() as u8)
+        .collect::<Vec<u8>>();
+    assert_eq!(body_bytes, b"echo: POST /v1/charges");
+}
+
+#[tokio::test]
+async fn unmatched_request_produces_unmatched_record() {
+    let h = Harness::start().await;
+    let unauth = Client::new();
+    let resp = unauth
+        .get(h.url("/no-such-route"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/unmatched"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let entries = listed["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["request"]["method"], "GET");
+    assert_eq!(entries[0]["request"]["path"], "/no-such-route");
+}
+
+#[tokio::test]
+async fn reserved_path_404_does_not_journal() {
+    let h = Harness::start().await;
+    // Hit a /__api/* path that doesn't exist — should be 404 (reserved
+    // prefix) and should NOT show up in unmatched.
+    let resp = h
+        .client
+        .get(h.url("/__api/typo"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/unmatched"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        listed["entries"].as_array().unwrap().is_empty(),
+        "reserved-prefix typos must not pollute the unmatched log"
+    );
+}
+
+#[tokio::test]
+async fn trace_id_is_stamped_from_inbound_traceparent() {
+    let h = Harness::start().await;
+    let group = {
+        let create: serde_json::Value = h
+            .create_route_body(json!({
+                "methods": ["POST"],
+                "path": "/v1/things",
+                "language": "wasm",
+                "bindings_version": "0.1.0",
+                "compiled_wasm": echo_b64(),
+            }))
+            .await
+            .json()
+            .await
+            .expect("json");
+        create["group"]["name"].as_str().unwrap().to_string()
+    };
+    // Send a request with a hand-crafted W3C traceparent.
+    let trace_id = "0123456789abcdef0123456789abcdef";
+    let traceparent = format!("00-{trace_id}-aaaaaaaaaaaaaaaa-01");
+    let unauth = Client::new();
+    let resp = unauth
+        .post(h.url("/v1/things"))
+        .header("traceparent", traceparent)
+        .body("{}")
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/__api/journal/{group}")))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let entry = &listed["entries"].as_array().unwrap()[0];
+    assert_eq!(entry["trace_id"], trace_id);
+}
+
+#[tokio::test]
+async fn cursor_pagination_round_trips() {
+    let h = Harness::start().await;
+    let group = seed_one_request(&h).await;
+    let unauth = Client::new();
+    // Drive 4 more requests so we have 5 total.
+    for _ in 0..4 {
+        let resp = unauth
+            .post(h.url("/v1/charges"))
+            .send()
+            .await
+            .expect("post");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    let first: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/__api/journal/{group}?limit=2")))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(first["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(first["entries"][0]["number"], 5);
+    assert_eq!(first["entries"][1]["number"], 4);
+    let next_before = first["next_before"].as_u64().expect("next_before");
+    assert_eq!(next_before, 4);
+
+    let next: serde_json::Value = h
+        .client
+        .get(h.url(&format!(
+            "/__api/journal/{group}?before={next_before}&limit=2"
+        )))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(next["entries"][0]["number"], 3);
+    assert_eq!(next["entries"][1]["number"], 2);
+
+    let tail: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/__api/journal/{group}?before=2&limit=10")))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(tail["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(tail["entries"][0]["number"], 1);
+    assert!(
+        tail["next_before"].is_null(),
+        "next_before should be null at the oldest page"
+    );
+}
+
+#[tokio::test]
+async fn unmatched_endpoint_is_admin_only() {
+    let h = Harness::start().await;
+    let (_alice_id, alice) = h.provision_user("alice", false);
+    let resp = alice
+        .get(h.url("/__api/unmatched"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn group_owner_can_read_journal_admin_can_too() {
+    let h = Harness::start().await;
+    let (_alice_id, alice) = h.provision_user("alice", false);
+    let create: serde_json::Value = alice
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "methods": ["POST"],
+            "path": "/v1/alice-thing",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
+
+    // Alice (owner of the only route in this group) can read it.
+    let resp = alice
+        .get(h.url(&format!("/__api/journal/{group}")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Bootstrap (admin) can read it too.
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/journal/{group}")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // A different non-admin who owns nothing in this group is rejected.
+    let (_bob_id, bob) = h.provision_user("bob", false);
+    let resp = bob
+        .get(h.url(&format!("/__api/journal/{group}")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn journal_endpoints_require_auth() {
+    let h = Harness::start().await;
+    let unauth = h.unauthenticated_client();
+    for path in ["/__api/journal/anything", "/__api/unmatched"] {
         let resp = unauth.get(h.url(path)).send().await.expect("get");
         assert_eq!(resp.status().as_u16(), 401, "GET {path}");
     }

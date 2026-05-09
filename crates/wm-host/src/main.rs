@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
+use wm_host::journal::Journal;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::telemetry;
@@ -21,10 +22,11 @@ async fn main() -> anyhow::Result<()> {
     bootstrap_admin_if_requested(&auth)?;
 
     let runtime = Arc::new(Runtime::new(storage.clone())?);
-    let registry = Arc::new(Registry::new(storage));
+    let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone())?;
+    let journal = Journal::new(storage);
 
-    let mut state = AppState::new(runtime, routes, auth);
+    let mut state = AppState::new(runtime, routes, auth, journal);
     if let Some(compiler) = CompilerClient::from_env() {
         tracing::info!(url = compiler.base_url(), "compiler sidecar configured");
         state = state.with_compiler(compiler);

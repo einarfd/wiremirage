@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use wm_host::auth::Auth;
+use wm_host::journal::Journal;
 use wm_host::registry::{NewRoute, Registry};
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
@@ -30,7 +31,7 @@ async fn start_with_seeded_route(
     auth.bootstrap_admin("bootstrap", "wmt_test")
         .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
-    let registry = Arc::new(Registry::new(storage));
+    let registry = Arc::new(Registry::new(storage.clone()));
     let route = registry
         .create_route(NewRoute {
             group: None,
@@ -44,7 +45,8 @@ async fn start_with_seeded_route(
         .expect("create route");
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
-    let app = router(AppState::new(runtime, routes, auth));
+    let journal = Journal::new(storage);
+    let app = router(AppState::new(runtime, routes, auth, journal));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -62,9 +64,10 @@ async fn start_empty() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     auth.bootstrap_admin("bootstrap", "wmt_test")
         .expect("bootstrap");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
-    let registry = Arc::new(Registry::new(storage));
+    let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
-    let app = router(AppState::new(runtime, routes, auth));
+    let journal = Journal::new(storage);
+    let app = router(AppState::new(runtime, routes, auth, journal));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
