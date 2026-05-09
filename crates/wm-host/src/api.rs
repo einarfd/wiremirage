@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthContext, AuthError, Token, User};
 use crate::journal::{JournalError, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedRecord};
-use crate::registry::{NewRoute, RegistryError, Route, render_slug};
+use crate::registry::{Group, NewGroup, NewRoute, RegistryError, Route, render_slug};
 use crate::server::is_reserved_path;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
@@ -57,6 +57,25 @@ pub fn router() -> Router<AppState> {
         // Unmatched — admin-only (host-wide and may include probing traffic).
         .route("/__api/unmatched", get(list_unmatched))
         .route("/__api/unmatched/{number}", get(get_unmatched_entry))
+        // Groups — owner-or-admin for cross-cutting actions; the
+        // sub-endpoints (refresh, state, journal) live under the
+        // group's slug. Note: `DELETE /__api/groups/{group}/journal`
+        // here supersedes the `clear-journal` shape from the rest-api
+        // doc — same semantics, lives under the group's path.
+        .route("/__api/groups", post(create_group).get(list_groups))
+        .route(
+            "/__api/groups/{group}",
+            get(get_group).patch(patch_group).delete(delete_group),
+        )
+        .route("/__api/groups/{group}/refresh", post(refresh_group))
+        .route(
+            "/__api/groups/{group}/state",
+            axum::routing::delete(delete_group_state),
+        )
+        .route(
+            "/__api/groups/{group}/journal",
+            axum::routing::delete(delete_group_journal),
+        )
 }
 
 // -- Request / response shapes ------------------------------------------------
@@ -846,4 +865,189 @@ async fn get_unmatched_entry(
     require_admin(&auth)?;
     let entry = state.journal().get_unmatched(number)?;
     Ok(Json(entry))
+}
+
+// -- /__api/groups ------------------------------------------------------------
+//
+// Lifecycle endpoints. POST is open to any authed user (they own
+// what they create); list filters to owned-by-self for non-admin
+// callers. PATCH / DELETE / refresh / state-clear / journal-clear all
+// require admin or owner. DELETE cascades silently — group owners are
+// expected to manage the lifecycle of everything inside.
+
+#[derive(Debug, Deserialize)]
+struct CreateGroupBody {
+    name: String,
+    /// Optional configured TTL. Omit to take the default; values are
+    /// validated against `MAX_GROUP_TTL_SECONDS`.
+    ttl_seconds: Option<u64>,
+    /// Optional sliding-TTL flag. Omit to take the default (`true`).
+    sliding_ttl: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchGroupBody {
+    ttl_seconds: Option<u64>,
+    sliding_ttl: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct GroupResponse {
+    id: String,
+    name: String,
+    implicit: bool,
+    owner_id: String,
+    ttl_seconds: u64,
+    sliding_ttl: bool,
+    created_at: String,
+}
+
+impl From<&Group> for GroupResponse {
+    fn from(g: &Group) -> Self {
+        Self {
+            id: g.id.clone(),
+            name: g.name.clone(),
+            implicit: g.implicit,
+            owner_id: g.owner_id.clone(),
+            ttl_seconds: g.ttl_seconds,
+            sliding_ttl: g.sliding_ttl,
+            created_at: g.created_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ListGroupsResponse {
+    groups: Vec<GroupResponse>,
+}
+
+/// Fetch a group by reference (name or ULID), and require the caller
+/// to be admin or the group's owner. Used by every per-group
+/// lifecycle endpoint.
+fn ensure_group_owner_or_admin(
+    state: &AppState,
+    auth: &AuthContext,
+    group_ref: &str,
+) -> Result<Group, ApiError> {
+    let group = state
+        .routes()
+        .registry()
+        .read_group_by_ref(group_ref)
+        .map_err(|_| ApiError::not_found())?;
+    if !auth.is_admin && group.owner_id != auth.user_id {
+        return Err(ApiError::forbidden("must be the group's owner or an admin"));
+    }
+    Ok(group)
+}
+
+async fn create_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(body): Json<CreateGroupBody>,
+) -> Result<Response, ApiError> {
+    let group = state.routes().registry().create_group(NewGroup {
+        name: body.name,
+        owner_id: auth.user_id.clone(),
+        ttl_seconds: body.ttl_seconds,
+        sliding_ttl: body.sliding_ttl,
+    })?;
+    Ok((StatusCode::CREATED, Json(GroupResponse::from(&group))).into_response())
+}
+
+async fn list_groups(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<Json<ListGroupsResponse>, ApiError> {
+    let groups = if auth.is_admin {
+        state.routes().registry().list_groups()?
+    } else {
+        state
+            .routes()
+            .registry()
+            .list_groups_by_owner(&auth.user_id)?
+    };
+    let groups = groups.iter().map(GroupResponse::from).collect();
+    Ok(Json(ListGroupsResponse { groups }))
+}
+
+async fn get_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Result<Json<GroupResponse>, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    Ok(Json(GroupResponse::from(&group)))
+}
+
+async fn patch_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    Json(body): Json<PatchGroupBody>,
+) -> Result<Json<GroupResponse>, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    if body.ttl_seconds.is_none() && body.sliding_ttl.is_none() {
+        return Err(ApiError::validation(
+            "PATCH body must include at least `ttl_seconds` or `sliding_ttl` — \
+             rename and owner-transfer aren't supported in this slice",
+        ));
+    }
+    let updated =
+        state
+            .routes()
+            .registry()
+            .patch_group(&group.id, body.ttl_seconds, body.sliding_ttl)?;
+    Ok(Json(GroupResponse::from(&updated)))
+}
+
+async fn delete_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    let deleted_routes = state.routes().registry().cascade_delete_group(&group.id)?;
+    // Invalidate the local route table for each cascaded route so the
+    // in-memory cache doesn't keep serving them. Multi-host
+    // deployments still need keyspace notifications to invalidate
+    // peers — see storage-model.md "Cache coherence and route
+    // readiness" / Implementation status.
+    state.routes().refresh_after_group_cascade(&group.id);
+    tracing::info!(
+        group_id = %group.id,
+        group_name = %group.name,
+        routes_deleted = deleted_routes,
+        "group cascade-deleted"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn refresh_group(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Result<Json<GroupResponse>, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    let refreshed = state.routes().registry().refresh_group(&group.id)?;
+    Ok(Json(GroupResponse::from(&refreshed)))
+}
+
+async fn delete_group_state(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    state.routes().registry().clear_group_state(&group.id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_group_journal(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    state.routes().registry().clear_group_journal(&group.id)?;
+    Ok(StatusCode::NO_CONTENT)
 }

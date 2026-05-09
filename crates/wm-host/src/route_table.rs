@@ -99,6 +99,32 @@ impl RouteTable {
         self.components.lock().expect("poisoned").remove(route_id);
     }
 
+    /// Drop every route in `group_id` from the in-memory cache. Used
+    /// after `Registry::cascade_delete_group` (explicit DELETE) and
+    /// after the lifecycle sweeper reaps an expired group on this
+    /// host. Multi-host invalidation is a separate concern — see
+    /// storage-model.md "Cache coherence and route readiness".
+    pub fn refresh_after_group_cascade(&self, group_id: &str) {
+        let to_drop: Vec<String> = self
+            .routes
+            .read()
+            .expect("poisoned")
+            .iter()
+            .filter(|r| r.group_id == group_id)
+            .map(|r| r.id.clone())
+            .collect();
+        if to_drop.is_empty() {
+            return;
+        }
+        let mut routes = self.routes.write().expect("poisoned");
+        routes.retain(|r| r.group_id != group_id);
+        drop(routes);
+        let mut cache = self.components.lock().expect("poisoned");
+        for id in &to_drop {
+            cache.remove(id);
+        }
+    }
+
     pub fn registry(&self) -> &Registry {
         &self.registry
     }

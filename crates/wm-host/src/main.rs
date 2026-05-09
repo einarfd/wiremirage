@@ -5,6 +5,7 @@ use anyhow::{Context, anyhow};
 use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
 use wm_host::journal::Journal;
+use wm_host::lifecycle::Sweeper;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::telemetry;
@@ -35,7 +36,13 @@ async fn main() -> anyhow::Result<()> {
             "WM_COMPILER_URL is not set; only `language: \"wasm\"` requests will be accepted by /__api/routes"
         );
     }
-    let app = router(state);
+    let app = router(state.clone());
+
+    // Spawn the lifecycle sweeper. It walks the route table on its
+    // cadence and reaps the children of any group whose Valkey TTL
+    // has fired. The handle is intentionally dropped — tokio cleans
+    // it up on process shutdown along with the runtime.
+    let _sweeper = Sweeper::new(state.routes().clone()).spawn();
 
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await

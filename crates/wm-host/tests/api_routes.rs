@@ -1569,3 +1569,434 @@ async fn journal_endpoints_require_auth() {
         assert_eq!(resp.status().as_u16(), 401, "GET {path}");
     }
 }
+
+// -- /__api/groups ------------------------------------------------------------
+
+#[tokio::test]
+async fn create_then_get_group() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "stripe-mock", "ttl_seconds": 3600, "sliding_ttl": false }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["name"], "stripe-mock");
+    assert_eq!(body["ttl_seconds"], 3600);
+    assert_eq!(body["sliding_ttl"], false);
+    assert_eq!(body["implicit"], false);
+
+    let read: serde_json::Value = h
+        .client
+        .get(h.url("/__api/groups/stripe-mock"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(read["name"], "stripe-mock");
+}
+
+#[tokio::test]
+async fn create_group_defaults_to_24h_sliding_true() {
+    let h = Harness::start().await;
+    let body: serde_json::Value = h
+        .client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "defaults" }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["ttl_seconds"], 24 * 60 * 60);
+    assert_eq!(body["sliding_ttl"], true);
+}
+
+#[tokio::test]
+async fn create_group_rejects_duplicate_name() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "dup" }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "dup" }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 409);
+}
+
+#[tokio::test]
+async fn create_group_rejects_excessive_ttl() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "too-long", "ttl_seconds": 30u64 * 24 * 60 * 60 + 1 }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 500); // Malformed → internal in this build
+}
+
+#[tokio::test]
+async fn list_groups_filters_by_owner_for_non_admin() {
+    let h = Harness::start().await;
+    // Bootstrap (admin) creates one; alice creates one.
+    h.client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "admin-group" }))
+        .send()
+        .await
+        .expect("post");
+    let (_alice_id, alice) = h.provision_user("alice", false);
+    alice
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "alice-group" }))
+        .send()
+        .await
+        .expect("post");
+
+    // Admin sees both.
+    let admin_view: serde_json::Value = h
+        .client
+        .get(h.url("/__api/groups"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let admin_names: Vec<&str> = admin_view["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["name"].as_str().unwrap())
+        .collect();
+    assert!(admin_names.contains(&"admin-group"));
+    assert!(admin_names.contains(&"alice-group"));
+
+    // Alice sees only her own.
+    let alice_view: serde_json::Value = alice
+        .get(h.url("/__api/groups"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let alice_names: Vec<&str> = alice_view["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(alice_names, vec!["alice-group"]);
+}
+
+#[tokio::test]
+async fn patch_group_updates_ttl_and_sliding() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "patch-me" }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .patch(h.url("/__api/groups/patch-me"))
+        .json(&json!({ "ttl_seconds": 7200, "sliding_ttl": false }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["ttl_seconds"], 7200);
+    assert_eq!(body["sliding_ttl"], false);
+}
+
+#[tokio::test]
+async fn patch_group_with_no_fields_is_validation_failure() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "empty-patch" }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .patch(h.url("/__api/groups/empty-patch"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn delete_group_cascades_routes_and_state() {
+    let h = Harness::start().await;
+    let group_create: serde_json::Value = h
+        .client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "cascadable" }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(group_create["name"], "cascadable");
+
+    // Create a route inside the group.
+    let route_create = h
+        .client
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "group": "cascadable",
+            "methods": ["POST"],
+            "path": "/v1/billed",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(route_create.status().as_u16(), 201);
+
+    // Hit the route once so the journal has an entry.
+    let unauth = Client::new();
+    let resp = unauth.post(h.url("/v1/billed")).send().await.expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Delete the group.
+    let del = h
+        .client
+        .delete(h.url("/__api/groups/cascadable"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(del.status().as_u16(), 204);
+
+    // Group, route, journal, and mock-traffic should all be gone.
+    let resp = h
+        .client
+        .get(h.url("/__api/groups/cascadable"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    let resp = unauth.post(h.url("/v1/billed")).send().await.expect("post");
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "route should be unreachable after group cascade"
+    );
+
+    let resp = h
+        .client
+        .get(h.url("/__api/journal/cascadable"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn group_endpoints_owner_or_admin_only() {
+    let h = Harness::start().await;
+    let (_alice_id, alice) = h.provision_user("alice", false);
+    alice
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "alice-private" }))
+        .send()
+        .await
+        .expect("post");
+
+    // Bob (not admin, not owner) is rejected on every per-group action.
+    let (_bob_id, bob) = h.provision_user("bob", false);
+    for (method, path) in [
+        ("GET", "/__api/groups/alice-private"),
+        ("PATCH", "/__api/groups/alice-private"),
+        ("DELETE", "/__api/groups/alice-private"),
+        ("POST", "/__api/groups/alice-private/refresh"),
+        ("DELETE", "/__api/groups/alice-private/state"),
+        ("DELETE", "/__api/groups/alice-private/journal"),
+    ] {
+        let req = match method {
+            "GET" => bob.get(h.url(path)),
+            "PATCH" => bob.patch(h.url(path)).json(&json!({ "ttl_seconds": 60 })),
+            "POST" => bob.post(h.url(path)),
+            "DELETE" => bob.delete(h.url(path)),
+            _ => unreachable!(),
+        };
+        let resp = req.send().await.expect("send");
+        assert_eq!(resp.status().as_u16(), 403, "{method} {path}");
+    }
+
+    // Admin (bootstrap) can hit them all.
+    let resp = h
+        .client
+        .get(h.url("/__api/groups/alice-private"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn refresh_group_returns_updated_record() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "refreshable", "ttl_seconds": 3600 }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .post(h.url("/__api/groups/refreshable/refresh"))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["name"], "refreshable");
+    assert_eq!(body["ttl_seconds"], 3600);
+}
+
+#[tokio::test]
+async fn delete_group_state_clears_kv_but_leaves_routes() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "stateful" }))
+        .send()
+        .await
+        .expect("post");
+    h.client
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "group": "stateful",
+            "methods": ["GET"],
+            "path": "/v1/state-test",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post");
+
+    let resp = h
+        .client
+        .delete(h.url("/__api/groups/stateful/state"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 204);
+
+    // Route still serves.
+    let unauth = Client::new();
+    let resp = unauth
+        .get(h.url("/v1/state-test"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn delete_group_journal_clears_entries_but_leaves_routes() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "journal-clear" }))
+        .send()
+        .await
+        .expect("post");
+    h.client
+        .post(h.url("/__api/routes"))
+        .json(&json!({
+            "group": "journal-clear",
+            "methods": ["GET"],
+            "path": "/v1/journal-test",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("post");
+    let unauth = Client::new();
+    unauth
+        .get(h.url("/v1/journal-test"))
+        .send()
+        .await
+        .expect("get");
+
+    // One entry should be present.
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/journal/journal-clear"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["entries"].as_array().unwrap().len(), 1);
+
+    // Clear journal.
+    let resp = h
+        .client
+        .delete(h.url("/__api/groups/journal-clear/journal"))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 204);
+
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/journal/journal-clear"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert!(listed["entries"].as_array().unwrap().is_empty());
+
+    // Route still serves.
+    let resp = unauth
+        .get(h.url("/v1/journal-test"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn group_endpoints_require_auth() {
+    let h = Harness::start().await;
+    let unauth = h.unauthenticated_client();
+    for path in ["/__api/groups", "/__api/groups/anything"] {
+        let resp = unauth.get(h.url(path)).send().await.expect("get");
+        assert_eq!(resp.status().as_u16(), 401, "GET {path}");
+    }
+}

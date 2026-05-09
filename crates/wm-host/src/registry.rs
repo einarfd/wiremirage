@@ -72,6 +72,38 @@ pub struct Group {
     pub name: String,
     pub implicit: bool,
     pub created_at: DateTime<Utc>,
+    /// User ULID of the group's creator. Lifecycle operations
+    /// (PATCH/DELETE/refresh) require the caller to match this id or
+    /// to be an admin.
+    pub owner_id: String,
+    /// Configured TTL on the group record, in seconds. The actual
+    /// remaining lifetime tracks via the Valkey `EXPIRE` set on the
+    /// `group:{ulid}` hash key; this field is the *configured* value
+    /// (used to compute fresh expiries on refresh / sliding bumps).
+    pub ttl_seconds: u64,
+    /// When `true`, the group's TTL is bumped to `ttl_seconds` on
+    /// every successful route match in dispatch. Implicit groups
+    /// default to `true` so they live as long as traffic flows;
+    /// explicit groups default to `true` too but can opt out.
+    pub sliding_ttl: bool,
+}
+
+/// Default lifetime for a newly created group when the caller doesn't
+/// supply `ttl_seconds`. Per `storage-model.md` "TTL defaults and
+/// bounds".
+pub const DEFAULT_GROUP_TTL_SECONDS: u64 = 24 * 60 * 60;
+/// Hard upper bound on the configured TTL. Per the same table.
+pub const MAX_GROUP_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+pub const DEFAULT_GROUP_SLIDING_TTL: bool = true;
+
+#[derive(Debug, Clone)]
+pub struct NewGroup {
+    pub name: String,
+    pub owner_id: String,
+    /// `None` falls back to `DEFAULT_GROUP_TTL_SECONDS`.
+    pub ttl_seconds: Option<u64>,
+    /// `None` falls back to `DEFAULT_GROUP_SLIDING_TTL`.
+    pub sliding_ttl: Option<bool>,
 }
 
 /// Parameters accepted from the REST handler when creating a route.
@@ -105,6 +137,15 @@ impl Registry {
 
     fn bucket(&self) -> Result<Bucket, RegistryError> {
         Ok(self.storage.admin_bucket()?)
+    }
+
+    /// Test-only escape hatch for poking at storage directly (e.g.
+    /// the lifecycle sweeper test suite manually wipes a group
+    /// record to simulate Valkey TTL firing). Production code should
+    /// route through the typed registry methods.
+    #[cfg(test)]
+    pub(crate) fn admin_bucket_for_test(&self) -> Bucket {
+        self.storage.admin_bucket().expect("admin bucket")
     }
 
     // -- Group operations --------------------------------------------------
@@ -141,7 +182,248 @@ impl Registry {
         decode_group(&fields)
     }
 
-    fn create_implicit_group(&self, bucket: &mut Bucket) -> Result<Group, RegistryError> {
+    /// Resolve a group reference (name or ULID) and return the group
+    /// record, or `NotFound` if no such group exists. Used by
+    /// `/__api/journal/{group}` so callers can refer to groups by
+    /// either form.
+    pub fn read_group_by_ref(&self, reference: &str) -> Result<Group, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let id = self
+            .resolve_group(&mut bucket, reference)?
+            .ok_or(RegistryError::NotFound)?;
+        self.read_group(&mut bucket, &id)
+    }
+
+    /// Explicit group creation. Validates name uniqueness, normalizes
+    /// the TTL config, writes the record + indexes + Valkey TTL.
+    pub fn create_group(&self, params: NewGroup) -> Result<Group, RegistryError> {
+        if params.name.trim().is_empty() {
+            return Err(RegistryError::Malformed(
+                "group name must not be empty".into(),
+            ));
+        }
+        let mut bucket = self.bucket()?;
+        if bucket
+            .get(&format!("group:by-name:{}", params.name))?
+            .is_some()
+        {
+            return Err(RegistryError::Conflict(format!(
+                "group {:?} already exists",
+                params.name
+            )));
+        }
+        let ttl_seconds = normalize_ttl(params.ttl_seconds.unwrap_or(DEFAULT_GROUP_TTL_SECONDS))?;
+        let group = Group {
+            id: Ulid::new().to_string(),
+            name: params.name,
+            implicit: false,
+            created_at: Utc::now(),
+            owner_id: params.owner_id,
+            ttl_seconds,
+            sliding_ttl: params.sliding_ttl.unwrap_or(DEFAULT_GROUP_SLIDING_TTL),
+        };
+        write_group(&mut bucket, &group)?;
+        bucket.set_ttl(&format!("group:{}", group.id), group.ttl_seconds)?;
+        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
+        Ok(group)
+    }
+
+    /// All groups, oldest-first. Admin-only callers use this; the
+    /// per-owner shape is `list_groups_by_owner` below.
+    pub fn list_groups(&self) -> Result<Vec<Group>, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let ids = bucket.set_members("group:all")?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            // Walk past stragglers: if the record vanished (e.g.
+            // Valkey TTL fired since we read the set), drop it
+            // silently. The next sweeper pass cleans the index.
+            if let Ok(g) = self.read_group(&mut bucket, &id) {
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn list_groups_by_owner(&self, owner_id: &str) -> Result<Vec<Group>, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let ids = bucket.set_members(&format!("group:owner:{owner_id}"))?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Ok(g) = self.read_group(&mut bucket, &id) {
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Patch a subset of mutable group fields. `ttl_seconds = Some(s)`
+    /// validates against `MAX_GROUP_TTL_SECONDS` and re-arms the
+    /// Valkey TTL; `sliding_ttl = Some(b)` flips the flag. Rename and
+    /// owner-transfer aren't supported in this slice.
+    pub fn patch_group(
+        &self,
+        group_id: &str,
+        ttl_seconds: Option<u64>,
+        sliding_ttl: Option<bool>,
+    ) -> Result<Group, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let mut group = self.read_group(&mut bucket, group_id)?;
+        if let Some(ttl) = ttl_seconds {
+            let ttl = normalize_ttl(ttl)?;
+            group.ttl_seconds = ttl;
+            bucket.hash_set(
+                &format!("group:{group_id}"),
+                "ttl_seconds",
+                ttl.to_string().into_bytes(),
+            )?;
+            bucket.set_ttl(&format!("group:{group_id}"), ttl)?;
+            bucket.set_ttl(&format!("group:by-name:{}", group.name), ttl)?;
+        }
+        if let Some(flag) = sliding_ttl {
+            group.sliding_ttl = flag;
+            bucket.hash_set(
+                &format!("group:{group_id}"),
+                "sliding_ttl",
+                if flag { b"1".to_vec() } else { b"0".to_vec() },
+            )?;
+        }
+        Ok(group)
+    }
+
+    /// Best-effort sliding-TTL bump used by the dispatch path: read
+    /// the group, no-op if it doesn't exist or has `sliding_ttl =
+    /// false`, otherwise re-arm the Valkey TTL. Returns `Ok(true)`
+    /// when the bump fired, `Ok(false)` when it was a no-op for one
+    /// of the legitimate reasons. Errors are surfaced for the caller
+    /// to log and continue (the journal/dispatch path treats this as
+    /// best-effort).
+    pub fn refresh_group_if_sliding(&self, group_id: &str) -> Result<bool, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let group = match self.read_group(&mut bucket, group_id) {
+            Ok(g) => g,
+            Err(RegistryError::NotFound) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if !group.sliding_ttl {
+            return Ok(false);
+        }
+        bucket.set_ttl(&format!("group:{group_id}"), group.ttl_seconds)?;
+        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
+        Ok(true)
+    }
+
+    /// Reset the group's Valkey TTL to its configured `ttl_seconds`.
+    /// Cheap; used by the explicit refresh endpoint.
+    pub fn refresh_group(&self, group_id: &str) -> Result<Group, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let group = self.read_group(&mut bucket, group_id)?;
+        bucket.set_ttl(&format!("group:{group_id}"), group.ttl_seconds)?;
+        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
+        Ok(group)
+    }
+
+    /// Cascade-delete a group and everything it contains: routes (and
+    /// their indexes + per-route kv namespace), the group's gkv
+    /// namespace, the journal entries, the per-group counters, and
+    /// the group record + indexes. Idempotent — multiple sweepers can
+    /// call this against the same group_id without corrupting state.
+    /// Also handles the "group record already gone" case (Valkey TTL
+    /// fired) by cascading from `route:in-group:{group_id}` on its own.
+    pub fn cascade_delete_group(&self, group_id: &str) -> Result<u64, RegistryError> {
+        let mut bucket = self.bucket()?;
+        // `read_group` returning NotFound is fine: the group's TTL may
+        // have fired already; we still want to scrub the children.
+        let group = match self.read_group(&mut bucket, group_id) {
+            Ok(g) => Some(g),
+            Err(RegistryError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+
+        let route_ids = bucket.set_members(&format!("route:in-group:{group_id}"))?;
+        let routes_deleted = route_ids.len() as u64;
+        for route_id in &route_ids {
+            // Best-effort read for index cleanup. A missing record
+            // means another cascade beat us to it; skip the
+            // index-strip block but still clean route:all etc.
+            if let Ok(route) = self.read_route(&mut bucket, route_id) {
+                strip_route_indexes(&mut bucket, &route)?;
+            }
+            // Route-private kv namespace. The prefix is the same
+            // whether or not we read the route record.
+            bucket.delete_with_prefix(&format!("kv:{group_id}:{route_id}:"))?;
+            // Record fields.
+            for field in [
+                "id",
+                "group_id",
+                "group_name",
+                "number",
+                "methods",
+                "path",
+                "language",
+                "bindings_version",
+                "compiled_wasm",
+                "created_at",
+                "owner_id",
+            ] {
+                bucket.hash_delete(&format!("route:{route_id}"), field)?;
+            }
+            bucket.set_remove("route:all", route_id)?;
+        }
+
+        // Per-group containers / namespaces.
+        bucket.delete(&format!("route:in-group:{group_id}"))?;
+        bucket.delete_with_prefix(&format!("gkv:{group_id}:"))?;
+        bucket.delete_with_prefix(&format!("journal:{group_id}:"))?;
+        bucket.delete_with_prefix(&format!("journal:by-number:{group_id}:"))?;
+        bucket.delete(&format!("group:counters:{group_id}"))?;
+
+        // Group record + indexes.
+        if let Some(g) = group.as_ref() {
+            bucket.delete(&format!("group:by-name:{}", g.name))?;
+            bucket.set_remove(&format!("group:owner:{}", g.owner_id), group_id)?;
+            for field in [
+                "id",
+                "name",
+                "implicit",
+                "created_at",
+                "owner_id",
+                "ttl_seconds",
+                "sliding_ttl",
+            ] {
+                bucket.hash_delete(&format!("group:{group_id}"), field)?;
+            }
+        }
+        bucket.set_remove("group:all", group_id)?;
+
+        Ok(routes_deleted)
+    }
+
+    /// Clear all per-route and per-group kv state for the group, but
+    /// leave the routes themselves alive. Used by the
+    /// `DELETE /__api/groups/{group}/state` endpoint.
+    pub fn clear_group_state(&self, group_id: &str) -> Result<(), RegistryError> {
+        let mut bucket = self.bucket()?;
+        bucket.delete_with_prefix(&format!("kv:{group_id}:"))?;
+        bucket.delete_with_prefix(&format!("gkv:{group_id}:"))?;
+        Ok(())
+    }
+
+    /// Clear all journal entries for the group; routes and state are
+    /// untouched.
+    pub fn clear_group_journal(&self, group_id: &str) -> Result<(), RegistryError> {
+        let mut bucket = self.bucket()?;
+        bucket.delete_with_prefix(&format!("journal:{group_id}:"))?;
+        bucket.delete_with_prefix(&format!("journal:by-number:{group_id}:"))?;
+        bucket.delete(&format!("group:counters:{group_id}"))?;
+        Ok(())
+    }
+
+    fn create_implicit_group(
+        &self,
+        bucket: &mut Bucket,
+        owner_id: &str,
+    ) -> Result<Group, RegistryError> {
         let id = Ulid::new().to_string();
         // `_route_{suffix}` so it sorts after user-named groups and
         // visually signals "implementation detail."
@@ -151,8 +433,13 @@ impl Registry {
             name: name.clone(),
             implicit: true,
             created_at: Utc::now(),
+            owner_id: owner_id.to_string(),
+            ttl_seconds: DEFAULT_GROUP_TTL_SECONDS,
+            sliding_ttl: DEFAULT_GROUP_SLIDING_TTL,
         };
         write_group(bucket, &group)?;
+        bucket.set_ttl(&format!("group:{}", group.id), group.ttl_seconds)?;
+        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
         Ok(group)
     }
 
@@ -170,13 +457,15 @@ impl Registry {
 
         let mut bucket = self.bucket()?;
 
-        // Resolve or create the group.
+        // Resolve or create the group. Implicit groups inherit the
+        // route creator as owner, the default TTL, and sliding TTL —
+        // they live as long as traffic flows.
         let group = match params.group.as_deref() {
             Some(reference) => match self.resolve_group(&mut bucket, reference)? {
                 Some(group_id) => self.read_group(&mut bucket, &group_id)?,
                 None => return Err(RegistryError::NotFound),
             },
-            None => self.create_implicit_group(&mut bucket)?,
+            None => self.create_implicit_group(&mut bucket, &params.owner_id)?,
         };
 
         // Pattern-shape conflict detection per route-model.md: walk all
@@ -254,18 +543,6 @@ impl Registry {
         self.read_route(&mut bucket, &route_id)
     }
 
-    /// Resolve a group reference (name or ULID) and return the group
-    /// record, or `NotFound` if no such group exists. Used by
-    /// `/__api/journal/{group}` so callers can refer to groups by
-    /// either form.
-    pub fn read_group_by_ref(&self, reference: &str) -> Result<Group, RegistryError> {
-        let mut bucket = self.bucket()?;
-        let id = self
-            .resolve_group(&mut bucket, reference)?
-            .ok_or(RegistryError::NotFound)?;
-        self.read_group(&mut bucket, &id)
-    }
-
     pub fn list_routes(&self) -> Result<Vec<Route>, RegistryError> {
         let mut bucket = self.bucket()?;
         self.list_routes_internal(&mut bucket)
@@ -311,16 +588,10 @@ impl Registry {
 
         // Strip the indexes first so a partially-deleted record can't be
         // matched mid-cleanup.
-        for method in &route.methods {
-            bucket.delete(&format!("route:by-method-path:{method}:{}", route.path))?;
-        }
-        bucket.delete(&format!(
-            "route:by-number:{}:{}",
-            route.group_id, route.number
-        ))?;
-        bucket.set_remove(&format!("route:in-group:{}", route.group_id), &route_id)?;
-        bucket.set_remove("route:all", &route_id)?;
-        bucket.set_remove(&format!("route:by-owner:{}", route.owner_id), &route_id)?;
+        strip_route_indexes(&mut bucket, &route)?;
+        // Clear the route's kv namespace so a recreated route at the
+        // same path doesn't inherit stale state.
+        bucket.delete_with_prefix(&format!("kv:{}:{}:", route.group_id, route.id))?;
         // Finally the record itself.
         for field in [
             "id",
@@ -365,11 +636,59 @@ fn write_group(bucket: &mut Bucket, group: &Group) -> Result<(), RegistryError> 
         "created_at",
         group.created_at.to_rfc3339().into_bytes(),
     )?;
+    bucket.hash_set(&key, "owner_id", group.owner_id.as_bytes().to_vec())?;
+    bucket.hash_set(
+        &key,
+        "ttl_seconds",
+        group.ttl_seconds.to_string().into_bytes(),
+    )?;
+    bucket.hash_set(
+        &key,
+        "sliding_ttl",
+        if group.sliding_ttl { b"1" } else { b"0" }.to_vec(),
+    )?;
     bucket.set(
         &format!("group:by-name:{}", group.name),
         group.id.as_bytes().to_vec(),
     )?;
+    bucket.set_add(&format!("group:owner:{}", group.owner_id), &group.id)?;
+    bucket.set_add("group:all", &group.id)?;
     Ok(())
+}
+
+/// Strip the public-facing indexes that point at a route, leaving the
+/// route record itself for the caller to clear. Used by both
+/// `delete_route` and `cascade_delete_group` so the index-cleanup
+/// rules live in one place.
+fn strip_route_indexes(bucket: &mut Bucket, route: &Route) -> Result<(), RegistryError> {
+    for method in &route.methods {
+        bucket.delete(&format!("route:by-method-path:{method}:{}", route.path))?;
+    }
+    bucket.delete(&format!(
+        "route:by-number:{}:{}",
+        route.group_id, route.number
+    ))?;
+    bucket.set_remove(&format!("route:in-group:{}", route.group_id), &route.id)?;
+    bucket.set_remove("route:all", &route.id)?;
+    bucket.set_remove(&format!("route:by-owner:{}", route.owner_id), &route.id)?;
+    Ok(())
+}
+
+/// Validate a configured TTL against the project-wide `MAX_GROUP_TTL_SECONDS`
+/// and reject zero (which would mean "expire immediately" — almost
+/// certainly a misuse).
+fn normalize_ttl(ttl_seconds: u64) -> Result<u64, RegistryError> {
+    if ttl_seconds == 0 {
+        return Err(RegistryError::Malformed(
+            "ttl_seconds must be positive".into(),
+        ));
+    }
+    if ttl_seconds > MAX_GROUP_TTL_SECONDS {
+        return Err(RegistryError::Malformed(format!(
+            "ttl_seconds {ttl_seconds} exceeds max {MAX_GROUP_TTL_SECONDS}",
+        )));
+    }
+    Ok(ttl_seconds)
 }
 
 fn write_route(bucket: &mut Bucket, route: &Route) -> Result<(), RegistryError> {
@@ -407,6 +726,11 @@ fn decode_group(fields: &HashMap<String, Vec<u8>>) -> Result<Group, RegistryErro
         name: utf8(fields, "name")?,
         implicit: utf8(fields, "implicit")? == "1",
         created_at: parse_ts(&utf8(fields, "created_at")?)?,
+        owner_id: utf8(fields, "owner_id")?,
+        ttl_seconds: utf8(fields, "ttl_seconds")?
+            .parse()
+            .map_err(|e| RegistryError::Malformed(format!("ttl_seconds: {e}")))?,
+        sliding_ttl: utf8(fields, "sliding_ttl")? == "1",
     })
 }
 

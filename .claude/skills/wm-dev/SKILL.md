@@ -217,6 +217,45 @@ journaled — those go to stderr/OTel as host operational logs.
   near-misses computation on unmatched records (currently `[]`),
   configurable TTLs, OTel logs export.
 
+## Group lifecycle (slice 8)
+
+Groups are first-class lifecycle units. Every route, kv/gkv key, and
+journal entry has a parent group; when the group goes away (explicit
+DELETE *or* Valkey TTL expiry), the children go with it.
+
+- **Endpoints:** `POST/GET /__api/groups`,
+  `GET/PATCH/DELETE /__api/groups/{group}`,
+  `POST /__api/groups/{group}/refresh`,
+  `DELETE /__api/groups/{group}/state`,
+  `DELETE /__api/groups/{group}/journal`. Owner-or-admin for per-group
+  actions; non-admin list filters to owned groups.
+- **TTL.** Default 24h, max 30d, configured per-group. `sliding_ttl`
+  defaults to `true` — every successful route match in `dispatch_inner`
+  bumps the group's TTL (best-effort; a Valkey hiccup logs and
+  continues). Implicit groups (created when a route is POSTed without a
+  `group:` reference) inherit the same defaults plus the route
+  creator as owner, so they live as long as traffic flows.
+- **Cascade.** `Registry::cascade_delete_group(group_id)` is the
+  single cleanup path. Wipes routes (and their indexes + per-route
+  kv namespace), gkv namespace, journal entries, counters, and the
+  group record + indexes. Idempotent: every Valkey op is a no-op if
+  the target is gone, so multiple sweepers (or a sweeper racing an
+  explicit DELETE) can't corrupt state.
+- **Sweeper** (`crates/wm-host/src/lifecycle.rs`). Runs every 30s by
+  default. Walks `route:all`, dedupes by group_id, cascades any group
+  whose `group:{ulid}` no longer resolves. `Sweeper::single_pass()` is
+  exposed so tests can drive it deterministically; the spawn variant
+  picks up via tokio's `interval`.
+- **Multi-host caveat:** the sweeper invalidates only the local
+  in-memory route table cache. Other hosts in a multi-host deployment
+  serve stale routes from their caches until they restart or run
+  their own sweep on the same group. Proper fix is Valkey keyspace
+  notifications (deferred).
+- **Deferred for slice 8:** rename, group export, `GET /state`,
+  keyspace notifications. Workaround for rename: create new group +
+  recreate routes + delete old; user can also use ULID as a stable
+  cross-rename handle.
+
 ## Route table architecture
 
 Three layers in `wm-host`:

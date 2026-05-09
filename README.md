@@ -25,7 +25,10 @@ Token and user management live at `/__api/tokens` and `/__api/users`
 (admin-only for cross-user actions; `GET /__api/users/me` for self).
 Every dispatched mock request and every unmatched request is journaled
 in Valkey (default 1h TTL); fetch via `GET /__api/journal/{group}` and
-`GET /__api/unmatched` (admin-only).
+`GET /__api/unmatched` (admin-only). Groups are first-class lifecycle
+units with TTL (default 24h, sliding-on-traffic by default); explicit
+DELETE cascades routes, kv/gkv state, and journal entries together,
+and a background sweeper reaps groups that hit their TTL.
 
 ## Layout
 

@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–7 landed. The WIT contract is live at
+**Status:** slices 1–8 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -27,6 +27,11 @@ at `/__api/users` (admin-only for cross-user actions, plus
 and DELETE checks owner-or-admin. Every dispatched mock request lands
 in a per-group journal (`/__api/journal/{group}`); unmatched requests
 land in `/__api/unmatched` (admin-only). Both default to a 1h TTL.
+Groups are first-class lifecycle units (`/__api/groups`) with
+configured TTL (default 24h, max 30d) and sliding-on-traffic by
+default; cascade-delete wipes routes, kv/gkv state, and journal
+entries together. A background sweeper reaps the children of any
+group whose Valkey TTL has fired.
 
 ## Where the design lives
 

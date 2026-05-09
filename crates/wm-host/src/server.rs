@@ -356,6 +356,17 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         tracing::warn!(error = %e, "failed to record journal entry");
     }
 
+    // Sliding TTL bump: best-effort. A failure here would mean Valkey
+    // is unhappy, in which case the journal write above probably also
+    // failed and the operator already knows. Don't punish the SUT.
+    if let Err(e) = state
+        .routes()
+        .registry()
+        .refresh_group_if_sliding(&matched.route.group_id)
+    {
+        tracing::warn!(error = %e, "sliding TTL bump failed");
+    }
+
     let mut axum_response = axum_response;
     inject_response_trace_id(&trace_id, axum_response.headers_mut());
     Ok(axum_response)
