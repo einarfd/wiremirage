@@ -58,6 +58,8 @@ pub fn router() -> Router<AppState> {
         // when ?group= is set, admin-only otherwise (matches the
         // host-wide unmatched read).
         .route("/__api/journal/tail", get(tail_journal))
+        // Match probe — read-only diagnostic. Any authenticated user.
+        .route("/__api/match", get(match_probe))
         // Unmatched — admin-only (host-wide and may include probing traffic).
         .route("/__api/unmatched", get(list_unmatched))
         .route("/__api/unmatched/{number}", get(get_unmatched_entry))
@@ -1151,4 +1153,121 @@ async fn tail_journal(
         }
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+// -- /__api/match -------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct MatchQuery {
+    method: String,
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum MatchResponse {
+    Hit {
+        matched: bool, // always true here; serialized for the wire shape
+        // Boxed to keep the enum's variants close in size (clippy's
+        // large_enum_variant lint).
+        route: Box<RouteResponse>,
+        path_params: Vec<(String, String)>,
+    },
+    Miss {
+        matched: bool, // always false here
+        near_misses: Vec<NearMissResponse>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct NearMissResponse {
+    route: String, // {group}/{n} slug
+    route_id: String,
+    route_path: String,
+    reason: NearMissReasonResponse,
+    details: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NearMissReasonResponse {
+    MethodMismatch,
+    PrefixMatch,
+}
+
+fn validate_match_query(q: &MatchQuery) -> Result<(), ApiError> {
+    if q.method.is_empty()
+        || !q
+            .method
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '-' || c == '_')
+    {
+        return Err(ApiError::validation(
+            "method must be uppercase ASCII (e.g. POST, GET, ANY)",
+        ));
+    }
+    if !q.path.starts_with('/') {
+        return Err(ApiError::validation("path must start with /"));
+    }
+    Ok(())
+}
+
+async fn match_probe(
+    State(state): State<AppState>,
+    _auth: AuthContext, // any authenticated user; the route record itself is the only thing returned
+    Query(q): Query<MatchQuery>,
+) -> Result<Json<MatchResponse>, ApiError> {
+    use crate::route_table::{MatchProbe, NearMissReason};
+
+    validate_match_query(&q)?;
+
+    match state.routes().probe(&q.method, &q.path) {
+        MatchProbe::Hit(m) => Ok(Json(MatchResponse::Hit {
+            matched: true,
+            route: Box::new(RouteResponse::from(&m.route)),
+            path_params: m.path_params,
+        })),
+        MatchProbe::Miss(near) => Ok(Json(MatchResponse::Miss {
+            matched: false,
+            near_misses: near
+                .into_iter()
+                .map(|nm| {
+                    let slug = render_slug(&nm.route.group_name, nm.route.number);
+                    let path = nm.route.path.clone();
+                    let route_id = nm.route.id.clone();
+                    let (reason, details) = match nm.reason {
+                        NearMissReason::MethodMismatch {
+                            expected_methods,
+                            got,
+                        } => (
+                            NearMissReasonResponse::MethodMismatch,
+                            serde_json::json!({
+                                "expected_methods": expected_methods,
+                                "got": got,
+                            }),
+                        ),
+                        NearMissReason::PrefixMatch {
+                            segment_index,
+                            expected,
+                            got,
+                        } => (
+                            NearMissReasonResponse::PrefixMatch,
+                            serde_json::json!({
+                                "segment_index": segment_index,
+                                "expected": expected,
+                                "got": got,
+                            }),
+                        ),
+                    };
+                    NearMissResponse {
+                        route: slug,
+                        route_id,
+                        route_path: path,
+                        reason,
+                        details,
+                    }
+                })
+                .collect(),
+        })),
+    }
 }

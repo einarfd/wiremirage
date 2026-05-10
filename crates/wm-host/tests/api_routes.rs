@@ -2000,3 +2000,131 @@ async fn group_endpoints_require_auth() {
         assert_eq!(resp.status().as_u16(), 401, "GET {path}");
     }
 }
+
+// -- /__api/match -----------------------------------------------------------
+
+#[tokio::test]
+async fn match_probe_requires_auth() {
+    let h = Harness::start().await;
+    let unauth = h.unauthenticated_client();
+    let resp = unauth
+        .get(h.url("/__api/match?method=GET&path=/anything"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[tokio::test]
+async fn match_probe_returns_hit_for_matching_route() {
+    let h = Harness::start().await;
+    h.create_route_body(json!({
+        "methods": ["POST"],
+        "path": "/v1/charges/{id}",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+
+    let resp = h
+        .client
+        .get(h.url("/__api/match?method=POST&path=/v1/charges/abc"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["matched"], true);
+    assert_eq!(body["route"]["path"], "/v1/charges/{id}");
+    let params = body["path_params"].as_array().unwrap();
+    assert_eq!(params[0][0], "id");
+    assert_eq!(params[0][1], "abc");
+}
+
+#[tokio::test]
+async fn match_probe_returns_method_mismatch_near_miss() {
+    let h = Harness::start().await;
+    h.create_route_body(json!({
+        "methods": ["POST"],
+        "path": "/v1/charges",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+
+    let resp = h
+        .client
+        .get(h.url("/__api/match?method=GET&path=/v1/charges"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["matched"], false);
+    let near = body["near_misses"].as_array().unwrap();
+    assert_eq!(near.len(), 1);
+    assert_eq!(near[0]["reason"], "method_mismatch");
+    assert_eq!(near[0]["details"]["got"], "GET");
+    assert_eq!(
+        near[0]["details"]["expected_methods"]
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap(),
+        "POST"
+    );
+}
+
+#[tokio::test]
+async fn match_probe_returns_prefix_match_near_miss() {
+    let h = Harness::start().await;
+    h.create_route_body(json!({
+        "methods": ["GET"],
+        "path": "/v1/charges",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+
+    let resp = h
+        .client
+        .get(h.url("/__api/match?method=GET&path=/v1/charge"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["matched"], false);
+    let near = body["near_misses"].as_array().unwrap();
+    assert_eq!(near.len(), 1);
+    assert_eq!(near[0]["reason"], "prefix_match");
+    assert_eq!(near[0]["details"]["expected"], "charges");
+    assert_eq!(near[0]["details"]["got"], "charge");
+}
+
+#[tokio::test]
+async fn match_probe_rejects_bad_method() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .get(h.url("/__api/match?method=get&path=/v1/charges"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn match_probe_rejects_bad_path() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .get(h.url("/__api/match?method=GET&path=no-leading-slash"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 400);
+}

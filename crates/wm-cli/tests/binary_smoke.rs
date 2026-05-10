@@ -22,6 +22,7 @@ const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
 
 struct Harness {
     host_url: String,
+    state: AppState,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -40,7 +41,8 @@ async fn start() -> Harness {
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage);
-    let app = router(AppState::new(runtime, routes, auth, journal));
+    let state = AppState::new(runtime, routes, auth, journal);
+    let app = router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -51,6 +53,7 @@ async fn start() -> Harness {
     });
     Harness {
         host_url: format!("http://{addr}"),
+        state,
         server,
     }
 }
@@ -182,6 +185,84 @@ async fn wm_groups_create_then_list_then_delete() {
     .await
     .expect("blocking");
     assert!(del.status.success());
+}
+
+#[tokio::test]
+async fn wm_match_against_real_host() {
+    let h = start().await;
+    // Plant a route via the registry (no wasm validation).
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/charges".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: "test-owner".into(),
+        })
+        .expect("create_route");
+    h.state.routes().refresh_after_create(route);
+
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+
+    // Hit case via JSON.
+    let host_h = host.clone();
+    let token_h = token.clone();
+    let hit = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host_h,
+                "--token",
+                &token_h,
+                "--json",
+                "match",
+                "POST",
+                "/v1/charges",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(hit.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&hit.stdout).expect("hit json parses");
+    assert_eq!(parsed["matched"], true);
+    assert_eq!(parsed["route"]["path"], "/v1/charges");
+
+    // Miss case via human format.
+    let host_m = host;
+    let token_m = token;
+    let miss = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host_m,
+                "--token",
+                &token_m,
+                "match",
+                "GET",
+                "/v1/charges",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(miss.status.success());
+    let stdout = String::from_utf8_lossy(&miss.stdout);
+    assert!(stdout.contains("no match"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("method_mismatch"),
+        "expected method_mismatch reason, stdout was: {stdout}"
+    );
 }
 
 #[tokio::test]

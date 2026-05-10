@@ -11,7 +11,8 @@
 use serde::Serialize;
 use wm_core::{
     GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse, ListJournalResponse,
-    ListRoutesResponse, ListTokensResponse, RouteRecord, TokenRecord,
+    ListRoutesResponse, ListTokensResponse, MatchResponse, NearMiss, NearMissReason, RouteRecord,
+    TokenRecord,
 };
 
 /// Output mode requested via the global `--json` flag.
@@ -307,6 +308,87 @@ fn print_row<S: AsRef<str>>(cells: &[S], widths: &[usize]) {
     // Trim trailing whitespace on the rendered line (only the very
     // last column would have it).
     println!("{}", line.trim_end());
+}
+
+// -- Match probe -------------------------------------------------------------
+
+pub fn render_match(resp: &MatchResponse, format: Format) {
+    match format {
+        Format::Json => print_json(resp),
+        Format::Human => match resp {
+            MatchResponse::Hit(hit) => {
+                let r = &hit.route;
+                println!(
+                    "matched {}/{} ({} {})",
+                    r.group.name,
+                    r.number,
+                    r.methods.join(","),
+                    r.path,
+                );
+                if !hit.path_params.is_empty() {
+                    println!("path_params:");
+                    for (k, v) in &hit.path_params {
+                        println!("  {k} = {v}");
+                    }
+                }
+            }
+            MatchResponse::Miss(miss) => {
+                if miss.near_misses.is_empty() {
+                    println!("no match, and no near-misses found");
+                    return;
+                }
+                println!("no match. near-misses:");
+                for nm in &miss.near_misses {
+                    println!("  - {} ({})", nm.route, nm.route_path);
+                    print_near_miss_reason(nm);
+                }
+            }
+        },
+    }
+}
+
+fn print_near_miss_reason(nm: &NearMiss) {
+    match nm.reason {
+        NearMissReason::MethodMismatch => {
+            let expected = nm
+                .details
+                .get("expected_methods")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let got = nm
+                .details
+                .get("got")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!("    reason: method_mismatch (expected: [{expected}], got: {got})");
+        }
+        NearMissReason::PrefixMatch => {
+            let idx = nm
+                .details
+                .get("segment_index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let expected = nm
+                .details
+                .get("expected")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let got = nm
+                .details
+                .get("got")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!(
+                "    reason: prefix_match (segment {idx}: expected {expected:?}, got {got:?})"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–12 landed. The WIT contract is live at
+**Status:** slices 1–13 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -37,15 +37,18 @@ public probes. Auth via `WM_TOKEN` / `--token`, host via `WM_HOST` /
 `--host`. `--json` switches to machine-parseable output for scripts
 and agents. The MCP server (slice 10) is part of `wm-host` and
 mounts at `/__api/mcp` over the streamable-HTTP transport (rmcp).
-15 tools now cover identity, discovery, group/route CRUD, group
-state, plus the slice-11 streaming pair (`wait_for_request`,
+16 tools now cover identity, discovery, group/route CRUD, group
+state, the slice-11 streaming pair (`wait_for_request`,
 `tail_journal`) backed by `GET /__api/journal/tail` SSE on the host
-and a single-host broadcast bus inside `Journal`. Same bearer-token
-auth throughout. Multi-host fan-out (Valkey pub/sub) and 4
-host-blocked tools land in follow-up slices. The user-facing skill
-(slice 12) ships at `skill/wiremirage/` (with a debug sub-skill at
-`skill/wiremirage-debug/`) — `SKILL.md` + 3 ready-to-run scripts
-teaching the CLI workflow.
+and a single-host broadcast bus inside `Journal`, plus the slice-13
+match probe (`find_route` MCP tool + `wm match` CLI + `GET
+/__api/match` host endpoint with `method_mismatch` and `prefix_match`
+near-misses). Same bearer-token auth throughout. Multi-host fan-out
+(Valkey pub/sub) and 3 remaining host-blocked tools (update_route /
+dry_run_route / clear_route_state) land in follow-up slices. The
+user-facing skill (slice 12) ships at `skill/wiremirage/` (with a
+debug sub-skill at `skill/wiremirage-debug/`) — `SKILL.md` + 3
+ready-to-run scripts teaching the CLI workflow.
 
 ## Where the design lives
 

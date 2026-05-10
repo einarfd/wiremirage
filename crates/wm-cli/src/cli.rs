@@ -53,6 +53,13 @@ pub enum Command {
     /// Manage API tokens.
     #[command(subcommand)]
     Tokens(TokensCommand),
+    /// Probe what would match a hypothetical request.
+    Match {
+        /// HTTP method (e.g. `GET`, `POST`, `ANY`).
+        method: String,
+        /// Request path (must start with `/`).
+        path: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -200,6 +200,57 @@ pub struct CreateTokenBody {
     pub ttl_seconds: Option<u64>,
 }
 
+// -- Match probe -------------------------------------------------------------
+
+/// Response from `GET /__api/match`. Either a hit (with the matched
+/// route) or a miss (with the list of near-misses).
+///
+/// Both variants are boxed so the enum doesn't lopsidedly pay for
+/// the larger `MatchHit` (which carries a full `RouteRecord`) on
+/// every miss.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MatchResponse {
+    Hit(Box<MatchHit>),
+    Miss(Box<MatchMiss>),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MatchHit {
+    /// Always `true`; carried as a flag so the wire shape is
+    /// self-describing without relying on the enum tag.
+    pub matched: bool,
+    pub route: RouteRecord,
+    pub path_params: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MatchMiss {
+    /// Always `false`; carried for the same reason as on `MatchHit`.
+    pub matched: bool,
+    pub near_misses: Vec<NearMiss>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NearMiss {
+    /// `{group}/{n}` slug.
+    pub route: String,
+    pub route_id: String,
+    pub route_path: String,
+    pub reason: NearMissReason,
+    /// Free-form details. Shape depends on `reason`; for
+    /// `method_mismatch` it's `{expected_methods, got}`, for
+    /// `prefix_match` it's `{segment_index, expected, got}`.
+    pub details: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NearMissReason {
+    MethodMismatch,
+    PrefixMatch,
+}
+
 // -- Errors ------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

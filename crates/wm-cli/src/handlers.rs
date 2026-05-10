@@ -34,7 +34,8 @@ pub async fn dispatch(args: Cli) -> anyhow::Result<ExitCode> {
     let format = Format::from_flag(args.json);
 
     // Two commands work without a token. Fast-path them so missing
-    // token doesn't bother the user.
+    // token doesn't bother the user. (`wm match` does need a token —
+    // it's a host-side probe, not a local computation.)
     let needs_token = !matches!(args.command, Command::Health | Command::Version);
     if needs_token && args.token.is_none() {
         emit_error(
@@ -58,6 +59,7 @@ pub async fn dispatch(args: Cli) -> anyhow::Result<ExitCode> {
         Command::Routes(cmd) => handle_routes(&client, cmd, format).await,
         Command::Journal(cmd) => handle_journal(&client, cmd, format).await,
         Command::Tokens(cmd) => handle_tokens(&client, cmd, format).await,
+        Command::Match { method, path } => handle_match(&client, &method, &path, format).await,
     };
 
     match result {
@@ -380,6 +382,19 @@ async fn handle_tokens(
             }
         }
     }
+    Ok(())
+}
+
+// -- Match probe -------------------------------------------------------------
+
+async fn handle_match(
+    client: &Client,
+    method: &str,
+    path: &str,
+    format: Format,
+) -> Result<(), ClientError> {
+    let resp = client.match_route(method, path).await?;
+    format::render_match(&resp, format);
     Ok(())
 }
 

@@ -1,5 +1,5 @@
 //! Discovery / orientation tools — `summarize_workspace`,
-//! `list_recent_unmatched`.
+//! `list_recent_unmatched`, `find_route`.
 
 use rmcp::ErrorData;
 use rmcp::Json;
@@ -9,11 +9,15 @@ use rmcp::tool;
 use rmcp::tool_router;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::journal::UnmatchedCursor;
 use crate::mcp::context::auth_from;
-use crate::mcp::error::{forbidden, map_journal_error, map_registry_error};
+use crate::mcp::error::{forbidden, map_journal_error, map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
+use crate::mcp::tools::routes::RouteRecord;
+use crate::registry::render_slug;
+use crate::route_table::{MatchProbe, NearMissReason};
 
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -64,6 +68,49 @@ pub struct UnmatchedSummary {
     pub path: String,
     pub created_at: String,
     pub trace_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FindRouteArgs {
+    /// HTTP method (e.g. `GET`, `POST`, `ANY`).
+    pub method: String,
+    /// Request path (must start with `/`).
+    pub path: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FindRouteResult {
+    /// `true` when a route was found that handles `(method, path)`.
+    pub matched: bool,
+    /// The matched route record. Set iff `matched == true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteRecord>,
+    /// Path parameters extracted from the request path. Set iff
+    /// `matched == true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_params: Option<Vec<(String, String)>>,
+    /// Routes that almost matched. Empty when `matched == true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub near_misses: Vec<FindRouteNearMiss>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FindRouteNearMiss {
+    /// `{group}/{n}` slug.
+    pub route: String,
+    pub route_id: String,
+    pub route_path: String,
+    pub reason: FindRouteNearMissReason,
+    /// Free-form details — shape depends on `reason`. See the host's
+    /// REST `/__api/match` endpoint for the matching JSON contract.
+    pub details: JsonValue,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FindRouteNearMissReason {
+    MethodMismatch,
+    PrefixMatch,
 }
 
 #[tool_router(router = discovery_router, vis = "pub(crate)")]
@@ -164,5 +211,87 @@ impl WmMcpServer {
             })
             .collect();
         Ok(Json(ListRecentUnmatchedResult { entries }))
+    }
+
+    #[tool(
+        name = "find_route",
+        description = "Probe what would match a hypothetical request: a method + path pair, like an inbound HTTP request. Returns the matching route if there is one, or a list of near-misses (method-mismatch or literal-prefix typos) explaining what almost matched. Reach for this when debugging \"my mock isn't firing\" — it tells you whether any route exists for the request, and if not, the closest candidates."
+    )]
+    pub async fn find_route(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<FindRouteArgs>,
+    ) -> Result<Json<FindRouteResult>, ErrorData> {
+        // Auth: any authenticated user. The match probe is a
+        // read-only diagnostic; the route record itself is the only
+        // thing returned.
+        let _auth = auth_from(&parts)?;
+
+        if args.method.is_empty()
+            || !args
+                .method
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '-' || c == '_')
+        {
+            return Err(validation(
+                "method must be uppercase ASCII (e.g. POST, GET, ANY)",
+            ));
+        }
+        if !args.path.starts_with('/') {
+            return Err(validation("path must start with /"));
+        }
+
+        match self.state.routes().probe(&args.method, &args.path) {
+            MatchProbe::Hit(m) => Ok(Json(FindRouteResult {
+                matched: true,
+                route: Some(RouteRecord::from(&m.route)),
+                path_params: Some(m.path_params),
+                near_misses: Vec::new(),
+            })),
+            MatchProbe::Miss(near) => Ok(Json(FindRouteResult {
+                matched: false,
+                route: None,
+                path_params: None,
+                near_misses: near
+                    .into_iter()
+                    .map(|nm| {
+                        let slug = render_slug(&nm.route.group_name, nm.route.number);
+                        let path = nm.route.path.clone();
+                        let route_id = nm.route.id.clone();
+                        let (reason, details) = match nm.reason {
+                            NearMissReason::MethodMismatch {
+                                expected_methods,
+                                got,
+                            } => (
+                                FindRouteNearMissReason::MethodMismatch,
+                                serde_json::json!({
+                                    "expected_methods": expected_methods,
+                                    "got": got,
+                                }),
+                            ),
+                            NearMissReason::PrefixMatch {
+                                segment_index,
+                                expected,
+                                got,
+                            } => (
+                                FindRouteNearMissReason::PrefixMatch,
+                                serde_json::json!({
+                                    "segment_index": segment_index,
+                                    "expected": expected,
+                                    "got": got,
+                                }),
+                            ),
+                        };
+                        FindRouteNearMiss {
+                            route: slug,
+                            route_id,
+                            route_path: path,
+                            reason,
+                            details,
+                        }
+                    })
+                    .collect(),
+            })),
+        }
     }
 }

@@ -14,7 +14,7 @@ use anyhow::Result;
 use wasmtime::Engine;
 use wasmtime::component::Component;
 
-use crate::pattern::{Methods, Pattern};
+use crate::pattern::{Methods, Pattern, Segment};
 use crate::registry::{Registry, Route};
 
 #[derive(Debug, Clone)]
@@ -22,6 +22,52 @@ pub struct MatchedRoute {
     pub route: Route,
     pub matched_pattern: String,
     pub path_params: Vec<(String, String)>,
+}
+
+/// Cap on how many near-misses we surface for one match probe. The
+/// near-miss list is for human/agent debugging; if there are dozens
+/// of routes whose patterns match the path, the user has bigger
+/// problems than the order of the response.
+const NEAR_MISS_LIMIT: usize = 20;
+
+/// One reason why a route *almost* matched a request. The taxonomy
+/// is intentionally small in slice 13 — we ship `method_mismatch`
+/// (pattern matches but methods don't) and `prefix_match` (one
+/// segment differs by a literal string-prefix, e.g. `/v1/charge` vs
+/// `/v1/charges`). `path_shape_match_in_other_group` from the design
+/// spec is not a distinct reason here; that case shows up as a
+/// `method_mismatch` whose route record names a different group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NearMissReason {
+    /// The route's pattern matches the request path, but the
+    /// methods don't overlap.
+    MethodMismatch {
+        expected_methods: Vec<String>,
+        got: String,
+    },
+    /// A literal-prefix near-miss on a single segment: the route's
+    /// pattern matches in every segment except one, where one
+    /// segment is a string-prefix of the other.
+    PrefixMatch {
+        segment_index: usize,
+        expected: String,
+        got: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct NearMiss {
+    pub route: Route,
+    pub reason: NearMissReason,
+}
+
+/// `Hit` is boxed so the enum doesn't lopsidedly pay for the
+/// matched-route variant on every miss. Same trick wm-core's
+/// `MatchResponse` uses for the same reason.
+#[derive(Debug, Clone)]
+pub enum MatchProbe {
+    Hit(Box<MatchedRoute>),
+    Miss(Vec<NearMiss>),
 }
 
 pub struct RouteTable {
@@ -68,6 +114,49 @@ impl RouteTable {
             }
         }
         None
+    }
+
+    /// Run the match probe: return the actual match if there is one,
+    /// otherwise compute near-misses against the loaded route set.
+    /// Used by `GET /__api/match` and the MCP `find_route` tool.
+    pub fn probe(&self, method: &str, path: &str) -> MatchProbe {
+        if let Some(m) = self.find_match(method, path) {
+            return MatchProbe::Hit(Box::new(m));
+        }
+        let routes = self.routes.read().expect("poisoned");
+        let mut near = Vec::new();
+        for route in routes.iter() {
+            let pattern = match Pattern::parse(&route.path) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if pattern.match_path(path).is_some() {
+                // Pattern matches but methods don't — the most useful
+                // hint by far.
+                near.push(NearMiss {
+                    route: route.clone(),
+                    reason: NearMissReason::MethodMismatch {
+                        expected_methods: route.methods.clone(),
+                        got: method.to_string(),
+                    },
+                });
+                continue;
+            }
+            if let Some((idx, expected, got)) = prefix_segment_diff(&pattern, path) {
+                near.push(NearMiss {
+                    route: route.clone(),
+                    reason: NearMissReason::PrefixMatch {
+                        segment_index: idx,
+                        expected,
+                        got,
+                    },
+                });
+            }
+        }
+        if near.len() > NEAR_MISS_LIMIT {
+            near.truncate(NEAR_MISS_LIMIT);
+        }
+        MatchProbe::Miss(near)
     }
 
     /// Return the cached compiled `Component` for the route, compiling on
@@ -133,6 +222,65 @@ impl RouteTable {
     pub fn snapshot(&self) -> Vec<Route> {
         self.routes.read().expect("poisoned").clone()
     }
+}
+
+/// Detect a literal-prefix near-miss between a route's pattern and a
+/// request path. Returns `Some((segment_index, expected, got))` when:
+/// (1) the segment counts match, (2) every other segment is
+/// compatible (literal-equal or pattern-param), and (3) exactly one
+/// pair of literal segments differs by being a string-prefix of the
+/// other in either direction.
+///
+/// This catches typos like `/v1/charge` vs `/v1/charges` without
+/// flagging unrelated paths.
+fn prefix_segment_diff(pattern: &Pattern, path: &str) -> Option<(usize, String, String)> {
+    let trimmed = if path.len() > 1 && path.ends_with('/') {
+        &path[..path.len() - 1]
+    } else {
+        path
+    };
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let request_segments: Vec<&str> = if trimmed == "/" {
+        Vec::new()
+    } else {
+        trimmed[1..].split('/').collect()
+    };
+    if request_segments.len() != pattern.segments.len() {
+        return None;
+    }
+    let mut diff: Option<(usize, String, String)> = None;
+    for (i, (route_seg, req_seg)) in pattern
+        .segments
+        .iter()
+        .zip(request_segments.iter())
+        .enumerate()
+    {
+        match route_seg {
+            Segment::Param(_) => {
+                // Param segments accept any non-empty value; not a
+                // diff candidate.
+            }
+            Segment::Literal(expected) => {
+                if expected == req_seg {
+                    continue;
+                }
+                let is_prefix =
+                    expected.starts_with(*req_seg) || req_seg.starts_with(expected.as_str());
+                if !is_prefix {
+                    return None;
+                }
+                if diff.is_some() {
+                    // More than one segment differs — not a clean
+                    // prefix near-miss.
+                    return None;
+                }
+                diff = Some((i, expected.clone(), req_seg.to_string()));
+            }
+        }
+    }
+    diff
 }
 
 #[cfg(test)]
@@ -209,5 +357,131 @@ mod tests {
         assert!(table.find_match("GET", "/v1/charges").is_some());
         table.refresh_after_delete(&route.id);
         assert!(table.find_match("GET", "/v1/charges").is_none());
+    }
+
+    // -- Match probe tests ---------------------------------------------------
+
+    #[test]
+    fn probe_returns_hit_when_route_matches() {
+        let table = route_table();
+        let route = add(&table, &["POST"], "/v1/charges");
+        match table.probe("POST", "/v1/charges") {
+            MatchProbe::Hit(m) => assert_eq!(m.route.id, route.id),
+            MatchProbe::Miss(_) => panic!("expected hit"),
+        }
+    }
+
+    #[test]
+    fn probe_method_mismatch_surfaces_as_near_miss() {
+        let table = route_table();
+        let route = add(&table, &["POST"], "/v1/charges");
+        match table.probe("GET", "/v1/charges") {
+            MatchProbe::Miss(near) => {
+                assert_eq!(near.len(), 1);
+                assert_eq!(near[0].route.id, route.id);
+                match &near[0].reason {
+                    NearMissReason::MethodMismatch {
+                        expected_methods,
+                        got,
+                    } => {
+                        assert_eq!(expected_methods, &vec!["POST".to_string()]);
+                        assert_eq!(got, "GET");
+                    }
+                    other => panic!("expected MethodMismatch, got {other:?}"),
+                }
+            }
+            MatchProbe::Hit(_) => panic!("expected miss"),
+        }
+    }
+
+    #[test]
+    fn probe_prefix_match_on_typo_path() {
+        let table = route_table();
+        let route = add(&table, &["GET"], "/v1/charges");
+        match table.probe("GET", "/v1/charge") {
+            MatchProbe::Miss(near) => {
+                assert_eq!(near.len(), 1);
+                assert_eq!(near[0].route.id, route.id);
+                match &near[0].reason {
+                    NearMissReason::PrefixMatch {
+                        segment_index,
+                        expected,
+                        got,
+                    } => {
+                        assert_eq!(*segment_index, 1);
+                        assert_eq!(expected, "charges");
+                        assert_eq!(got, "charge");
+                    }
+                    other => panic!("expected PrefixMatch, got {other:?}"),
+                }
+            }
+            MatchProbe::Hit(_) => panic!("expected miss"),
+        }
+    }
+
+    #[test]
+    fn probe_returns_no_near_miss_for_unrelated_path() {
+        let table = route_table();
+        let _ = add(&table, &["GET"], "/v1/charges");
+        // /completely/different has different segment count + no
+        // prefix overlap.
+        match table.probe("GET", "/completely/different/path/here") {
+            MatchProbe::Miss(near) => assert!(near.is_empty()),
+            MatchProbe::Hit(_) => panic!("expected miss"),
+        }
+    }
+
+    #[test]
+    fn probe_method_mismatch_wins_over_prefix_when_both_fit() {
+        // Two routes: one's pattern matches but methods don't (clean
+        // method_mismatch); a second has a prefix-typo path with the
+        // right method. The probe should report both — the consumer
+        // decides which is more useful.
+        let table = route_table();
+        let r1 = add(&table, &["POST"], "/v1/charges");
+        let r2 = add(&table, &["GET"], "/v1/charges-archive");
+        match table.probe("GET", "/v1/charges") {
+            MatchProbe::Miss(near) => {
+                assert_eq!(near.len(), 2);
+                assert!(near.iter().any(|n| n.route.id == r1.id
+                    && matches!(n.reason, NearMissReason::MethodMismatch { .. })));
+                assert!(near.iter().any(|n| n.route.id == r2.id
+                    && matches!(n.reason, NearMissReason::PrefixMatch { .. })));
+            }
+            MatchProbe::Hit(_) => panic!("expected miss"),
+        }
+    }
+
+    #[test]
+    fn probe_prefix_match_treats_param_segments_as_compatible() {
+        // Path /v1/users/{id}/posts/all vs request /v1/users/123/posts/al
+        // Last segment differs by prefix; param segment is fine.
+        let table = route_table();
+        let route = add(&table, &["GET"], "/v1/users/{id}/posts/all");
+        match table.probe("GET", "/v1/users/123/posts/al") {
+            MatchProbe::Miss(near) => {
+                assert_eq!(near.len(), 1);
+                assert_eq!(near[0].route.id, route.id);
+                assert!(matches!(
+                    near[0].reason,
+                    NearMissReason::PrefixMatch {
+                        segment_index: 4,
+                        ..
+                    }
+                ));
+            }
+            MatchProbe::Hit(_) => panic!("expected miss"),
+        }
+    }
+
+    #[test]
+    fn probe_does_not_report_two_segment_diffs_as_prefix_match() {
+        let table = route_table();
+        let _ = add(&table, &["GET"], "/v1/charges");
+        // Both segments differ — not a clean prefix near-miss.
+        match table.probe("GET", "/v2/refunds") {
+            MatchProbe::Miss(near) => assert!(near.is_empty()),
+            MatchProbe::Hit(_) => panic!("expected miss"),
+        }
     }
 }

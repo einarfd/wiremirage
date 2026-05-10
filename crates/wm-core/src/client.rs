@@ -293,6 +293,24 @@ impl Client {
         .await
     }
 
+    // -- Match probe ----------------------------------------------------
+
+    /// Probe what would match a hypothetical request. Returns either
+    /// the route that would handle it (`MatchResponse::Hit`) or a
+    /// list of near-misses (`MatchResponse::Miss`).
+    pub async fn match_route(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Result<crate::models::MatchResponse, ClientError> {
+        let qs = format!(
+            "/__api/match?method={}&path={}",
+            urlencode(method),
+            urlencode(path),
+        );
+        self.send(Method::GET, &qs, None::<&()>).await
+    }
+
     // -- Generic plumbing -----------------------------------------------
 
     async fn send<B: Serialize, R: DeserializeOwned>(

@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use wm_core::{Client, ClientError, CreateGroupBody, CreateTokenBody, PatchGroupBody};
+use wm_core::{
+    Client, ClientError, CreateGroupBody, CreateTokenBody, MatchResponse, PatchGroupBody,
+};
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
 use wm_host::registry::Registry;
@@ -18,6 +20,7 @@ const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
 
 struct Harness {
     host_url: String,
+    state: AppState,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -36,7 +39,8 @@ async fn start() -> Harness {
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage);
-    let app = router(AppState::new(runtime, routes, auth, journal));
+    let state = AppState::new(runtime, routes, auth, journal);
+    let app = router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -47,6 +51,7 @@ async fn start() -> Harness {
     });
     Harness {
         host_url: format!("http://{addr}"),
+        state,
         server,
     }
 }
@@ -188,6 +193,62 @@ async fn journal_list_empty_for_fresh_group() {
         .await
         .expect("list journal");
     assert!(listed.entries.is_empty());
+}
+
+#[tokio::test]
+async fn match_route_round_trips_hit_and_miss() {
+    let h = start().await;
+    let client = client(&h.host_url);
+
+    // Insert a route directly through the registry — the REST
+    // create-route path validates wasm bytes, but the match probe
+    // only consults stored metadata. Going via the registry keeps
+    // this test free of wasm fixtures.
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/charges".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: "test-owner".into(),
+        })
+        .expect("registry create_route");
+    h.state.routes().refresh_after_create(route);
+
+    // Hit case.
+    let hit_resp = client
+        .match_route("POST", "/v1/charges")
+        .await
+        .expect("match POST /v1/charges");
+    match hit_resp {
+        MatchResponse::Hit(hit) => {
+            assert!(hit.matched);
+            assert_eq!(hit.route.path, "/v1/charges");
+        }
+        MatchResponse::Miss(_) => panic!("expected hit"),
+    }
+
+    // Miss + method mismatch near-miss.
+    let miss_resp = client
+        .match_route("GET", "/v1/charges")
+        .await
+        .expect("match GET /v1/charges");
+    match miss_resp {
+        MatchResponse::Miss(miss) => {
+            assert!(!miss.matched);
+            assert_eq!(miss.near_misses.len(), 1);
+            assert_eq!(
+                miss.near_misses[0].reason,
+                wm_core::NearMissReason::MethodMismatch
+            );
+        }
+        MatchResponse::Hit(_) => panic!("expected miss"),
+    }
 }
 
 #[tokio::test]

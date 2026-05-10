@@ -423,6 +423,40 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Match probe (slice 13)
+
+`GET /__api/match?method=&path=` answers "what would handle this
+request?" with either the matching route or a list of near-misses.
+Mirrored as `wm match METHOD PATH` in the CLI and `find_route` in
+MCP.
+
+- **Code lives:** `RouteTable::probe` in `route_table.rs` builds the
+  result; `prefix_segment_diff` near it computes prefix near-misses.
+  `MatchProbe::Hit` is boxed to keep the enum's variants
+  size-balanced (clippy's `large_enum_variant`); same trick on
+  `wm-core::MatchResponse`.
+- **Reasons shipped:** `method_mismatch` (pattern matches, methods
+  don't) and `prefix_match` (single-segment literal-prefix typo,
+  e.g. `/v1/charge` vs `/v1/charges`).
+  `path_shape_match_in_other_group` from the design spec is *not* a
+  distinct reason — that case shows up as a `method_mismatch` whose
+  `route` field names the foreign group, so consumers can branch on
+  that themselves.
+- **Auth:** any authenticated user (read-only diagnostic). Cross-
+  group visibility is intentional — the probe shows route paths and
+  methods regardless of ownership; only modifications stay
+  owner-or-admin.
+- **Near-miss cap:** 20 entries (`NEAR_MISS_LIMIT`). If you hit it,
+  you almost certainly have bigger problems than the order.
+- **Tests:** matcher unit tests in `route_table::tests` cover hit /
+  method-mismatch / prefix-match / unrelated-path / both-reasons /
+  param-segments / two-segment-diff. REST integration in
+  `api_routes.rs` (`match_probe_*`); `wm-core::Client` round-trip
+  in `wm-cli/tests/wm_core_against_host.rs`; CLI binary in
+  `binary_smoke.rs`; MCP via rmcp client in `mcp_e2e.rs`. Each layer
+  has 1–6 cases — enough to catch wire-shape and code-path
+  regressions without overspecifying near-miss content.
+
 ## Live journal tail / streaming (slice 11)
 
 Live tail uses an in-process broadcast bus inside `Journal`

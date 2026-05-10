@@ -145,6 +145,8 @@ async fn list_tools_returns_all_expected_tools() {
         // Slice 11
         "tail_journal",
         "wait_for_request",
+        // Slice 13
+        "find_route",
     ];
     expected.sort();
     assert_eq!(names, expected);
@@ -509,6 +511,79 @@ async fn tail_journal_returns_on_idle_timeout() {
         .and_then(|v| v.as_array())
         .unwrap();
     assert_eq!(entries.len(), 1);
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn find_route_returns_hit_and_method_mismatch_near_miss() {
+    let h = start().await;
+
+    // Drop a route in via the registry (no wasm validation, no need
+    // for a fixture).
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/charges".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: "test-owner".into(),
+        })
+        .expect("create_route");
+    h.state.routes().refresh_after_create(route);
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Hit case.
+    let hit = client
+        .call_tool(
+            CallToolRequestParams::new("find_route").with_arguments(
+                serde_json::json!({ "method": "POST", "path": "/v1/charges" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("find_route hit");
+    let structured = hit.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("matched").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(structured["route"]["path"].as_str(), Some("/v1/charges"));
+
+    // Miss + near-miss.
+    let miss = client
+        .call_tool(
+            CallToolRequestParams::new("find_route").with_arguments(
+                serde_json::json!({ "method": "GET", "path": "/v1/charges" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("find_route miss");
+    let structured = miss.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("matched").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    let near = structured
+        .get("near_misses")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(near.len(), 1);
+    assert_eq!(near[0]["reason"].as_str(), Some("method_mismatch"));
 
     client.cancel().await.expect("cancel");
 }

@@ -14,30 +14,42 @@ The first move in almost every case is to check the journal — it tells you whe
 Two cases: the request reached the host but didn't match a route, or it never reached the host at all.
 
 ```sh
-# Did anything land in the journal recently?
-wm journal list <group> --limit 5
-
-# Or check across all of your groups (admin) — the most recent
-# entries usually point at where the issue is.
+# What would the host actually do with this request?
+wm match POST /v1/charges
 ```
 
-If you see the request in the journal of *some* group, the route is matching the wrong thing. If you don't see it anywhere, either the request didn't reach WireMirage (network / DNS / wrong host URL on the SUT side) or it landed without matching any route.
+`wm match` is the fastest way to narrow this down. If it prints `matched stripe-mock/3 (POST /v1/charges)` then the routing is fine and the question is whether the request actually reaches the host. If it prints `no match. near-misses: ...` the response tells you why — the most common shapes:
 
-For the unmatched case, check the host's unmatched log via the REST API directly — it's admin-only:
+- `method_mismatch` — the path is right but you're sending GET when the route expects POST (or vice versa). Check the SUT.
+- `prefix_match` — there's a route at `/v1/charges` and you're hitting `/v1/charge`, or you have a typo in either direction. Fix the path.
+
+If `wm match` shows no near-misses, the request hasn't been mocked at all and the SUT is hitting an unmocked endpoint.
+
+To confirm whether the request actually reached WireMirage:
+
+```sh
+# Did anything land in the journal recently?
+wm journal list <group> --limit 5
+```
+
+For unmatched-traffic inspection, the host's unmatched log is admin-only and not yet on the CLI; query the REST endpoint directly:
 
 ```sh
 curl -H "Authorization: Bearer $WM_TOKEN" $WM_HOST/__api/unmatched | jq .
 ```
 
-Each entry has the request method, path, headers, and body — enough to see why nothing matched (typo in the path, wrong method, the SUT is calling a different host).
+Each entry has the request method, path, headers, and body — enough to see whether the SUT is calling the right host at all.
 
-A `wm match METHOD PATH` probe and a `wm unmatched list` CLI command are both planned; they aren't shipped yet. Use the REST endpoint above for now.
+A `wm unmatched list` CLI command is planned; the REST endpoint above is the workaround until it ships.
 
 ## "My route exists but doesn't fire"
 
 Three common causes: the group expired, another route in another group is winning, or your method/path pattern is wrong.
 
 ```sh
+# What does the host actually match for the request the SUT is making?
+wm match <method> <path>
+
 # Check the group's expiry. If it's gone, the routes went with it.
 wm groups show <group>
 
@@ -50,7 +62,7 @@ wm routes list
 wm routes show <group>/<n>
 ```
 
-Path-pattern conflicts surface as 409 errors at create time, but two routes in *different* groups can both technically claim the same path; the host serializes — only one wins. If you've recreated the group recently, the older route may still be holding the path.
+`wm match` is especially useful here: it scans every route the host knows about (across all groups), so if some other group's route is winning, the slug in the result will say so. Path-pattern conflicts surface as 409 errors at create time, but recently-deleted-and-recreated routes can leave a previous owner's route holding the path until full cleanup completes.
 
 ## "My handler returned a 500 / the response shape is wrong"
 
@@ -63,7 +75,7 @@ wm journal show <group>/<n>
 
 The `error` field is non-empty when the handler trapped or threw; it includes the trap reason. The `handler_logs` array has anything the handler emitted via the host's `log` interface up to the point of failure. The `response` field shows what the host actually sent — useful when the handler succeeded but the headers/body don't match what the SUT expected.
 
-A `wm routes test <slug>` dry-run that invokes the handler against a synthetic request without journaling is planned; not shipped yet. For now, send the request through the live mock and read the journal.
+A `wm routes test <slug>` dry-run that invokes the handler against a synthetic request without journaling is planned; not shipped yet. For now, send the request through the live mock and read the journal. `wm match METHOD PATH` is the closest shipped substitute — it confirms the route would be selected for a given method/path, but doesn't actually run the handler.
 
 ## "State isn't persisting between requests"
 
