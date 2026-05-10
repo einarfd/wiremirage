@@ -28,7 +28,9 @@ in Valkey (default 1h TTL); fetch via `GET /__api/journal/{group}` and
 `GET /__api/unmatched` (admin-only). Groups are first-class lifecycle
 units with TTL (default 24h, sliding-on-traffic by default); explicit
 DELETE cascades routes, kv/gkv state, and journal entries together,
-and a background sweeper reaps groups that hit their TTL.
+and a background sweeper reaps groups that hit their TTL. The `wm` CLI
+wraps the REST surface end-to-end: groups, routes, journal, tokens, and
+the public probes — see "Using the CLI" below.
 
 ## Layout
 
@@ -112,6 +114,41 @@ just test-valkey       # Valkey-backed storage suite
 just test-sidecar      # builds the sidecar image, runs end-to-end TS test
 just check-all         # everything (fmt + clippy + test + tier-3)
 ```
+
+## Using the CLI
+
+The `wm` binary wraps the REST API. Auth and host URL come from the
+environment by default:
+
+```
+export WM_HOST=http://localhost:8080      # default; override for a remote host
+export WM_TOKEN=wmt_dev_local             # bearer token (matches the host's bootstrap)
+```
+
+Both can also be passed inline as `--host` / `--token`. Health and
+version probes work without a token; everything else requires one.
+
+```
+wm health                                  # probes /__health
+wm groups create stripe-mock               # default 24h sliding TTL
+wm routes add --group stripe-mock --method POST --path /v1/charges \
+  --source-file handler.ts                 # compiles via the sidecar
+wm routes list
+wm journal list stripe-mock                # newest first, paginated
+wm tokens create ci-runner                 # plaintext printed once
+wm groups delete stripe-mock --force       # cascades routes, kv, journal
+```
+
+Pass `--json` on any command for machine-parseable output (the contract
+for scripts and agents); the default human format is column-aligned text.
+Exit codes: `0` ok, `1` generic error, `2` clap usage error, `4` auth, `5`
+not-found, `6` conflict.
+
+What this slice ships and what it doesn't is captured in
+`cli-design.md` (private design doc). Notable deferrals: profiles /
+dotenv / `--config-file`, color, shell completions, `--from-file` body
+input, `wm journal tail`, `wm match`, route `update` / `test` / `state`,
+and admin user CRUD. Everything else from the spec is wired up.
 
 ## License
 

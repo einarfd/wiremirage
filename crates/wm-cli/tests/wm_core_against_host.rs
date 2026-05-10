@@ -1,0 +1,214 @@
+//! Tier-2 tests: drive `wm_core::Client` against a real `wm-host`
+//! booted in-process. Covers the happy paths that don't need a
+//! valid wasm component (groups, tokens, journal, error mapping).
+//! Route creation is exercised at tier 1 by the wm-core client mock
+//! and at tier 2 by `crates/wm-host/tests/api_routes.rs` against a
+//! real wasm fixture; we don't repeat that here.
+
+use std::sync::Arc;
+
+use wm_core::{Client, ClientError, CreateGroupBody, CreateTokenBody, PatchGroupBody};
+use wm_host::auth::Auth;
+use wm_host::journal::Journal;
+use wm_host::registry::Registry;
+use wm_host::route_table::RouteTable;
+use wm_host::{AppState, Runtime, Storage, router};
+
+const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
+
+struct Harness {
+    host_url: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn start() -> Harness {
+    let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
+        .expect("bootstrap admin");
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    let journal = Journal::new(storage);
+    let app = router(AppState::new(runtime, routes, auth, journal));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    Harness {
+        host_url: format!("http://{addr}"),
+        server,
+    }
+}
+
+fn client(host_url: &str) -> Client {
+    Client::builder(host_url)
+        .with_token(BOOTSTRAP_TOKEN)
+        .build()
+        .expect("build")
+}
+
+#[tokio::test]
+async fn health_works_without_a_token() {
+    let h = start().await;
+    let client = Client::builder(&h.host_url).build().expect("build");
+    let health = client.health().await.expect("health");
+    assert_eq!(health.status, "ok");
+}
+
+#[tokio::test]
+async fn group_full_round_trip() {
+    let h = start().await;
+    let client = client(&h.host_url);
+
+    // Create.
+    let body = CreateGroupBody {
+        name: "stripe-mock".into(),
+        ttl_seconds: Some(3600),
+        sliding_ttl: Some(false),
+    };
+    let g = client.create_group(&body).await.expect("create");
+    assert_eq!(g.name, "stripe-mock");
+    assert_eq!(g.ttl_seconds, 3600);
+    assert!(!g.sliding_ttl);
+
+    // List — bootstrap (admin) sees it.
+    let listed = client.list_groups().await.expect("list");
+    assert!(listed.groups.iter().any(|x| x.name == "stripe-mock"));
+
+    // Get one.
+    let one = client.get_group("stripe-mock").await.expect("get");
+    assert_eq!(one.id, g.id);
+
+    // Patch.
+    let patched = client
+        .patch_group(
+            "stripe-mock",
+            &PatchGroupBody {
+                ttl_seconds: Some(7200),
+                sliding_ttl: Some(true),
+            },
+        )
+        .await
+        .expect("patch");
+    assert_eq!(patched.ttl_seconds, 7200);
+    assert!(patched.sliding_ttl);
+
+    // Refresh.
+    client.refresh_group("stripe-mock").await.expect("refresh");
+
+    // Delete.
+    client.delete_group("stripe-mock").await.expect("delete");
+
+    // Now 404.
+    let err = client.get_group("stripe-mock").await.unwrap_err();
+    assert!(matches!(err, ClientError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn missing_token_returns_typed_error() {
+    let h = start().await;
+    let client = Client::builder(&h.host_url).build().expect("build");
+    let err = client.list_groups().await.unwrap_err();
+    assert!(
+        matches!(err, ClientError::Unauthorized(_)),
+        "expected Unauthorized, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn invalid_token_returns_typed_error() {
+    let h = start().await;
+    let client = Client::builder(&h.host_url)
+        .with_token("wmt_not_real")
+        .build()
+        .expect("build");
+    let err = client.list_groups().await.unwrap_err();
+    assert!(matches!(err, ClientError::Unauthorized(_)));
+}
+
+#[tokio::test]
+async fn duplicate_group_name_is_conflict() {
+    let h = start().await;
+    let client = client(&h.host_url);
+    let body = CreateGroupBody {
+        name: "dup".into(),
+        ..Default::default()
+    };
+    client.create_group(&body).await.expect("first");
+    let err = client.create_group(&body).await.unwrap_err();
+    assert!(matches!(err, ClientError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn token_create_returns_plaintext_and_authenticates() {
+    let h = start().await;
+    let client = client(&h.host_url);
+    let body = CreateTokenBody {
+        name: "ci-runner".into(),
+        ttl_seconds: None,
+    };
+    let resp = client.create_token(&body).await.expect("create");
+    assert!(resp.token.starts_with("wmt_"));
+    assert_eq!(resp.record.name, "ci-runner");
+
+    // The plaintext just minted should authenticate against the same
+    // host.
+    let new_client = Client::builder(&h.host_url)
+        .with_token(&resp.token)
+        .build()
+        .expect("build");
+    let tokens = new_client.list_tokens().await.expect("list");
+    assert!(tokens.tokens.iter().any(|t| t.name == "ci-runner"));
+}
+
+#[tokio::test]
+async fn journal_list_empty_for_fresh_group() {
+    let h = start().await;
+    let client = client(&h.host_url);
+    client
+        .create_group(&CreateGroupBody {
+            name: "fresh".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create");
+    let listed = client
+        .list_journal("fresh", None, None)
+        .await
+        .expect("list journal");
+    assert!(listed.entries.is_empty());
+}
+
+#[tokio::test]
+async fn user_agent_default_starts_with_wm_cli() {
+    // Indirect coverage: any successful authed request through the
+    // default-built Client uses the default User-Agent. We rely on
+    // the wm-host journal write path to capture User-Agent in the
+    // request headers.
+    let h = start().await;
+    let client = client(&h.host_url);
+    // Create a group so we can hit the journal endpoint cleanly.
+    client
+        .create_group(&CreateGroupBody {
+            name: "ua-check".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create");
+    // The /__api/groups POST went through the default client; the
+    // host journal would have stamped a User-Agent in OTel spans
+    // (not journaled for /__api/* traffic). For tier-2 we simply
+    // confirm the call succeeds; the tier-1 mock test asserts the
+    // header value directly.
+}

@@ -256,6 +256,69 @@ DELETE *or* Valkey TTL expiry), the children go with it.
   recreate routes + delete old; user can also use ULID as a stable
   cross-rename handle.
 
+## CLI (slice 9)
+
+`wm-cli` is a thin shell over `wm-core::Client`. Anything HTTP lives
+in `wm-core`; the CLI binary handles argument parsing, output
+formatting, and exit-code mapping.
+
+- **Layout.** `wm-cli/src/cli.rs` — clap derive tree.
+  `wm-cli/src/handlers.rs` — `dispatch(args)` plus per-command
+  functions; this is also where exit-code mapping lives
+  (`exit_code_for(&ClientError)`). `wm-cli/src/format.rs` — pure
+  rendering (human tables + JSON), no I/O beyond `println!` /
+  `eprintln!`.
+- **Auth and host.** Global flags `--host` (env `WM_HOST`, default
+  `http://localhost:8080`) and `--token` (env `WM_TOKEN`, no default)
+  are wired via clap's `env = ...`. `wm health` and `wm version`
+  fast-path past the auth check; everything else without a token
+  exits `4` with a "no token" hint on stderr.
+- **Output format.** Human is the default; `--json` switches to
+  pretty-printed JSON. The JSON shape is the wire shape — `wm-core`
+  serializes the same response structs the host produced. Tables in
+  human mode are column-aligned via the in-house
+  `print_table<const N: usize>` helper (no extra dep).
+- **User-Agent.** `wm-core::DEFAULT_USER_AGENT` is
+  `wm-cli/{CARGO_PKG_VERSION}`. Future tooling
+  (`wm-mcp`, web UI) builds the client via `ClientBuilder::with_user_agent`
+  to identify themselves separately in host logs and OTel spans.
+- **Exit codes.** `0` ok, `1` generic, `2` clap usage,
+  `4` auth (401 / no token), `5` not-found, `6` conflict.
+  `ClientError` → exit code is the single source of truth; renderers
+  shouldn't repeat it.
+- **Tests.** Three tiers, mirroring the rest of the repo.
+  Tier 1 — `wm-core/tests/client_smoke.rs` builds an in-process
+  axum router that mimics `/__api/*` and asserts request bodies,
+  query strings, headers (including User-Agent), and how response
+  shapes round-trip. Cheap, fast, the bulk of coverage.
+  Tier 2 — `wm-cli/tests/wm_core_against_host.rs` boots a real
+  `wm-host` in-process via `wm_host::router(AppState::new(...))` and
+  drives `wm-core::Client` against it. Catches "the host changed
+  the wire shape and the client didn't" regressions.
+  Tier 3 — `wm-cli/tests/binary_smoke.rs` execs the actual `wm`
+  binary via `assert_cmd::Command::cargo_bin("wm")` against the same
+  in-process host. Small (a handful of commands) — enough to catch
+  "the binary doesn't start" or "a clap arg got renamed". Use
+  `tokio::task::spawn_blocking` to invoke `assert_cmd` from inside
+  the tokio runtime; remember `.env_remove("WM_TOKEN")` on tests
+  that exercise the no-token path so a developer-set env doesn't
+  pollute the test.
+- **What slice 9 ships.** `wm health`, `wm version`, full `groups`
+  CRUD + `refresh` + `state --clear` + `journal --clear`,
+  `routes list/add/show/delete` (source file or pre-compiled wasm),
+  `journal list/show`, `tokens list/create/revoke`. Everything
+  routes through `wm-core::Client`, so adding a flag in the spec
+  generally means: add the field to `models.rs`, route it through
+  the client method, surface it in `cli.rs`, render it in
+  `format.rs`. No new HTTP elsewhere.
+- **What's deferred.** Profiles / dotenv / `--config-file`
+  (low blast radius to add later), color, shell completions,
+  `--from-file` body input for journal show, `wm journal tail`
+  (SSE), `wm match` (probe-without-dispatch), `wm routes update / test
+  / state`, admin user CRUD. Each is captured in `cli-design.md`
+  (private design doc); pick one and read that doc before extending
+  the surface.
+
 ## Route table architecture
 
 Three layers in `wm-host`:
