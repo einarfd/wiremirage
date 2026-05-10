@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–9 landed. The WIT contract is live at
+**Status:** slices 1–10 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -35,7 +35,12 @@ group whose Valkey TTL has fired. The `wm` CLI (slice 9) wraps the
 REST surface end-to-end: groups, routes, journal, tokens, plus the
 public probes. Auth via `WM_TOKEN` / `--token`, host via `WM_HOST` /
 `--host`. `--json` switches to machine-parseable output for scripts
-and agents.
+and agents. The MCP server (slice 10) is part of `wm-host` and
+mounts at `/__api/mcp` over the streamable-HTTP transport (rmcp).
+13 tools cover identity, discovery, group/route CRUD, and group
+state — same bearer-token auth as the rest of `/__api/*`. Streaming
+tools (`wait_for_request`, `tail_journal`) plus 4 host-blocked tools
+land in follow-up slices.
 
 ## Where the design lives
 
@@ -56,12 +61,12 @@ Key documents to load early when working on a task:
 
 ## Repo layout
 
-Cargo workspace with four crates under `crates/`:
+Cargo workspace with three crates under `crates/`:
 
 - `wm-core` — shared types, REST client, auth
-- `wm-host` — long-running Rust server (axum + wasmtime + Valkey)
+- `wm-host` — long-running Rust server (axum + wasmtime + Valkey).
+  MCP service is a `mcp/` module here, mounted at `/__api/mcp`.
 - `wm-cli` — `wm` CLI binary
-- `wm-mcp` — MCP server
 
 Plus a Node-based compiler sidecar:
 

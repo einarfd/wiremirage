@@ -12,10 +12,11 @@ which is shipped to *users* of WireMirage.
 ## Where things live
 
 - **Code:** Cargo workspace under `crates/`.
-  - `wm-core` — shared types, REST client, auth (used by `wm-cli` and `wm-mcp`).
+  - `wm-core` — shared types, REST client, auth (used by `wm-cli`).
   - `wm-host` — long-running Rust server (axum + wasmtime + Valkey).
+    The MCP service lives under `wm-host/src/mcp/` (no separate crate
+    — see slice 10 below for the rationale).
   - `wm-cli` — `wm` CLI binary.
-  - `wm-mcp` — MCP server.
 - **Compiler sidecar (Node, not Rust):** `compiler/typescript/`. Hono
   HTTP server + jco/componentize-js. Built as its own Docker image. Not
   in the cargo workspace; uses npm + tsc + vitest.
@@ -318,6 +319,100 @@ formatting, and exit-code mapping.
   / state`, admin user CRUD. Each is captured in `cli-design.md`
   (private design doc); pick one and read that doc before extending
   the surface.
+
+## MCP server (slice 10)
+
+The MCP server is a `mcp/` module inside `wm-host`, mounted onto the
+host's axum router at `/__api/mcp` via `rmcp::transport::
+StreamableHttpService`. It is *not* a separate crate — that would
+have created a circular dep (`wm-mcp` would need `AppState` from
+`wm-host`; `wm-host` would need `wm-mcp` to mount it). Folding the
+MCP code into `wm-host` keeps the dep graph clean while still
+allowing tools to be added/tested in isolation.
+
+- **Layout.** `wm-host/src/mcp/`:
+  - `mod.rs` — `pub fn router(state) -> axum::Router` that mounts
+    `/__api/mcp` with the bearer-token middleware.
+  - `auth.rs` — middleware that reuses `Auth::authenticate` and
+    inserts the resolved `AuthContext` into request extensions.
+  - `server.rs` — `WmMcpServer` struct holding `Arc<AppState>` plus
+    the composed `ToolRouter`. Implements `ServerHandler` via
+    `#[tool_handler(router = self.tool_router)]`.
+  - `context.rs` — `auth_from(parts) -> AuthContext` plus
+    `ensure_group_owner_or_admin` and `ensure_route_owner_or_admin`.
+  - `error.rs` — registry/journal error → rmcp `ErrorData` with our
+    design-doc codes (`not_found` / `forbidden` / `validation_failed`
+    / `conflict` / `internal_error`) in the structured `data` field.
+  - `tools/{identity,discovery,groups,routes,state}.rs` — one
+    `#[tool_router(router = <name>_router, vis = "pub(crate)")]`
+    impl block per domain. Composed in `WmMcpServer::new()` via `+`.
+- **Adding a new tool.** (1) Define `Args` and `Result` structs with
+  `#[derive(Serialize, Deserialize, JsonSchema)]`. (2) Add an
+  `async fn` to the appropriate domain's impl block, attributed
+  `#[tool(name = "...", description = "...")]`. The fn signature is
+  `(&self, Extension(parts): Extension<http::request::Parts>,
+  Parameters(args): Parameters<Args>) -> Result<Json<Result>,
+  ErrorData>`. (3) Pull auth via `auth_from(&parts)?`. (4) Call into
+  `self.state.routes().registry()` etc. and map errors via the
+  helpers in `error.rs`. (5) Update the `expected` list in
+  `mcp::tests::server_exposes_all_thirteen_slice_ten_tools` plus the
+  tier-2 `mcp_e2e.rs` count assertion if you've truly added one.
+- **Auth flow.** The streamable-HTTP transport copies
+  `http::request::Parts` (including its `extensions`) into rmcp's
+  per-request context. Our axum middleware authenticates the bearer
+  token and inserts `AuthContext` into `parts.extensions` *before*
+  the rmcp service sees the request. Tools then pull it out with
+  `auth_from(&parts)`. Stdio transport doesn't have this plumbing
+  yet — see "What's deferred" below.
+- **rmcp version.** Pinned to `rmcp = "1.6"` (1.6.0 is the first
+  stable release; was `0.16` previously). Workspace dep enables
+  `server`, `macros`, `transport-streamable-http-server`,
+  `schemars`. Tier-2 tests pull in `client`,
+  `transport-streamable-http-client`,
+  `transport-streamable-http-client-reqwest`, `reqwest` as
+  dev-dependencies.
+- **Reqwest version note.** rmcp's `transport-streamable-http-client-
+  reqwest` feature pins reqwest 0.13. We bumped the workspace
+  reqwest from 0.12 to 0.13 in slice 10 so both reqwest versions
+  don't appear in the tree (the `StreamableHttpClient` trait impl
+  applies only to a single reqwest version, so a mismatch shows up
+  as a baffling "trait not implemented" error). If you ever need to
+  hold reqwest at 0.12 again, the right answer is to find a
+  conditional path through rmcp's transport types rather than work
+  around the version drift in a test file.
+- **Linker memory.** Adding rmcp's transitive deps pushed the linker
+  near OOM on small VMs. If `cargo test -p wm-host` fails with
+  `linking with cc failed: ld terminated with signal 9`, retry with
+  `CARGO_BUILD_JOBS=2`. Not yet wired into the justfile because the
+  default works on most boxes.
+- **Tests.**
+  - Tier 1 — `mcp::tests` in `mcp/mod.rs`: tool count + name set,
+    every tool has `type: object` input schema, canary tools
+    advertise their fields. Pure rust, no network.
+  - Tier 2 — `crates/wm-host/tests/mcp_e2e.rs`: rmcp client speaks
+    streamable HTTP to in-process wm-host. Covers `list_tools`,
+    `who_am_i`, group create/show round-trip, validation error
+    propagation, bad-token rejection.
+  - Tier 3 — `crates/wm-host/tests/mcp_stdio.rs`: WmMcpServer over
+    in-memory duplex pipes. Covers protocol-level handshake +
+    `list_tools` only. Tool *invocation* over stdio is intentionally
+    not exercised because our auth flow expects HTTP request parts —
+    a stdio session would need its own auth bridge.
+- **What slice 10 ships.** 13 tools: `who_am_i`,
+  `summarize_workspace`, `list_recent_unmatched`, `list_groups`,
+  `show_group`, `create_group`, `delete_group`, `refresh_group_ttl`,
+  `list_routes`, `show_route`, `create_route`, `delete_route`,
+  `clear_group_state`.
+- **What's deferred.** Streaming pair (`wait_for_request`,
+  `tail_journal`) needs `GET /__api/journal/tail` SSE on the host
+  first — bundled together as a follow-up slice. `find_route`,
+  `update_route`, `dry_run_route`, per-route state ops need their
+  REST endpoints to exist first; bundle them with their host
+  additions. `create_route` over MCP currently accepts
+  `language: "wasm"` only; source-based TS creation routes through
+  the CLI/REST until we decide whether agents should ever post
+  inline source through MCP. Stdio production deployment + auth
+  bridge for stdio sessions are out of scope.
 
 ## Route table architecture
 

@@ -88,12 +88,16 @@ impl AppState {
 /// Build the axum router. The REST API mounts at `/__api/*`; mock-traffic
 /// dispatch is the fallback. The fallback rejects requests under reserved
 /// prefixes (e.g., `/__api/typo`) with 404 before consulting user routes.
+/// MCP (`/__api/mcp`) merges in as a separate sub-router with its own
+/// auth layer.
 pub fn router(state: AppState) -> Router {
+    let mcp = crate::mcp::router(state.clone());
     crate::api::router()
         .route("/__health", get(health))
         .route("/__ready", get(ready))
         .fallback(any(dispatch))
         .with_state(state)
+        .merge(mcp)
 }
 
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -39,6 +39,9 @@ reqwest.workspace = true
 rand.workspace = true
 sha2.workspace = true
 hex.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+tower = "0.5"
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via
@@ -55,3 +58,7 @@ sidecar-tests = []
 hyper.workspace = true
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
+# rmcp client features for tier-2 MCP integration tests. Pull just enough
+# to drive a streamable-HTTP client at /__api/mcp from inside our axum
+# in-process harness.
+rmcp = { version = "1.6", default-features = false, features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"] }

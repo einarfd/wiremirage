@@ -12,6 +12,7 @@ pub mod host_state;
 pub mod journal;
 pub mod lifecycle;
 pub mod log;
+pub mod mcp;
 pub mod pattern;
 pub mod registry;
 pub mod route_table;

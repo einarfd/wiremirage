@@ -4,7 +4,6 @@ members = [
     "crates/wm-core",
     "crates/wm-host",
     "crates/wm-cli",
-    "crates/wm-mcp",
 ]
 # Wasm guest fixtures live outside the workspace so the wasm32 target
 # doesn't pollute `cargo check --workspace` / `cargo clippy --workspace`.
@@ -34,7 +33,7 @@ axum = "0.8"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
-reqwest = { version = "0.12", default-features = false, features = ["http2", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls"] }
 redis = "1"
 testcontainers = { version = "0.27", features = ["blocking"] }
 ulid = "1"
@@ -45,6 +44,8 @@ sha2 = "0.10"
 hex = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 assert_cmd = "2"
+rmcp = { version = "1.6", default-features = false, features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
+schemars = "1"
 
 [profile.release]
 lto = "thin"

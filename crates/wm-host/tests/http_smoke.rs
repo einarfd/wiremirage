@@ -155,6 +155,23 @@ async fn ready_endpoint_reports_dependencies_without_auth() {
 }
 
 #[tokio::test]
+async fn mcp_endpoint_requires_bearer_token() {
+    let (addr, server) = start_empty().await;
+    // No Authorization header → 401. Confirms the MCP route shares the
+    // bearer-token gate with the rest of /__api/*.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/__api/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body("{}")
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 401);
+    server.abort();
+}
+
+#[tokio::test]
 async fn matched_pattern_reaches_handler() {
     // The echo handler reflects method + literal path. Verify a
     // parametrised route matches multiple concrete paths — proof that the

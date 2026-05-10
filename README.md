@@ -30,7 +30,10 @@ units with TTL (default 24h, sliding-on-traffic by default); explicit
 DELETE cascades routes, kv/gkv state, and journal entries together,
 and a background sweeper reaps groups that hit their TTL. The `wm` CLI
 wraps the REST surface end-to-end: groups, routes, journal, tokens, and
-the public probes — see "Using the CLI" below.
+the public probes — see "Using the CLI" below. The MCP server is part of
+the host and mounts at `/__api/mcp` over the streamable-HTTP transport;
+13 tools cover identity, discovery, and group/route CRUD using the same
+bearer-token auth.
 
 ## Layout
 
@@ -38,8 +41,8 @@ the public probes — see "Using the CLI" below.
 crates/
   wm-core/                shared types, REST client, auth
   wm-host/                long-running Rust server (axum + wasmtime + Valkey)
+                          MCP service lives under wm-host/src/mcp/
   wm-cli/                 the wm CLI binary
-  wm-mcp/                 the MCP server
 compiler/
   typescript/             Node-based compiler sidecar (componentize-js + jco)
 wit/
@@ -149,6 +152,29 @@ What this slice ships and what it doesn't is captured in
 dotenv / `--config-file`, color, shell completions, `--from-file` body
 input, `wm journal tail`, `wm match`, route `update` / `test` / `state`,
 and admin user CRUD. Everything else from the spec is wired up.
+
+## Using the MCP server
+
+The host exposes an MCP (Model Context Protocol) service at
+`/__api/mcp` using the streamable-HTTP transport. Authentication is
+the same bearer token used for the REST API and the CLI.
+
+Add the server to Claude Code:
+
+```sh
+claude mcp add --transport http wiremirage \
+  https://wm.example.com/__api/mcp \
+  --header "Authorization: Bearer wmt_..."
+```
+
+The slice-10 surface is 13 tools — identity (`who_am_i`), discovery
+(`summarize_workspace`, `list_recent_unmatched`), group CRUD
+(`list_groups`, `show_group`, `create_group`, `delete_group`,
+`refresh_group_ttl`), route CRUD (`list_routes`, `show_route`,
+`create_route`, `delete_route`), and `clear_group_state`. The
+streaming pair (`wait_for_request`, `tail_journal`) plus
+`find_route` / `update_route` / `dry_run_route` / per-route state
+land in follow-up slices alongside their underlying host endpoints.
 
 ## License
 
