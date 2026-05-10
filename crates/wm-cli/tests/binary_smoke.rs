@@ -288,3 +288,107 @@ async fn wm_without_token_exits_4_on_authed_command() {
         "expected 'no token' hint, got: {stderr}"
     );
 }
+
+#[tokio::test]
+async fn wm_users_list_create_delete_round_trip() {
+    let h = start().await;
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+
+    // Create alice.
+    let host_c = host.clone();
+    let token_c = token.clone();
+    let create = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host", &host_c, "--token", &token_c, "--json", "users", "create", "alice",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(
+        create.status.success(),
+        "create stderr: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&create.stdout).expect("create json parses");
+    assert_eq!(parsed["name"], "alice");
+    assert_eq!(parsed["is_admin"], false);
+
+    // List should now contain bootstrap + alice.
+    let host_l = host.clone();
+    let token_l = token.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host", &host_l, "--token", &token_l, "--json", "users", "list",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(list.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list json parses");
+    let names: Vec<&str> = parsed["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"alice"));
+    assert!(names.contains(&"bootstrap"));
+
+    // Delete alice.
+    let host_d = host;
+    let token_d = token;
+    let del = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host", &host_d, "--token", &token_d, "users", "delete", "alice", "--force",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(del.status.success());
+}
+
+#[tokio::test]
+async fn wm_completion_emits_shell_specific_output() {
+    // Doesn't need a host — `wm completion` is purely local.
+    let bash = tokio::task::spawn_blocking(|| {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args(["completion", "bash"])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(bash.status.success());
+    let stdout = String::from_utf8_lossy(&bash.stdout);
+    // Bash completion scripts start with `_<bin>()` shell function.
+    assert!(stdout.contains("_wm()"), "bash output was: {stdout}");
+
+    let zsh = tokio::task::spawn_blocking(|| {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args(["completion", "zsh"])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(zsh.status.success());
+    let stdout = String::from_utf8_lossy(&zsh.stdout);
+    // zsh scripts start with `#compdef <bin>`.
+    assert!(stdout.contains("#compdef wm"), "zsh output was: {stdout}");
+}

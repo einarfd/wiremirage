@@ -130,5 +130,7 @@ If you've created a route and your SUT still gets 404, the journal isn't showing
 
 - `wm <command> --help` — the source of truth for command details. Always more current than this skill.
 - `wm --help` — the surface map.
+- `wm completion bash|zsh|fish|powershell` — emit a completion script for your shell. Pipe it into the appropriate location once.
 - The host's admin API at `/__api/*` is what `wm` wraps; if a script needs something the CLI doesn't surface yet, the REST API may have it.
-- The MCP server at `/__api/mcp` exposes the same operations as tool calls for agents that prefer that surface.
+- The MCP server at `/__api/mcp` exposes most operations as tool calls for agents that prefer that surface. (User management is intentionally CLI-only — agents shouldn't be creating users.)
+- For admin tasks (managing users, distributing tokens to teammates), `wm users` and `wm tokens` are the primary CLI surfaces.

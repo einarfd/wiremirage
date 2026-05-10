@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–13 landed. The WIT contract is live at
+**Status:** slices 1–14 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -48,7 +48,11 @@ near-misses). Same bearer-token auth throughout. Multi-host fan-out
 dry_run_route / clear_route_state) land in follow-up slices. The
 user-facing skill (slice 12) ships at `skill/wiremirage/` (with a
 debug sub-skill at `skill/wiremirage-debug/`) — `SKILL.md` + 3
-ready-to-run scripts teaching the CLI workflow.
+ready-to-run scripts teaching the CLI workflow. Slice 14 added admin
+user CRUD to the CLI (`wm users list/show/me/create/update/delete`)
+and `wm completion <shell>` for bash/zsh/fish/powershell. By design
+(per `mcp-surface.md`) user management is **not** in MCP — admins
+handle it via CLI/UI.
 
 ## Where the design lives
 

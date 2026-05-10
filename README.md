@@ -153,6 +153,14 @@ for scripts and agents); the default human format is column-aligned text.
 Exit codes: `0` ok, `1` generic error, `2` clap usage error, `4` auth, `5`
 not-found, `6` conflict.
 
+`wm completion bash|zsh|fish|powershell` emits a completion script for
+your shell — pipe it into the appropriate location (e.g.
+`/etc/bash_completion.d/wm`, `${fpath[1]}/_wm`).
+
+Admins manage users via `wm users list/show/me/create/update/delete`.
+By design user management is CLI-only; the MCP server does not expose
+it (per `mcp-surface.md`).
+
 What this slice ships and what it doesn't is captured in
 `cli-design.md` (private design doc). Notable deferrals: profiles /
 dotenv / `--config-file`, color, shell completions, `--from-file` body

@@ -11,8 +11,8 @@
 use serde::Serialize;
 use wm_core::{
     GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse, ListJournalResponse,
-    ListRoutesResponse, ListTokensResponse, MatchResponse, NearMiss, NearMissReason, RouteRecord,
-    TokenRecord,
+    ListRoutesResponse, ListTokensResponse, ListUsersResponse, MatchResponse, NearMiss,
+    NearMissReason, RouteRecord, TokenRecord, UserRecord,
 };
 
 /// Output mode requested via the global `--json` flag.
@@ -308,6 +308,48 @@ fn print_row<S: AsRef<str>>(cells: &[S], widths: &[usize]) {
     // Trim trailing whitespace on the rendered line (only the very
     // last column would have it).
     println!("{}", line.trim_end());
+}
+
+// -- Users -------------------------------------------------------------------
+
+pub fn render_user(u: &UserRecord, format: Format) {
+    match format {
+        Format::Json => print_json(u),
+        Format::Human => {
+            println!("name:       {}", u.name);
+            println!("id:         {}", u.id);
+            println!("admin:      {}", if u.is_admin { "yes" } else { "no" });
+            println!("created_at: {}", u.created_at);
+        }
+    }
+}
+
+pub fn render_user_list(list: &ListUsersResponse, format: Format) {
+    match format {
+        Format::Json => print_json(list),
+        Format::Human => {
+            if list.users.is_empty() {
+                println!("(no users)");
+                return;
+            }
+            let rows: Vec<[String; 3]> = list
+                .users
+                .iter()
+                .map(|u| {
+                    [
+                        u.name.clone(),
+                        if u.is_admin {
+                            "yes".into()
+                        } else {
+                            "no".into()
+                        },
+                        u.created_at.clone(),
+                    ]
+                })
+                .collect();
+            print_table(&["NAME", "ADMIN", "CREATED_AT"], &rows);
+        }
+    }
 }
 
 // -- Match probe -------------------------------------------------------------

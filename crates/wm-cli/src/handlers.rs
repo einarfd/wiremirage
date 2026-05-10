@@ -16,12 +16,13 @@ use anyhow::Context;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use wm_core::{
-    Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, PatchGroupBody,
+    Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateUserBody,
+    PatchGroupBody, PatchUserBody,
 };
 
 use crate::cli::{
-    AddRouteArgs, Cli, Command, CreateTokenArgs, GroupsCommand, JournalCommand, RoutesCommand,
-    TokensCommand,
+    AddRouteArgs, Cli, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, JournalCommand,
+    RoutesCommand, TokensCommand, UpdateUserArgs, UsersCommand,
 };
 use crate::format::{self, Format};
 
@@ -33,10 +34,15 @@ use crate::format::{self, Format};
 pub async fn dispatch(args: Cli) -> anyhow::Result<ExitCode> {
     let format = Format::from_flag(args.json);
 
-    // Two commands work without a token. Fast-path them so missing
+    // Three commands work without a token. Fast-path them so missing
     // token doesn't bother the user. (`wm match` does need a token —
     // it's a host-side probe, not a local computation.)
-    let needs_token = !matches!(args.command, Command::Health | Command::Version);
+    // `wm completion` is purely local clap-derived and never touches
+    // the host.
+    let needs_token = !matches!(
+        args.command,
+        Command::Health | Command::Version | Command::Completion { .. }
+    );
     if needs_token && args.token.is_none() {
         emit_error(
             format,
@@ -59,7 +65,12 @@ pub async fn dispatch(args: Cli) -> anyhow::Result<ExitCode> {
         Command::Routes(cmd) => handle_routes(&client, cmd, format).await,
         Command::Journal(cmd) => handle_journal(&client, cmd, format).await,
         Command::Tokens(cmd) => handle_tokens(&client, cmd, format).await,
+        Command::Users(cmd) => handle_users(&client, cmd, format).await,
         Command::Match { method, path } => handle_match(&client, &method, &path, format).await,
+        Command::Completion { shell } => {
+            handle_completion(shell);
+            return Ok(ExitCode::from(0));
+        }
     };
 
     match result {
@@ -383,6 +394,85 @@ async fn handle_tokens(
         }
     }
     Ok(())
+}
+
+// -- Users -------------------------------------------------------------------
+
+async fn handle_users(
+    client: &Client,
+    cmd: UsersCommand,
+    format: Format,
+) -> Result<(), ClientError> {
+    match cmd {
+        UsersCommand::List => {
+            let list = client.list_users().await?;
+            format::render_user_list(&list, format);
+        }
+        UsersCommand::Show { name } => {
+            let user = client.get_user(&name).await?;
+            format::render_user(&user, format);
+        }
+        UsersCommand::Me => {
+            let user = client.get_me().await?;
+            format::render_user(&user, format);
+        }
+        UsersCommand::Create(CreateUserArgs { name, admin }) => {
+            let user = client
+                .create_user(&CreateUserBody {
+                    name,
+                    is_admin: admin,
+                })
+                .await?;
+            format::render_user(&user, format);
+        }
+        UsersCommand::Update(UpdateUserArgs {
+            name,
+            admin,
+            no_admin,
+        }) => {
+            let body = PatchUserBody {
+                is_admin: admin_flag(admin, no_admin),
+            };
+            if body.is_admin.is_none() {
+                emit_error(
+                    format,
+                    "validation_failed",
+                    "wm users update requires --admin or --no-admin",
+                );
+                return Ok(());
+            }
+            let user = client.patch_user(&name, &body).await?;
+            format::render_user(&user, format);
+        }
+        UsersCommand::Delete { name, force: _ } => {
+            client.delete_user(&name).await?;
+            if matches!(format, Format::Human) {
+                println!("deleted user {name}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolves --admin / --no-admin into the optional bool used by the
+/// PATCH body. None means "no change".
+fn admin_flag(admin: bool, no_admin: bool) -> Option<bool> {
+    if admin {
+        Some(true)
+    } else if no_admin {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+// -- Shell completion --------------------------------------------------------
+
+fn handle_completion(shell: clap_complete::Shell) {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let bin_name = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
 }
 
 // -- Match probe -------------------------------------------------------------

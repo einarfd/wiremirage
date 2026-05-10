@@ -423,6 +423,27 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## User CRUD CLI + completions (slice 14)
+
+`wm users` covers the admin user-management surface that previously
+required curl. CLI-only by design — `mcp-surface.md` explicitly
+excludes user management from MCP because it's a setup operation
+done before agents connect.
+
+- **Subcommands:** `list`, `show NAME`, `me`, `create NAME [--admin]`,
+  `update NAME --admin|--no-admin`, `delete NAME --force`. Wraps
+  the existing `/__api/users` REST endpoints (slice 5b).
+- **Auth model unchanged:** admin-only for cross-user actions; any
+  authed user can `wm users me`. `wm users show NAME` works for
+  same-name (self) calls without admin.
+- **`wm users update`** today only flips `is_admin` — the host's
+  PATCH endpoint accepts only that field. Rename / merge are
+  separate ADRs and not on the CLI yet.
+
+`wm completion <shell>` emits bash/zsh/fish/powershell scripts to
+stdout via clap_complete. No host or token required. Pipe into the
+shell's completion directory.
+
 ## Match probe (slice 13)
 
 `GET /__api/match?method=&path=` answers "what would handle this

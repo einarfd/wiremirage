@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use wm_core::{
-    Client, ClientError, CreateGroupBody, CreateTokenBody, MatchResponse, PatchGroupBody,
+    Client, ClientError, CreateGroupBody, CreateTokenBody, CreateUserBody, MatchResponse,
+    PatchGroupBody, PatchUserBody,
 };
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
@@ -272,4 +273,114 @@ async fn user_agent_default_starts_with_wm_cli() {
     // (not journaled for /__api/* traffic). For tier-2 we simply
     // confirm the call succeeds; the tier-1 mock test asserts the
     // header value directly.
+}
+
+#[tokio::test]
+async fn user_full_round_trip_admin() {
+    let h = start().await;
+    let admin = client(&h.host_url);
+
+    // Bootstrap user is the only one until we create more.
+    let initial = admin.list_users().await.expect("list");
+    assert_eq!(initial.users.len(), 1);
+    assert_eq!(initial.users[0].name, "bootstrap");
+    assert!(initial.users[0].is_admin);
+
+    // Create alice as non-admin.
+    let alice = admin
+        .create_user(&CreateUserBody {
+            name: "alice".into(),
+            is_admin: false,
+        })
+        .await
+        .expect("create alice");
+    assert!(!alice.is_admin);
+
+    // Show by name.
+    let shown = admin.get_user("alice").await.expect("get alice");
+    assert_eq!(shown.name, "alice");
+
+    // Promote.
+    let promoted = admin
+        .patch_user(
+            "alice",
+            &PatchUserBody {
+                is_admin: Some(true),
+            },
+        )
+        .await
+        .expect("promote alice");
+    assert!(promoted.is_admin);
+
+    // Demote (and keep — admin can't remove the last admin, and we
+    // still have bootstrap, so this is fine).
+    let demoted = admin
+        .patch_user(
+            "alice",
+            &PatchUserBody {
+                is_admin: Some(false),
+            },
+        )
+        .await
+        .expect("demote alice");
+    assert!(!demoted.is_admin);
+
+    // Delete.
+    admin.delete_user("alice").await.expect("delete alice");
+    let after = admin.list_users().await.expect("list after");
+    assert_eq!(after.users.len(), 1);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_list_users() {
+    let h = start().await;
+    let admin = client(&h.host_url);
+
+    // Provision a non-admin user via the registry + auth, then build
+    // a client carrying their token.
+    let user = h
+        .state
+        .auth()
+        .create_user("alice", false)
+        .expect("create user");
+    let (_token, plaintext) = h
+        .state
+        .auth()
+        .create_token(&user.id, "default", None)
+        .expect("create token");
+    let alice = Client::builder(&h.host_url)
+        .with_token(&plaintext)
+        .build()
+        .expect("build alice");
+
+    let err = alice.list_users().await.expect_err("expected forbidden");
+    assert!(
+        matches!(err, ClientError::Forbidden(_)),
+        "expected Forbidden, got: {err:?}"
+    );
+
+    // Admin can still list (sanity).
+    let _ = admin.list_users().await.expect("admin list");
+}
+
+#[tokio::test]
+async fn me_works_for_any_authed_user() {
+    let h = start().await;
+    let user = h
+        .state
+        .auth()
+        .create_user("alice", false)
+        .expect("create user");
+    let (_token, plaintext) = h
+        .state
+        .auth()
+        .create_token(&user.id, "default", None)
+        .expect("create token");
+    let alice = Client::builder(&h.host_url)
+        .with_token(&plaintext)
+        .build()
+        .expect("build alice");
+    let me = alice.get_me().await.expect("get me");
+    assert_eq!(me.name, "alice");
+    assert!(!me.is_admin);
 }

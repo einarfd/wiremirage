@@ -293,6 +293,61 @@ impl Client {
         .await
     }
 
+    // -- Users ----------------------------------------------------------
+
+    /// List all users. Admin-only on the host side; non-admin callers
+    /// get a `Forbidden` error.
+    pub async fn list_users(&self) -> Result<crate::models::ListUsersResponse, ClientError> {
+        self.send(Method::GET, "/__api/users", None::<&()>).await
+    }
+
+    /// Show one user by name. Admin can see any user; non-admin can
+    /// see their own record only (the host enforces).
+    pub async fn get_user(&self, name: &str) -> Result<crate::models::UserRecord, ClientError> {
+        self.send(
+            Method::GET,
+            &format!("/__api/users/{}", urlencode(name)),
+            None::<&()>,
+        )
+        .await
+    }
+
+    /// Show the authenticated user's own record. Always available
+    /// regardless of admin status.
+    pub async fn get_me(&self) -> Result<crate::models::UserRecord, ClientError> {
+        self.send(Method::GET, "/__api/users/me", None::<&()>).await
+    }
+
+    /// Create a new user. Admin-only.
+    pub async fn create_user(
+        &self,
+        body: &crate::models::CreateUserBody,
+    ) -> Result<crate::models::UserRecord, ClientError> {
+        self.send(Method::POST, "/__api/users", Some(body)).await
+    }
+
+    /// Update a user's mutable fields (currently only `is_admin`).
+    /// Admin-only for cross-user updates.
+    pub async fn patch_user(
+        &self,
+        name: &str,
+        body: &crate::models::PatchUserBody,
+    ) -> Result<crate::models::UserRecord, ClientError> {
+        self.send(
+            Method::PATCH,
+            &format!("/__api/users/{}", urlencode(name)),
+            Some(body),
+        )
+        .await
+    }
+
+    /// Delete a user. Admin-only. The host refuses to delete the
+    /// last admin or a user that owns routes.
+    pub async fn delete_user(&self, name: &str) -> Result<(), ClientError> {
+        self.send_no_body(Method::DELETE, &format!("/__api/users/{}", urlencode(name)))
+            .await
+    }
+
     // -- Match probe ----------------------------------------------------
 
     /// Probe what would match a hypothetical request. Returns either

@@ -53,12 +53,23 @@ pub enum Command {
     /// Manage API tokens.
     #[command(subcommand)]
     Tokens(TokensCommand),
+    /// Manage users (admin-only for cross-user actions).
+    #[command(subcommand)]
+    Users(UsersCommand),
     /// Probe what would match a hypothetical request.
     Match {
         /// HTTP method (e.g. `GET`, `POST`, `ANY`).
         method: String,
         /// Request path (must start with `/`).
         path: String,
+    },
+    /// Generate a shell completion script. Pipe into the appropriate
+    /// location for your shell (e.g. `wm completion bash >
+    /// /etc/bash_completion.d/wm`). No host or token required.
+    Completion {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -247,4 +258,51 @@ pub struct CreateTokenArgs {
     /// Optional TTL in seconds. Tokens default to no expiry.
     #[arg(long)]
     pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UsersCommand {
+    /// List users. Admin-only.
+    List,
+    /// Show one user by name. Admin sees any user; non-admin sees
+    /// their own record only (the host enforces).
+    Show {
+        /// User name.
+        name: String,
+    },
+    /// Show the authenticated user's own record. Always available.
+    Me,
+    /// Create a new user. Admin-only.
+    Create(CreateUserArgs),
+    /// Update a user's admin flag. Admin-only.
+    Update(UpdateUserArgs),
+    /// Delete a user. Admin-only. The host refuses to delete the
+    /// last admin or a user that owns routes.
+    Delete {
+        /// User name.
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CreateUserArgs {
+    /// User name (canonical identifier; unique).
+    pub name: String,
+    /// Create the user as an admin. Default is non-admin.
+    #[arg(long)]
+    pub admin: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UpdateUserArgs {
+    /// User name.
+    pub name: String,
+    /// Promote the user to admin.
+    #[arg(long, conflicts_with = "no_admin")]
+    pub admin: bool,
+    /// Demote the user from admin.
+    #[arg(long)]
+    pub no_admin: bool,
 }

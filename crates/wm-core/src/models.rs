@@ -200,6 +200,34 @@ pub struct CreateTokenBody {
     pub ttl_seconds: Option<u64>,
 }
 
+// -- Users -------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserRecord {
+    pub id: String,
+    pub name: String,
+    pub is_admin: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListUsersResponse {
+    pub users: Vec<UserRecord>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateUserBody {
+    pub name: String,
+    #[serde(default)]
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PatchUserBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_admin: Option<bool>,
+}
+
 // -- Match probe -------------------------------------------------------------
 
 /// Response from `GET /__api/match`. Either a hit (with the matched
