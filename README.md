@@ -49,6 +49,9 @@ compiler/
   typescript/             Node-based compiler sidecar (componentize-js + jco)
 wit/
   wiremirage.wit          handler script API contract (mirrors the design doc)
+skill/
+  wiremirage/             user-facing Anthropic Skill (SKILL.md + scripts)
+  wiremirage-debug/       diagnostic sub-skill triggered on mock-debugging tasks
 docker-compose.yml        Valkey + sidecar for local development
 ```
 

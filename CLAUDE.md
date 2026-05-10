@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–11 landed. The WIT contract is live at
+**Status:** slices 1–12 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -42,7 +42,10 @@ state, plus the slice-11 streaming pair (`wait_for_request`,
 `tail_journal`) backed by `GET /__api/journal/tail` SSE on the host
 and a single-host broadcast bus inside `Journal`. Same bearer-token
 auth throughout. Multi-host fan-out (Valkey pub/sub) and 4
-host-blocked tools land in follow-up slices.
+host-blocked tools land in follow-up slices. The user-facing skill
+(slice 12) ships at `skill/wiremirage/` (with a debug sub-skill at
+`skill/wiremirage-debug/`) — `SKILL.md` + 3 ready-to-run scripts
+teaching the CLI workflow.
 
 ## Where the design lives
 
@@ -89,9 +92,18 @@ Wasm guest fixtures used by the host's tier-2 integration tests live at
 component new` on the result; the resulting paths are stamped into env vars
 of the form `WM_FIXTURE_<name>_COMPONENT` for tests to read via `env!()`.
 
-The product skill (shipped to *users* of WireMirage) will live at
-`skill/wiremirage/` per ADR-0015. The dev skill at `.claude/skills/wm-dev/`
+The product skill (shipped to *users* of WireMirage) lives at
+`skill/wiremirage/` per ADR-0015 (with a debug sub-skill at
+`skill/wiremirage-debug/`). The dev skill at `.claude/skills/wm-dev/`
 is for *developing this repo* — not the same thing.
+
+**The product skill is tightly coupled to the current CLI surface.**
+Any time you add, rename, or remove a `wm` subcommand or flag — or
+change the handler API, route shape, etc. — check `skill/wiremirage/`
+(SKILL.md + scripts/*.sh) and update what's affected in the same
+change. Same for `skill/wiremirage-debug/SKILL.md`. The skill goes
+stale fast and "describe the current surface" is the only commitment
+worth making.
 
 ## Common commands
 

@@ -17,6 +17,11 @@ which is shipped to *users* of WireMirage.
     The MCP service lives under `wm-host/src/mcp/` (no separate crate
     — see slice 10 below for the rationale).
   - `wm-cli` — `wm` CLI binary.
+- **Product skill:** `skill/wiremirage/SKILL.md` + `scripts/`, plus
+  `skill/wiremirage-debug/SKILL.md`. These ship to *users* of
+  WireMirage (per ADR-0015) and describe the CLI workflow — distinct
+  from the dev skill in this file. Tightly coupled to the current
+  CLI; keep updated alongside CLI changes.
 - **Compiler sidecar (Node, not Rust):** `compiler/typescript/`. Hono
   HTTP server + jco/componentize-js. Built as its own Docker image. Not
   in the cargo workspace; uses npm + tsc + vitest.
@@ -63,7 +68,13 @@ CI installs all four. Locally, install once.
 3. **Run `just check`.** Fix what's broken before reporting. If the change
    touches storage, also run `just check-all` to exercise the tier-3
    Valkey suite.
-4. **If the code conflicts with the spec, surface it.** Either propose a
+4. **If the change touched the CLI surface or handler API, update the
+   product skill.** `skill/wiremirage/SKILL.md` and any affected
+   `scripts/*.sh` describe the current CLI verbatim. Renamed flags,
+   added subcommands, changed handler signatures, new gotchas — fold
+   them in alongside the code change. `skill/wiremirage-debug/SKILL.md`
+   gets the same treatment when the diagnostic primitives change.
+5. **If the code conflicts with the spec, surface it.** Either propose a
    spec update (via `/new-adr` if it's a real decision) or revise the code.
    Don't silently diverge.
 
