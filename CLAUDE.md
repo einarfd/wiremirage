@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–10 landed. The WIT contract is live at
+**Status:** slices 1–11 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -37,10 +37,12 @@ public probes. Auth via `WM_TOKEN` / `--token`, host via `WM_HOST` /
 `--host`. `--json` switches to machine-parseable output for scripts
 and agents. The MCP server (slice 10) is part of `wm-host` and
 mounts at `/__api/mcp` over the streamable-HTTP transport (rmcp).
-13 tools cover identity, discovery, group/route CRUD, and group
-state — same bearer-token auth as the rest of `/__api/*`. Streaming
-tools (`wait_for_request`, `tail_journal`) plus 4 host-blocked tools
-land in follow-up slices.
+15 tools now cover identity, discovery, group/route CRUD, group
+state, plus the slice-11 streaming pair (`wait_for_request`,
+`tail_journal`) backed by `GET /__api/journal/tail` SSE on the host
+and a single-host broadcast bus inside `Journal`. Same bearer-token
+auth throughout. Multi-host fan-out (Valkey pub/sub) and 4
+host-blocked tools land in follow-up slices.
 
 ## Where the design lives
 

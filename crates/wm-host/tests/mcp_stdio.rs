@@ -73,8 +73,9 @@ async fn list_tools_works_over_stdio_duplex() {
         .expect("list_tools over stdio");
     assert_eq!(
         tools.len(),
-        13,
-        "stdio transport should expose the same 13 tools as HTTP"
+        15,
+        "stdio transport should expose the same 15 tools as HTTP \
+         (13 slice-10 tools + 2 slice-11 streaming tools)"
     );
 
     client.cancel().await.expect("cancel");

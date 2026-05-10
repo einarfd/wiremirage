@@ -6,6 +6,7 @@
 //! is meaningful evidence that the server actually works.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
@@ -13,8 +14,10 @@ use rmcp::model::{CallToolRequestParams, ClientInfo};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use wm_host::auth::Auth;
-use wm_host::journal::Journal;
-use wm_host::registry::Registry;
+use wm_host::journal::{
+    HandlerLogEntry, Journal, NewJournalEntry, RequestEnvelope, ResourceUsage, ResponseEnvelope,
+};
+use wm_host::registry::{NewGroup, Registry};
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
 
@@ -30,6 +33,7 @@ impl ClientHandler for DummyClient {
 
 struct Harness {
     base_url: String,
+    state: AppState,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -48,7 +52,8 @@ async fn start() -> Harness {
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage);
-    let app = router(AppState::new(runtime, routes, auth, journal));
+    let state = AppState::new(runtime, routes, auth, journal);
+    let app = router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -59,7 +64,41 @@ async fn start() -> Harness {
     });
     Harness {
         base_url: format!("http://{addr}"),
+        state,
         server,
+    }
+}
+
+fn sample_handled(group_id: &str, group_name: &str, status: u16) -> NewJournalEntry {
+    NewJournalEntry {
+        trace_id: None,
+        group_id: group_id.into(),
+        group_name: group_name.into(),
+        route_id: "r1".into(),
+        route_number: 1,
+        matched_pattern: "/v1/charges".into(),
+        request: RequestEnvelope {
+            method: "POST".into(),
+            path: "/v1/charges".into(),
+            headers: vec![],
+            body: vec![],
+            original_body_size: 0,
+            body_truncated: false,
+        },
+        response: ResponseEnvelope {
+            status,
+            headers: vec![],
+            body: vec![],
+            original_body_size: 0,
+            body_truncated: false,
+        },
+        path_params: vec![],
+        query: vec![],
+        handler_logs: Vec::<HandlerLogEntry>::new(),
+        duration_ms: 5,
+        resources: ResourceUsage::default(),
+        error: None,
+        dropped_response_headers: vec![],
     }
 }
 
@@ -78,7 +117,7 @@ fn transport(
 }
 
 #[tokio::test]
-async fn list_tools_returns_thirteen_slice_ten_tools() {
+async fn list_tools_returns_all_expected_tools() {
     let h = start().await;
     let client = DummyClient
         .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
@@ -89,6 +128,7 @@ async fn list_tools_returns_thirteen_slice_ten_tools() {
     let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     names.sort();
     let mut expected = vec![
+        // Slice 10
         "clear_group_state",
         "create_group",
         "create_route",
@@ -102,6 +142,9 @@ async fn list_tools_returns_thirteen_slice_ten_tools() {
         "show_route",
         "summarize_workspace",
         "who_am_i",
+        // Slice 11
+        "tail_journal",
+        "wait_for_request",
     ];
     expected.sort();
     assert_eq!(names, expected);
@@ -216,6 +259,256 @@ async fn delete_group_without_confirm_is_validation_error() {
         msg.contains("validation_failed") || msg.contains("confirm"),
         "expected validation marker in error, got: {msg}"
     );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn wait_for_request_returns_matching_entries() {
+    let h = start().await;
+    // Need a real group so the auth gate can resolve it.
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "stripe-mock".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("stripe-mock")
+        .unwrap();
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Spawn a writer that produces 2 matching entries shortly after
+    // the tool starts waiting.
+    let writer_state = h.state.clone();
+    let writer_group_id = group.id.clone();
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for _ in 0..2 {
+            writer_state
+                .journal()
+                .record_handled(sample_handled(&writer_group_id, "stripe-mock", 200))
+                .unwrap();
+        }
+    });
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("wait_for_request").with_arguments(
+                serde_json::json!({
+                    "group": "stripe-mock",
+                    "count": 2,
+                    "timeout_seconds": 5,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("wait_for_request");
+    writer.await.unwrap();
+
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("timed_out").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    let entries = structured
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(entries.len(), 2);
+    for e in entries {
+        assert_eq!(
+            e.get("group_name").and_then(|v| v.as_str()),
+            Some("stripe-mock")
+        );
+    }
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn wait_for_request_times_out_with_partial_results() {
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "stripe-mock".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("stripe-mock")
+        .unwrap();
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Only 1 entry will arrive but we ask for 3 with a short timeout.
+    let writer_state = h.state.clone();
+    let writer_group_id = group.id.clone();
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        writer_state
+            .journal()
+            .record_handled(sample_handled(&writer_group_id, "stripe-mock", 200))
+            .unwrap();
+    });
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("wait_for_request").with_arguments(
+                serde_json::json!({
+                    "group": "stripe-mock",
+                    "count": 3,
+                    "timeout_seconds": 1,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("wait_for_request");
+    writer.await.unwrap();
+
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("timed_out").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    let entries = structured
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "should have the one entry that did arrive"
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn wait_for_request_requires_group_or_route_for_non_admin() {
+    let h = start().await;
+    let user = h
+        .state
+        .auth()
+        .create_user("alice", false)
+        .expect("create user");
+    let (_t, alice_token) = h
+        .state
+        .auth()
+        .create_token(&user.id, "default", None)
+        .expect("create token");
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(&alice_token)))
+        .await
+        .expect("connect");
+
+    let err = client
+        .call_tool(
+            CallToolRequestParams::new("wait_for_request").with_arguments(
+                serde_json::json!({ "count": 1, "timeout_seconds": 1 })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect_err("expected forbidden");
+    assert!(format!("{err}").contains("forbidden") || format!("{err}").contains("admin"));
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn tail_journal_returns_on_idle_timeout() {
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "twilio-mock".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("twilio-mock")
+        .unwrap();
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let writer_state = h.state.clone();
+    let writer_group_id = group.id.clone();
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        writer_state
+            .journal()
+            .record_handled(sample_handled(&writer_group_id, "twilio-mock", 200))
+            .unwrap();
+        // Then go silent — the tail should idle out.
+    });
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("tail_journal").with_arguments(
+                serde_json::json!({
+                    "group": "twilio-mock",
+                    "max_entries": 100,
+                    "idle_timeout_seconds": 1,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("tail_journal");
+    writer.await.unwrap();
+
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("stopped_reason").and_then(|v| v.as_str()),
+        Some("idle_timeout")
+    );
+    let entries = structured
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(entries.len(), 1);
 
     client.cancel().await.expect("cancel");
 }

@@ -32,8 +32,10 @@ and a background sweeper reaps groups that hit their TTL. The `wm` CLI
 wraps the REST surface end-to-end: groups, routes, journal, tokens, and
 the public probes — see "Using the CLI" below. The MCP server is part of
 the host and mounts at `/__api/mcp` over the streamable-HTTP transport;
-13 tools cover identity, discovery, and group/route CRUD using the same
-bearer-token auth.
+15 tools cover identity, discovery, group/route CRUD, and the live-tail
+streaming pair (`wait_for_request`, `tail_journal`), all behind the same
+bearer-token auth. Live tail also exposes `GET /__api/journal/tail` as
+an SSE endpoint for non-MCP consumers.
 
 ## Layout
 
@@ -167,14 +169,18 @@ claude mcp add --transport http wiremirage \
   --header "Authorization: Bearer wmt_..."
 ```
 
-The slice-10 surface is 13 tools — identity (`who_am_i`), discovery
+The current surface is 15 tools — identity (`who_am_i`), discovery
 (`summarize_workspace`, `list_recent_unmatched`), group CRUD
 (`list_groups`, `show_group`, `create_group`, `delete_group`,
 `refresh_group_ttl`), route CRUD (`list_routes`, `show_route`,
-`create_route`, `delete_route`), and `clear_group_state`. The
-streaming pair (`wait_for_request`, `tail_journal`) plus
-`find_route` / `update_route` / `dry_run_route` / per-route state
-land in follow-up slices alongside their underlying host endpoints.
+`create_route`, `delete_route`), `clear_group_state`, and the
+slice-11 streaming pair (`wait_for_request`, `tail_journal`). The
+streaming tools subscribe to a single-host broadcast bus inside the
+host and return accumulated entries when their stop condition fires
+(count + timeout for `wait_for_request`; max_entries + idle timeout
+for `tail_journal`). `find_route` / `update_route` / `dry_run_route`
+/ per-route state and multi-host pub/sub for the bus land in
+follow-up slices.
 
 ## License
 

@@ -37,7 +37,8 @@ impl WmMcpServer {
             + Self::discovery_router()
             + Self::groups_router()
             + Self::routes_router()
-            + Self::state_router();
+            + Self::state_router()
+            + Self::streaming_router();
         Self { state, tool_router }
     }
 }

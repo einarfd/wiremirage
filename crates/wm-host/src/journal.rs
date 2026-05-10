@@ -34,12 +34,20 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::broadcast;
 use ulid::Ulid;
 
 use crate::store::{Bucket, Storage, StoreError};
 
 const HANDLED_TTL_SECONDS: u64 = 3600;
 const UNMATCHED_TTL_SECONDS: u64 = 3600;
+
+/// Bus capacity for live-tail subscribers. A slow consumer that lags
+/// further than this loses events (`broadcast` returns `Lagged(n)`),
+/// which subscribers surface back to their callers. 256 is enough to
+/// absorb typical dispatch bursts without making the channel a memory
+/// hazard; revisit if real workloads stretch it.
+const JOURNAL_BUS_CAPACITY: usize = 256;
 
 /// Truncation cap for journal request and response bodies. Entries
 /// larger than this are stored truncated with `body_truncated = true`
@@ -59,7 +67,7 @@ pub enum JournalError {
     Malformed(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct JournalRecord {
     pub id: String,
     pub number: u32,
@@ -85,7 +93,7 @@ pub struct JournalRecord {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RequestEnvelope {
     pub method: String,
     pub path: String,
@@ -95,7 +103,7 @@ pub struct RequestEnvelope {
     pub original_body_size: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ResponseEnvelope {
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -104,14 +112,14 @@ pub struct ResponseEnvelope {
     pub original_body_size: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct HandlerLogEntry {
     pub level: String,
     pub message: String,
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ResourceUsage {
     /// Wasmtime fuel consumed by the handler. Always 0 until per-route
     /// resource limits land — schema kept stable so consumers don't
@@ -122,7 +130,7 @@ pub struct ResourceUsage {
     pub wall_clock_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct UnmatchedRecord {
     pub id: String,
     pub number: u64,
@@ -211,18 +219,52 @@ pub fn truncate_body(body: Vec<u8>, limit: usize) -> (Vec<u8>, usize, bool) {
     }
 }
 
+/// One event on the live-tail bus. Mirrors the two record shapes
+/// `Journal` produces — handled requests and unmatched requests —
+/// because consumers (the SSE endpoint, the MCP streaming tools) are
+/// interested in the same events the journal already stores.
+///
+/// Single-host fan-out only: the bus is in-process, so sibling hosts
+/// in a multi-host deployment won't observe each other's events. A
+/// follow-up slice can put Valkey pub/sub behind the same shape if
+/// multi-host becomes real.
+///
+/// Variants are boxed so cloning around the broadcast bus is cheap —
+/// a `JournalRecord` is ~500 bytes, and the channel capacity is 256.
+#[derive(Debug, Clone)]
+pub enum JournalEvent {
+    Handled(Box<JournalRecord>),
+    Unmatched(Box<UnmatchedRecord>),
+}
+
 #[derive(Clone)]
 pub struct Journal {
     storage: Storage,
+    bus: broadcast::Sender<JournalEvent>,
 }
 
 impl Journal {
     pub fn new(storage: Storage) -> Self {
-        Self { storage }
+        let (bus, _) = broadcast::channel(JOURNAL_BUS_CAPACITY);
+        Self { storage, bus }
     }
 
     fn bucket(&self) -> Result<Bucket, JournalError> {
         Ok(self.storage.admin_bucket()?)
+    }
+
+    /// Subscribe to live-tail events. The subscriber is responsible
+    /// for handling `Lagged` errors — a slow consumer can fall behind
+    /// the bus capacity.
+    pub fn subscribe(&self) -> broadcast::Receiver<JournalEvent> {
+        self.bus.subscribe()
+    }
+
+    /// Publish helper. `broadcast::Sender::send` returns `Err` only
+    /// when there are zero active receivers, which is normal — the
+    /// bus is best-effort and we drop events silently in that case.
+    fn publish(&self, event: JournalEvent) {
+        let _ = self.bus.send(event);
     }
 
     // -- Handled requests ---------------------------------------------------
@@ -264,6 +306,7 @@ impl Journal {
             &format!("journal:by-number:{}:{}", record.group_id, record.number),
             record.id.as_bytes().to_vec(),
         )?;
+        self.publish(JournalEvent::Handled(Box::new(record.clone())));
         Ok(record)
     }
 
@@ -368,6 +411,7 @@ impl Journal {
             &format!("unmatched:by-number:{}", record.number),
             record.id.as_bytes().to_vec(),
         )?;
+        self.publish(JournalEvent::Unmatched(Box::new(record.clone())));
         Ok(record)
     }
 

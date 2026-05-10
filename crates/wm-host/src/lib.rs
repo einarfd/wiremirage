@@ -10,6 +10,7 @@ pub mod bindings;
 pub mod compiler;
 pub mod host_state;
 pub mod journal;
+pub mod journal_filter;
 pub mod lifecycle;
 pub mod log;
 pub mod mcp;

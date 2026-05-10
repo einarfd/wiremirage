@@ -73,17 +73,19 @@ mod tests {
         AppState::new(runtime, routes, auth, journal)
     }
 
-    /// All 13 slice-10 tools must be registered with the expected
+    /// All shipped tools must be registered with the expected
     /// names. This catches "the macro misfired" / "we renamed a tool
     /// and forgot somewhere" regressions; the names are the
     /// public-facing contract for MCP clients and the design doc.
+    /// Slice 10 shipped 13 tools; slice 11 added 2 streaming tools.
     #[test]
-    fn server_exposes_all_thirteen_slice_ten_tools() {
+    fn server_exposes_all_expected_tools() {
         let server = WmMcpServer::new(Arc::new(empty_state()));
         let tools = server.tool_router.list_all();
         let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         names.sort();
         let mut expected = vec![
+            // Slice 10
             "clear_group_state",
             "create_group",
             "create_route",
@@ -97,6 +99,9 @@ mod tests {
             "show_route",
             "summarize_workspace",
             "who_am_i",
+            // Slice 11
+            "tail_journal",
+            "wait_for_request",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");

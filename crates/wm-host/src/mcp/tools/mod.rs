@@ -13,3 +13,4 @@ pub mod groups;
 pub mod identity;
 pub mod routes;
 pub mod state;
+pub mod streaming;

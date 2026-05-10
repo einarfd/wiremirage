@@ -54,6 +54,10 @@ pub fn router() -> Router<AppState> {
         // Journal — list/get per group (admin or any group-route owner).
         .route("/__api/journal/{group}", get(list_journal))
         .route("/__api/journal/{group}/{number}", get(get_journal_entry))
+        // Journal tail — SSE stream of live events. Auth: owner-or-admin
+        // when ?group= is set, admin-only otherwise (matches the
+        // host-wide unmatched read).
+        .route("/__api/journal/tail", get(tail_journal))
         // Unmatched — admin-only (host-wide and may include probing traffic).
         .route("/__api/unmatched", get(list_unmatched))
         .route("/__api/unmatched/{number}", get(get_unmatched_entry))
@@ -1050,4 +1054,101 @@ async fn delete_group_journal(
     let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
     state.routes().registry().clear_group_journal(&group.id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// -- /__api/journal/tail (SSE) -----------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct TailQuery {
+    group: Option<String>,
+    route: Option<String>,
+    method: Option<String>,
+    path_pattern: Option<String>,
+    status: Option<String>,
+}
+
+async fn tail_journal(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<TailQuery>,
+) -> Result<
+    axum::response::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ApiError,
+> {
+    use crate::journal::JournalEvent;
+    use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let route = q
+        .route
+        .as_deref()
+        .map(RouteSlug::parse)
+        .transpose()
+        .map_err(|e| ApiError::validation(format!("invalid route filter: {e}")))?;
+    let status = q
+        .status
+        .as_deref()
+        .map(StatusFilter::parse)
+        .transpose()
+        .map_err(|e| ApiError::validation(format!("invalid status filter: {e}")))?;
+    let filter = JournalFilter {
+        group: q.group.clone(),
+        route,
+        method: q.method.clone(),
+        path_pattern: q.path_pattern.clone(),
+        status,
+    };
+
+    // Auth gate. When a group is supplied, owner-or-admin on that
+    // group; otherwise admin-only (host-wide tail is sensitive, same
+    // shape as `/__api/unmatched`).
+    if let Some(group_ref) = filter.group.as_deref() {
+        let group_record = state
+            .routes()
+            .registry()
+            .read_group_by_ref(group_ref)
+            .map_err(|_| ApiError::not_found())?;
+        if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+            return Err(ApiError::forbidden(
+                "must be an admin or own a route in this group to tail its journal",
+            ));
+        }
+    } else if !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "host-wide journal tail is admin-only; supply ?group= to scope it",
+        ));
+    }
+
+    let rx = state.journal().subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        let filter = filter.clone();
+        async move {
+            match result {
+                Ok(event) if filter.matches(&event) => {
+                    let sse = match &event {
+                        JournalEvent::Handled(r) => Event::default()
+                            .event("handled")
+                            .json_data(r)
+                            .expect("encode handled record"),
+                        JournalEvent::Unmatched(u) => Event::default()
+                            .event("unmatched")
+                            .json_data(u)
+                            .expect("encode unmatched record"),
+                    };
+                    Some(Ok(sse))
+                }
+                Ok(_) => None, // filtered out
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    Some(Ok(Event::default()
+                        .event("warning")
+                        .data(format!("dropped {n} events (consumer lagged)"))))
+                }
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

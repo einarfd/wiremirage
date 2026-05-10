@@ -403,16 +403,74 @@ allowing tools to be added/tested in isolation.
   `show_group`, `create_group`, `delete_group`, `refresh_group_ttl`,
   `list_routes`, `show_route`, `create_route`, `delete_route`,
   `clear_group_state`.
-- **What's deferred.** Streaming pair (`wait_for_request`,
-  `tail_journal`) needs `GET /__api/journal/tail` SSE on the host
-  first — bundled together as a follow-up slice. `find_route`,
-  `update_route`, `dry_run_route`, per-route state ops need their
-  REST endpoints to exist first; bundle them with their host
-  additions. `create_route` over MCP currently accepts
-  `language: "wasm"` only; source-based TS creation routes through
-  the CLI/REST until we decide whether agents should ever post
-  inline source through MCP. Stdio production deployment + auth
-  bridge for stdio sessions are out of scope.
+- **What's deferred from slice 10.** `find_route`, `update_route`,
+  `dry_run_route`, per-route state ops need their REST endpoints to
+  exist first; bundle them with their host additions. `create_route`
+  over MCP currently accepts `language: "wasm"` only; source-based
+  TS creation routes through the CLI/REST until we decide whether
+  agents should ever post inline source through MCP. Stdio
+  production deployment + auth bridge for stdio sessions are out of
+  scope.
+
+## Live journal tail / streaming (slice 11)
+
+Live tail uses an in-process broadcast bus inside `Journal`
+(`tokio::sync::broadcast`, capacity 256). `record_handled` and
+`record_unmatched` publish a `JournalEvent` after the Valkey write
+succeeds; consumers subscribe via `Journal::subscribe()`.
+
+- **Filter shape.** `crates/wm-host/src/journal_filter.rs` —
+  conjunctive `JournalFilter` over `group` (name or ULID), `route`
+  slug, `method`, `path_pattern` (exact match against the route's
+  matched_pattern), and `status` ("2xx"/"3xx"/"4xx"/"5xx" or a
+  specific code). Per-route filters implicitly hide unmatched
+  events. Used by both the SSE handler and the MCP streaming tools
+  so semantics stay aligned.
+- **HTTP surface.** `GET /__api/journal/tail` returns an axum SSE
+  stream wrapped around `BroadcastStream`. Each matching event
+  emits `event: handled` or `event: unmatched`; `event: warning`
+  surfaces lag if a consumer can't keep up. Heartbeat via
+  axum's `KeepAlive::default()`. Auth: owner-or-admin when
+  `?group=` is set, admin-only otherwise.
+- **MCP surface.** `wait_for_request` (count + timeout) and
+  `tail_journal` (max_entries + idle timeout). Both subscribe
+  directly to the in-process bus — no need to round-trip via SSE
+  since the MCP server runs inside the host. Single
+  `CallToolResult` with the accumulated entries (request/response
+  shape, not progressive notifications) — matches what rmcp does
+  cleanly.
+- **Multi-host gap.** The bus is in-process. Sibling hosts in a
+  multi-host deployment won't see each other's events. Documented
+  in the implementation-status blocks; revisit when multi-host is
+  real (Valkey pub/sub fits behind the same `JournalEvent` shape).
+- **Lag handling.** A slow subscriber that lags past the channel
+  capacity loses events. The SSE endpoint surfaces this as a
+  `warning` event and keeps going; the MCP tools count dropped
+  events into a `dropped_events` field on the result and continue
+  accumulating. Documented; agents that care about completeness
+  should subscribe before triggering the SUT.
+- **Tests.**
+  - Tier 1 — `journal_filter::tests`: 8 cases covering parsing +
+    filter matching including unmatched semantics.
+  - Tier 2 — `crates/wm-host/tests/journal_tail_sse.rs`: 7 cases
+    against the SSE endpoint via reqwest streaming. Covers auth
+    gates, group/method filters, unmatched delivery, invalid
+    filter parsing.
+  - Tier 2 — `crates/wm-host/tests/mcp_e2e.rs` adds `wait_for_request`
+    happy path + timeout + non-admin auth gate, plus
+    `tail_journal` idle-timeout exit.
+
+### Adding a new event-shaped tool
+
+For tools that observe live journal traffic: subscribe via
+`state.journal().subscribe()`, build a `JournalFilter` from
+user-facing args (`build_filter` in `streaming.rs` is reusable),
+gate auth via `ensure_streaming_authorized`, then loop with
+`tokio::time::timeout(...)` over `rx.recv()`. Map `Lagged` errors
+into a `dropped_events` counter on the result; map `Closed` into
+"return what you have" rather than failing. Don't try to map back
+to progressive notifications unless we hit a concrete need —
+single-result is what rmcp handles best and the design doc agrees.
 
 ## Route table architecture
 

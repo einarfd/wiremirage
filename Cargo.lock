@@ -3281,6 +3281,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4531,6 +4532,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "futures",
  "hex",
  "http",
  "http-body-util",
@@ -4549,6 +4551,7 @@ dependencies = [
  "testcontainers",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tower",
  "tracing",
  "tracing-opentelemetry",
