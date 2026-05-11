@@ -147,6 +147,8 @@ async fn list_tools_returns_all_expected_tools() {
         "wait_for_request",
         // Slice 13
         "find_route",
+        // Slice 15
+        "update_route",
     ];
     expected.sort();
     assert_eq!(names, expected);

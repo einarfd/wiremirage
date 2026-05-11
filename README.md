@@ -18,10 +18,14 @@ place, the host runs components against it, storage is abstracted behind
 in-memory and Valkey backends, routes are stored in a registry keyed by
 `{group}/{n}`, and the REST API accepts both pre-compiled wasm uploads
 and TypeScript source (the latter goes through a Node sidecar at
-`compiler/typescript/`). Bearer-token auth gates the `/__api/*` surface;
-mock traffic to user routes stays open by design (SUTs don't have
-tokens). Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup.
-Token and user management live at `/__api/tokens` and `/__api/users`
+`compiler/typescript/`). Routes are mutable via `PATCH
+/__api/routes/{group}/{n}` (slice 15): `methods`, `path`, and the
+handler artifact swap together; path/method changes re-run pattern
+conflict detection, and any wasm swap evicts the in-memory component
+cache. Bearer-token auth gates the `/__api/*` surface; mock traffic
+to user routes stays open by design (SUTs don't have tokens).
+Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup. Token
+and user management live at `/__api/tokens` and `/__api/users`
 (admin-only for cross-user actions; `GET /__api/users/me` for self).
 Every dispatched mock request and every unmatched request is journaled
 in Valkey (default 1h TTL); fetch via `GET /__api/journal/{group}` and
@@ -29,14 +33,16 @@ in Valkey (default 1h TTL); fetch via `GET /__api/journal/{group}` and
 units with TTL (default 24h, sliding-on-traffic by default); explicit
 DELETE cascades routes, kv/gkv state, and journal entries together,
 and a background sweeper reaps groups that hit their TTL. The `wm` CLI
-wraps the REST surface end-to-end: groups, routes, journal, tokens, and
-the public probes — see "Using the CLI" below. The MCP server is part of
-the host and mounts at `/__api/mcp` over the streamable-HTTP transport;
-16 tools cover identity, discovery, group/route CRUD, the live-tail
-streaming pair (`wait_for_request`, `tail_journal`), and the match
-probe (`find_route`, mirrored by `wm match` and `GET /__api/match`).
-All behind the same bearer-token auth. Live tail also exposes
-`GET /__api/journal/tail` as an SSE endpoint for non-MCP consumers.
+wraps the REST surface end-to-end: groups, routes (including `wm
+routes update`), journal, tokens, and the public probes — see "Using
+the CLI" below. The MCP server is part of the host and mounts at
+`/__api/mcp` over the streamable-HTTP transport; 17 tools cover
+identity, discovery, group/route CRUD (now including `update_route`),
+the live-tail streaming pair (`wait_for_request`, `tail_journal`),
+and the match probe (`find_route`, mirrored by `wm match` and `GET
+/__api/match`). All behind the same bearer-token auth. Live tail
+also exposes `GET /__api/journal/tail` as an SSE endpoint for non-MCP
+consumers.
 
 ## Layout
 
@@ -143,6 +149,7 @@ wm groups create stripe-mock               # default 24h sliding TTL
 wm routes add --group stripe-mock --method POST --path /v1/charges \
   --source-file handler.ts                 # compiles via the sidecar
 wm routes list
+wm routes update stripe-mock/1 --source-file new-handler.ts  # PATCH
 wm journal list stripe-mock                # newest first, paginated
 wm tokens create ci-runner                 # plaintext printed once
 wm groups delete stripe-mock --force       # cascades routes, kv, journal
@@ -181,19 +188,22 @@ claude mcp add --transport http wiremirage \
   --header "Authorization: Bearer wmt_..."
 ```
 
-The current surface is 16 tools — identity (`who_am_i`), discovery
+The current surface is 17 tools — identity (`who_am_i`), discovery
 (`summarize_workspace`, `list_recent_unmatched`, `find_route`),
 group CRUD (`list_groups`, `show_group`, `create_group`,
 `delete_group`, `refresh_group_ttl`), route CRUD (`list_routes`,
-`show_route`, `create_route`, `delete_route`), `clear_group_state`,
-and the slice-11 streaming pair (`wait_for_request`,
-`tail_journal`). The streaming tools subscribe to a single-host
-broadcast bus inside the host and return accumulated entries when
-their stop condition fires (count + timeout for `wait_for_request`;
-max_entries + idle timeout for `tail_journal`). `find_route` mirrors
-the `wm match` CLI and `GET /__api/match` REST endpoint shipped in
-slice 13. `update_route` / `dry_run_route` / per-route state and
-multi-host pub/sub for the bus land in follow-up slices.
+`show_route`, `create_route`, `update_route`, `delete_route`),
+`clear_group_state`, and the slice-11 streaming pair
+(`wait_for_request`, `tail_journal`). The streaming tools subscribe
+to a single-host broadcast bus inside the host and return
+accumulated entries when their stop condition fires (count + timeout
+for `wait_for_request`; max_entries + idle timeout for
+`tail_journal`). `find_route` mirrors the `wm match` CLI and `GET
+/__api/match` REST endpoint shipped in slice 13. `update_route`
+(slice 15) is wasm-only at the MCP layer, matching `create_route`;
+source-based updates go through REST or `wm routes update
+--source-file`. `dry_run_route` / per-route state and multi-host
+pub/sub for the bus land in follow-up slices.
 
 ## License
 

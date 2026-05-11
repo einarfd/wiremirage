@@ -105,6 +105,25 @@ pub struct CreateRouteBody {
     pub source: Option<String>,
 }
 
+/// Partial-update payload for `PATCH /__api/routes/{group}/{n}`. Send
+/// only the fields you want to change. `language` is required when
+/// replacing the artifact (either `source` or `compiled_wasm`).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PatchRouteBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub methods: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bindings_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiled_wasm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 // -- Journal -----------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

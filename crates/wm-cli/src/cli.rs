@@ -171,6 +171,9 @@ pub enum RoutesCommand {
         /// Route slug `{group}/{n}` (e.g. `stripe-mock/7`).
         slug: String,
     },
+    /// Update a route's mutable fields. Pass at least one of `--method`,
+    /// `--path`, `--source-file`, or `--wasm-file`. Owner-or-admin only.
+    Update(UpdateRouteArgs),
     /// Delete a route.
     Delete {
         /// Route slug `{group}/{n}`.
@@ -210,6 +213,36 @@ pub struct AddRouteArgs {
     /// `bindings_version` declared on the upload. Required for
     /// `--wasm-file`; ignored for `--source-file` (the compiler
     /// sets it).
+    #[arg(long, default_value = "0.1.0")]
+    pub bindings_version: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UpdateRouteArgs {
+    /// Route slug `{group}/{n}` (e.g. `stripe-mock/7`).
+    pub slug: String,
+    /// Replace the method list. Comma-separated; `ANY` matches every
+    /// method. Omit to leave the existing list alone.
+    #[arg(long)]
+    pub method: Option<String>,
+    /// Replace the path pattern. Omit to leave the existing path
+    /// alone.
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Replace the handler with source from this file. Compiled via
+    /// the sidecar. Mutually exclusive with `--wasm-file`.
+    #[arg(long, conflicts_with = "wasm_file")]
+    pub source_file: Option<String>,
+    /// Replace the handler with a pre-built component from this file.
+    /// Mutually exclusive with `--source-file`.
+    #[arg(long)]
+    pub wasm_file: Option<String>,
+    /// Source language for `--source-file`. Defaults to `typescript`.
+    /// Ignored for `--wasm-file`.
+    #[arg(long, default_value = "typescript")]
+    pub language: String,
+    /// `bindings_version` for `--wasm-file`. Ignored for
+    /// `--source-file` (the compiler sets it).
     #[arg(long, default_value = "0.1.0")]
     pub bindings_version: String,
 }

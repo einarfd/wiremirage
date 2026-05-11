@@ -17,12 +17,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use wm_core::{
     Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateUserBody,
-    PatchGroupBody, PatchUserBody,
+    PatchGroupBody, PatchRouteBody, PatchUserBody,
 };
 
 use crate::cli::{
     AddRouteArgs, Cli, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, JournalCommand,
-    RoutesCommand, TokensCommand, UpdateUserArgs, UsersCommand,
+    RoutesCommand, TokensCommand, UpdateRouteArgs, UpdateUserArgs, UsersCommand,
 };
 use crate::format::{self, Format};
 
@@ -260,6 +260,12 @@ async fn handle_routes(
             let r = client.get_route(&slug).await?;
             format::render_route(&r, format);
         }
+        RoutesCommand::Update(args) => {
+            let body = build_update_route_body(args)?;
+            let slug = body.0;
+            let r = client.patch_route(&slug, &body.1).await?;
+            format::render_route(&r, format);
+        }
         RoutesCommand::Delete { slug, force: _ } => {
             client.delete_route(&slug).await?;
             if matches!(format, Format::Human) {
@@ -268,6 +274,70 @@ async fn handle_routes(
         }
     }
     Ok(())
+}
+
+/// Translate `UpdateRouteArgs` into `(slug, PatchRouteBody)`. Returns
+/// a usage error if no mutable field was supplied or if the
+/// `--source-file` / `--wasm-file` combo is invalid.
+fn build_update_route_body(args: UpdateRouteArgs) -> Result<(String, PatchRouteBody), ClientError> {
+    let methods: Option<Vec<String>> = match args.method {
+        Some(m) => {
+            let list: Vec<String> = m
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if list.is_empty() {
+                return Err(ClientError::Validation(
+                    "--method must be one or more comma-separated HTTP methods".into(),
+                ));
+            }
+            Some(list)
+        }
+        None => None,
+    };
+
+    let (language, bindings_version, compiled_wasm, source) =
+        match (args.source_file.as_deref(), args.wasm_file.as_deref()) {
+            (Some(path), None) => {
+                let src = read_to_string(path)?;
+                (Some(args.language), None, None, Some(src))
+            }
+            (None, Some(path)) => {
+                let bytes = read_bytes(path)?;
+                (
+                    Some("wasm".to_string()),
+                    Some(args.bindings_version),
+                    Some(B64.encode(bytes)),
+                    None,
+                )
+            }
+            (Some(_), Some(_)) => {
+                return Err(ClientError::Validation(
+                    "pass at most one of --source-file or --wasm-file".into(),
+                ));
+            }
+            (None, None) => (None, None, None, None),
+        };
+
+    if methods.is_none() && args.path.is_none() && compiled_wasm.is_none() && source.is_none() {
+        return Err(ClientError::Validation(
+            "wm routes update requires at least one of --method, --path, --source-file, --wasm-file"
+                .into(),
+        ));
+    }
+
+    Ok((
+        args.slug,
+        PatchRouteBody {
+            methods,
+            path: args.path,
+            language,
+            bindings_version,
+            compiled_wasm,
+            source,
+        },
+    ))
 }
 
 fn build_add_route_body(args: AddRouteArgs) -> Result<CreateRouteBody, ClientError> {

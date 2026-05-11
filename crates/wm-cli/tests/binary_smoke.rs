@@ -290,6 +290,102 @@ async fn wm_without_token_exits_4_on_authed_command() {
 }
 
 #[tokio::test]
+async fn wm_routes_update_changes_path() {
+    let h = start().await;
+    // Plant a route directly through the registry so we don't need a
+    // real wasm fixture in this smoke test.
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/charges".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: h
+                .state
+                .auth()
+                .get_user_by_name("bootstrap")
+                .expect("read bootstrap")
+                .expect("bootstrap exists")
+                .id,
+        })
+        .expect("create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+    let slug_for_cmd = slug.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host,
+                "--token",
+                &token,
+                "--json",
+                "routes",
+                "update",
+                &slug_for_cmd,
+                "--path",
+                "/v1/refunds",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+
+    assert!(
+        out.status.success(),
+        "wm routes update exited {:?}: stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("update json parses");
+    assert_eq!(parsed["path"], "/v1/refunds");
+}
+
+#[tokio::test]
+async fn wm_routes_update_requires_at_least_one_field() {
+    let h = start().await;
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+    let out = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host,
+                "--token",
+                &token,
+                "routes",
+                "update",
+                "some-group/1",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    // Validation error, not 0 — CLI returns exit code 1 for generic
+    // validation failures (route doesn't exist either, but the local
+    // check short-circuits before the host call).
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("requires at least one of"),
+        "expected usage hint, got: {stderr}"
+    );
+}
+
+#[tokio::test]
 async fn wm_users_list_create_delete_round_trip() {
     let h = start().await;
     let host = h.host_url.clone();

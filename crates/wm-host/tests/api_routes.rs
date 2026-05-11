@@ -620,6 +620,212 @@ async fn rejects_pattern_shape_conflict() {
     assert_eq!(body["error"]["code"], "conflict");
 }
 
+// -- PATCH /__api/routes (slice 15) -----------------------------------------
+
+#[tokio::test]
+async fn patch_route_swaps_path_and_evicts_old_dispatch() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+    let location = format!("/__api/routes/{group}/{number}");
+
+    // Move the route to a new path.
+    let patched = h
+        .client
+        .patch(h.url(&location))
+        .json(&json!({ "path": "/v1/refunds" }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(patched.status().as_u16(), 200);
+    let body: serde_json::Value = patched.json().await.expect("json");
+    assert_eq!(body["path"], "/v1/refunds");
+
+    // The new path dispatches; the old one 404s (route table refreshed).
+    let resp = h
+        .client
+        .post(h.url("/v1/refunds"))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 200);
+    let stale = h
+        .client
+        .post(h.url("/v1/charges"))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(stale.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn patch_route_replaces_compiled_wasm() {
+    let h = Harness::start().await;
+    // Start with the echo handler, then PATCH in the counter handler
+    // and confirm the response shape changes.
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/bump",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+    let location = format!("/__api/routes/{group}/{number}");
+
+    // Sanity: the original wasm is the echo handler.
+    let echo_body = h
+        .client
+        .get(h.url("/v1/bump"))
+        .send()
+        .await
+        .expect("get")
+        .text()
+        .await
+        .expect("text");
+    assert_eq!(echo_body, "echo: GET /v1/bump");
+
+    // Swap to the counter handler.
+    let patched = h
+        .client
+        .patch(h.url(&location))
+        .json(&json!({
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": counter_b64(),
+        }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(patched.status().as_u16(), 200);
+
+    for expected in 1..=2u32 {
+        let body = h
+            .client
+            .get(h.url("/v1/bump"))
+            .send()
+            .await
+            .expect("get")
+            .text()
+            .await
+            .expect("text");
+        assert_eq!(body, format!("count={expected}"));
+    }
+}
+
+#[tokio::test]
+async fn patch_route_rejects_path_conflict() {
+    let h = Harness::start().await;
+    // Two routes; try to move the second onto the first's path.
+    h.create_route_body(json!({
+        "methods": ["GET"],
+        "path": "/v1/a",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+    let second: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/b",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = second["group"]["name"].as_str().unwrap();
+    let number = second["number"].as_u64().unwrap();
+
+    let resp = h
+        .client
+        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .json(&json!({ "path": "/v1/a" }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 409);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "conflict");
+}
+
+#[tokio::test]
+async fn patch_route_with_empty_body_is_bad_request() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/empty",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+    let resp = h
+        .client
+        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "validation_failed");
+}
+
+#[tokio::test]
+async fn patch_route_non_owner_non_admin_forbidden() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/locked",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+    let (_alice_id, alice_client) = h.provision_user("alice-patch", false);
+    let resp = alice_client
+        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .json(&json!({ "path": "/v1/stolen" }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
 // -- /__api/tokens ------------------------------------------------------------
 
 #[tokio::test]

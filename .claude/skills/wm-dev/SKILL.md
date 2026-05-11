@@ -423,6 +423,38 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Route update (slice 15)
+
+`PATCH /__api/routes/{group}/{n}` mutates a route in place. The
+matching `wm routes update <slug>` CLI subcommand and the
+`update_route` MCP tool round it out — same shape as the
+create-route surface, partial body.
+
+- **Mutable fields:** `methods`, `path`, the artifact triple
+  (`source` or `compiled_wasm` + `language` + `bindings_version`).
+  `owner_id`, `number`, `id`, and the parent `group` are immutable.
+- **Conflict re-validation:** path or method changes walk the route
+  set again (excluding self) and reject if the new shape would
+  collide. Same `routes_conflict` helper as `create_route`. Test
+  coverage: `patch_route_rejects_path_conflict` in
+  `crates/wm-host/tests/api_routes.rs`.
+- **Cache eviction:** any successful update calls
+  `RouteTable::refresh_after_update`, which replaces the in-memory
+  record and drops the cached `Component`. The next request hitting
+  the route triggers a fresh compile. Eviction is unconditional —
+  even metadata-only updates evict, on the theory that one extra
+  compile is cheaper than a stale-bytes bug.
+- **Auth:** owner-or-admin, matching DELETE. Non-owner non-admin
+  gets 403.
+- **MCP stays wasm-only on the artifact**, matching `create_route`.
+  Source-based updates go through REST or `wm routes update
+  --source-file` (which forwards through the same compiler sidecar
+  used by `wm routes add`).
+- **CLI flag semantics:** `wm routes update <slug>` requires at
+  least one of `--method`, `--path`, `--source-file`, or
+  `--wasm-file`; an entirely empty patch is a usage error caught
+  client-side before the host call.
+
 ## User CRUD CLI + completions (slice 14)
 
 `wm users` covers the admin user-management surface that previously

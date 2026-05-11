@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use wm_core::{
     Client, ClientError, CreateGroupBody, CreateTokenBody, CreateUserBody, MatchResponse,
-    PatchGroupBody, PatchUserBody,
+    PatchGroupBody, PatchRouteBody, PatchUserBody,
 };
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
@@ -62,6 +62,15 @@ fn client(host_url: &str) -> Client {
         .with_token(BOOTSTRAP_TOKEN)
         .build()
         .expect("build")
+}
+
+fn bootstrap_user_id(h: &Harness) -> String {
+    h.state
+        .auth()
+        .get_user_by_name("bootstrap")
+        .expect("read bootstrap user")
+        .expect("bootstrap user exists")
+        .id
 }
 
 #[tokio::test]
@@ -250,6 +259,137 @@ async fn match_route_round_trips_hit_and_miss() {
         }
         MatchResponse::Hit(_) => panic!("expected miss"),
     }
+}
+
+#[tokio::test]
+async fn patch_route_round_trip_metadata_only() {
+    let h = start().await;
+    let client = client(&h.host_url);
+
+    // Plant a route directly through the registry — PATCH wasm-bytes
+    // would require a real component fixture; we exercise the
+    // metadata-only path here and let api_routes.rs cover the wasm
+    // swap with a fixture.
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/foo".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: bootstrap_user_id(&h),
+        })
+        .expect("registry create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let patched = client
+        .patch_route(
+            &slug,
+            &PatchRouteBody {
+                methods: Some(vec!["GET".into(), "POST".into()]),
+                path: Some("/v1/bar".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("patch_route");
+    assert_eq!(patched.methods, vec!["GET", "POST"]);
+    assert_eq!(patched.path, "/v1/bar");
+
+    // GET reflects the new state.
+    let fresh = client
+        .get_route(&format!("{}/{}", patched.group.name, patched.number))
+        .await
+        .expect("get_route");
+    assert_eq!(fresh.path, "/v1/bar");
+}
+
+#[tokio::test]
+async fn patch_route_with_empty_body_is_validation_error() {
+    let h = start().await;
+    let client = client(&h.host_url);
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/empty".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: bootstrap_user_id(&h),
+        })
+        .expect("registry create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let err = client
+        .patch_route(&slug, &PatchRouteBody::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ClientError::Validation(_)),
+        "expected Validation, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn patch_route_by_non_owner_is_forbidden() {
+    let h = start().await;
+    // Bootstrap owns the route; alice (non-admin) tries to patch.
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/locked".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: bootstrap_user_id(&h),
+        })
+        .expect("registry create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let alice = h
+        .state
+        .auth()
+        .create_user("alice-patch", false)
+        .expect("alice");
+    let (_token, plaintext) = h
+        .state
+        .auth()
+        .create_token(&alice.id, "default", None)
+        .expect("alice token");
+    let alice_client = Client::builder(&h.host_url)
+        .with_token(&plaintext)
+        .build()
+        .expect("build alice client");
+
+    let err = alice_client
+        .patch_route(
+            &slug,
+            &PatchRouteBody {
+                path: Some("/v1/stolen".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ClientError::Forbidden(_)),
+        "expected Forbidden, got {err:?}"
+    );
 }
 
 #[tokio::test]

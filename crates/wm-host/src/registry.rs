@@ -121,6 +121,20 @@ pub struct NewRoute {
     pub owner_id: String,
 }
 
+/// Partial-update payload for `update_route`. Every field is
+/// `Option`; `Some` means "replace with this", `None` means "leave
+/// alone". `language`/`bindings_version`/`compiled_wasm` move together
+/// (an artifact swap), enforced at the API layer; the registry trusts
+/// the caller to send a consistent triple.
+#[derive(Debug, Clone, Default)]
+pub struct PatchRoute {
+    pub methods: Option<Vec<String>>,
+    pub path: Option<String>,
+    pub language: Option<String>,
+    pub bindings_version: Option<String>,
+    pub compiled_wasm: Option<Vec<u8>>,
+}
+
 /// Slug rendering: `{group_name}/{number}`.
 pub fn render_slug(group_name: &str, number: u32) -> String {
     format!("{group_name}/{number}")
@@ -618,6 +632,131 @@ impl Registry {
         }
         decode_route(&fields)
     }
+
+    /// Replace a subset of mutable fields on an existing route. Path /
+    /// methods changes re-validate pattern conflicts (excluding the
+    /// route being edited from the scan) and swap the
+    /// `route:by-method-path:` indexes. Compiled-wasm changes drop
+    /// the component-cache entry at the API layer via
+    /// `RouteTable::refresh_after_update`. `owner_id` and `number`
+    /// are immutable.
+    #[tracing::instrument(
+        name = "registry.update_route",
+        skip_all,
+        fields(route.slug = format!("{group_ref}/{number}")),
+    )]
+    pub fn update_route(
+        &self,
+        group_ref: &str,
+        number: u32,
+        patch: PatchRoute,
+    ) -> Result<Route, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let group_id = self
+            .resolve_group(&mut bucket, group_ref)?
+            .ok_or(RegistryError::NotFound)?;
+        let route_id_bytes = bucket
+            .get(&format!("route:by-number:{group_id}:{number}"))?
+            .ok_or(RegistryError::NotFound)?;
+        let route_id = String::from_utf8(route_id_bytes)
+            .map_err(|_| RegistryError::Malformed("route ulid".into()))?;
+        let mut route = self.read_route(&mut bucket, &route_id)?;
+
+        // Validate inputs before mutating storage. Methods/path get
+        // their full validation pass; the artifact triple is trusted
+        // (the API layer compiles + validates the wasm bytes already).
+        let new_methods = if let Some(m) = patch.methods.as_ref() {
+            validate_methods(m)?;
+            m.clone()
+        } else {
+            route.methods.clone()
+        };
+        let new_path = if let Some(p) = patch.path.as_ref() {
+            Pattern::parse(p)?.raw
+        } else {
+            route.path.clone()
+        };
+
+        let methods_changing = patch.methods.is_some();
+        let path_changing = patch.path.is_some();
+
+        // Conflict detection — only when method or path is changing.
+        // Exclude the route being edited so it doesn't conflict with
+        // itself. Same pattern as `create_route`.
+        if methods_changing || path_changing {
+            let new_pattern = Pattern::parse(&new_path)?;
+            let new_methods_obj = Methods(new_methods.clone());
+            for existing in self.list_routes_internal(&mut bucket)? {
+                if existing.id == route.id {
+                    continue;
+                }
+                let existing_pattern = Pattern::parse(&existing.path)?;
+                let existing_methods = Methods(existing.methods.clone());
+                if pattern::routes_conflict(
+                    &new_methods_obj,
+                    &new_pattern,
+                    &existing_methods,
+                    &existing_pattern,
+                ) {
+                    return Err(RegistryError::Conflict(format!(
+                        "conflicts with {}/{} ({:?} {})",
+                        existing.group_name, existing.number, existing.methods, existing.path
+                    )));
+                }
+            }
+        }
+
+        // Strip the old by-method-path index entries before we update
+        // the record so a partially-applied edit can't leave dangling
+        // mappings.
+        if methods_changing || path_changing {
+            for method in &route.methods {
+                bucket.delete(&format!("route:by-method-path:{method}:{}", route.path))?;
+            }
+        }
+
+        // Apply mutations to the record. Each field handled
+        // independently so the body controls exactly which fields are
+        // written.
+        let key = format!("route:{route_id}");
+        if let Some(ref m) = patch.methods {
+            route.methods = m.clone();
+            bucket.hash_set(
+                &key,
+                "methods",
+                serde_json::to_vec(&route.methods)
+                    .map_err(|e| RegistryError::Malformed(format!("methods encode: {e}")))?,
+            )?;
+        }
+        if patch.path.is_some() {
+            route.path = new_path.clone();
+            bucket.hash_set(&key, "path", route.path.as_bytes().to_vec())?;
+        }
+        if let Some(ref lang) = patch.language {
+            route.language = lang.clone();
+            bucket.hash_set(&key, "language", lang.as_bytes().to_vec())?;
+        }
+        if let Some(ref bv) = patch.bindings_version {
+            route.bindings_version = bv.clone();
+            bucket.hash_set(&key, "bindings_version", bv.as_bytes().to_vec())?;
+        }
+        if let Some(wasm) = patch.compiled_wasm {
+            route.compiled_wasm = wasm.clone();
+            bucket.hash_set(&key, "compiled_wasm", wasm)?;
+        }
+
+        // Re-add by-method-path entries for the new (method, path) set.
+        if methods_changing || path_changing {
+            for method in &route.methods {
+                bucket.set(
+                    &format!("route:by-method-path:{method}:{}", route.path),
+                    route_id.as_bytes().to_vec(),
+                )?;
+            }
+        }
+
+        Ok(route)
+    }
 }
 
 // -- Encoding / decoding ------------------------------------------------------
@@ -937,6 +1076,117 @@ mod tests {
             .delete_route(&alice.group_name, alice.number)
             .unwrap();
         assert!(registry.list_routes_by_owner("alice").unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_route_rewrites_methods_and_path() {
+        let registry = fresh_registry();
+        let r = registry
+            .create_route(sample_new_route(None, "/v1/foo"))
+            .unwrap();
+        let updated = registry
+            .update_route(
+                &r.group_name,
+                r.number,
+                PatchRoute {
+                    methods: Some(vec!["GET".into(), "POST".into()]),
+                    path: Some("/v1/bar".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.methods, vec!["GET", "POST"]);
+        assert_eq!(updated.path, "/v1/bar");
+        // The route is still readable by its slug, and the old path's
+        // by-method-path index entry is gone (so the same path is
+        // free to claim again).
+        let read = registry.get_route_by_slug(&r.group_name, r.number).unwrap();
+        assert_eq!(read.path, "/v1/bar");
+    }
+
+    #[test]
+    fn update_route_replaces_compiled_wasm() {
+        let registry = fresh_registry();
+        let r = registry
+            .create_route(sample_new_route(None, "/v1/foo"))
+            .unwrap();
+        let updated = registry
+            .update_route(
+                &r.group_name,
+                r.number,
+                PatchRoute {
+                    compiled_wasm: Some(b"NEW".to_vec()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.compiled_wasm, b"NEW");
+        let read = registry.get_route_by_slug(&r.group_name, r.number).unwrap();
+        assert_eq!(read.compiled_wasm, b"NEW");
+    }
+
+    #[test]
+    fn update_route_rejects_conflict_with_another_route() {
+        let registry = fresh_registry();
+        let _other = registry
+            .create_route(sample_new_route(None, "/v1/charges"))
+            .unwrap();
+        let r = registry
+            .create_route(sample_new_route(None, "/v1/refunds"))
+            .unwrap();
+        // Moving /v1/refunds onto /v1/charges (same method) must
+        // conflict; the original /v1/refunds is unchanged.
+        let err = registry
+            .update_route(
+                &r.group_name,
+                r.number,
+                PatchRoute {
+                    path: Some("/v1/charges".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::Conflict(_)));
+        let read = registry.get_route_by_slug(&r.group_name, r.number).unwrap();
+        assert_eq!(read.path, "/v1/refunds");
+    }
+
+    #[test]
+    fn update_route_does_not_conflict_with_itself() {
+        let registry = fresh_registry();
+        let r = registry
+            .create_route(sample_new_route(None, "/v1/foo"))
+            .unwrap();
+        // Same path, same methods — no-op patch but should still
+        // succeed (the route doesn't conflict with itself).
+        let updated = registry
+            .update_route(
+                &r.group_name,
+                r.number,
+                PatchRoute {
+                    methods: Some(vec!["POST".into()]),
+                    path: Some("/v1/foo".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.path, "/v1/foo");
+    }
+
+    #[test]
+    fn update_route_missing_route_returns_not_found() {
+        let registry = fresh_registry();
+        let err = registry
+            .update_route(
+                "no-such-group",
+                42,
+                PatchRoute {
+                    methods: Some(vec!["GET".into()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::NotFound));
     }
 
     #[test]

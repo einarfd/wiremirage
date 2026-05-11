@@ -59,6 +59,10 @@ EOF
 wm routes add --group stripe-mock --method POST --path /v1/charges \
   --source-file /tmp/charge.ts
 
+# Tweak it in place (e.g., swap the handler source). Same flags as
+# `add`; pass only what you want to change. Owner-or-admin only.
+# wm routes update stripe-mock/1 --source-file /tmp/charge-v2.ts
+
 # Run your test that hits http://$WM_HOST/v1/charges. Mock traffic is
 # unauthenticated.
 curl -X POST $WM_HOST/v1/charges -d '{}'

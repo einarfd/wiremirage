@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthContext, AuthError, Token, User};
 use crate::journal::{JournalError, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedRecord};
-use crate::registry::{Group, NewGroup, NewRoute, RegistryError, Route, render_slug};
+use crate::registry::{Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, render_slug};
 use crate::server::is_reserved_path;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
@@ -37,7 +37,7 @@ pub fn router() -> Router<AppState> {
         .route("/__api/routes", post(create_route).get(list_routes))
         .route(
             "/__api/routes/{group}/{number}",
-            get(get_route).delete(delete_route),
+            get(get_route).patch(patch_route).delete(delete_route),
         )
         .route("/__api/tokens", post(create_token).get(list_tokens))
         .route("/__api/tokens/{name}", get(get_token).delete(delete_token))
@@ -98,6 +98,24 @@ struct CreateRouteBody {
     compiled_wasm: Option<String>,
     /// Source code for the source-based path. Forwarded to the compiler
     /// sidecar; returns `compile_failed` if no sidecar is configured.
+    source: Option<String>,
+}
+
+/// Partial-update payload for `PATCH /__api/routes/{group}/{n}`. Every
+/// field is optional; the handler validates that the (language,
+/// source-or-compiled_wasm, bindings_version) triple is consistent
+/// when the artifact is being replaced.
+#[derive(Debug, Deserialize)]
+struct PatchRouteBody {
+    methods: Option<Vec<String>>,
+    path: Option<String>,
+    language: Option<String>,
+    bindings_version: Option<String>,
+    /// Base64-encoded `.component.wasm` bytes. Pairs with
+    /// `language: "wasm"`.
+    compiled_wasm: Option<String>,
+    /// Source code; forwarded to the compiler sidecar. Pairs with a
+    /// source language (e.g. `typescript`).
     source: Option<String>,
 }
 
@@ -441,6 +459,128 @@ async fn get_route(
         .registry()
         .get_route_by_slug(&group, number)?;
     Ok(Json(RouteResponse::from(&route)))
+}
+
+async fn patch_route(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+    Json(body): Json<PatchRouteBody>,
+) -> Result<Json<RouteResponse>, ApiError> {
+    // Existence + ownership gate. Mirrors the DELETE handler — owner-
+    // or-admin per ADR-0014.
+    let existing = state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group, number)?;
+    if existing.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may update it",
+        ));
+    }
+
+    let any_field = body.methods.is_some()
+        || body.path.is_some()
+        || body.language.is_some()
+        || body.bindings_version.is_some()
+        || body.compiled_wasm.is_some()
+        || body.source.is_some();
+    if !any_field {
+        return Err(ApiError::validation(
+            "PATCH body must include at least one mutable field \
+             (`methods`, `path`, `source`, `compiled_wasm`)",
+        ));
+    }
+    if body.source.is_some() && body.compiled_wasm.is_some() {
+        return Err(ApiError::validation(
+            "send either `source` or `compiled_wasm`, not both",
+        ));
+    }
+    if let Some(ref new_path) = body.path
+        && is_reserved_path(new_path)
+    {
+        return Err(ApiError::validation(format!(
+            "path {new_path:?} starts with a reserved prefix and cannot be claimed",
+        )));
+    }
+
+    // Compute the artifact triple (language, bindings_version,
+    // compiled_wasm) when the body changes the wasm bytes. When neither
+    // `source` nor `compiled_wasm` is present, the existing artifact is
+    // preserved; `language` and `bindings_version` are ignored in that
+    // case to keep the metadata in sync with what's actually loaded.
+    let artifact_changing = body.compiled_wasm.is_some() || body.source.is_some();
+    let (compiled_wasm, language, bindings_version) = if artifact_changing {
+        let lang = body.language.as_deref().ok_or_else(|| {
+            ApiError::validation(
+                "`language` is required when changing the route's source/wasm artifact",
+            )
+        })?;
+        match lang {
+            "wasm" => {
+                let encoded = body.compiled_wasm.as_deref().ok_or_else(|| {
+                    ApiError::validation("compiled_wasm required when language=wasm")
+                })?;
+                let bytes = B64.decode(encoded.as_bytes()).map_err(|e| {
+                    ApiError::validation(format!("compiled_wasm base64 decode: {e}"))
+                })?;
+                let bv = body.bindings_version.clone().ok_or_else(|| {
+                    ApiError::validation("bindings_version required when language=wasm")
+                })?;
+                if bv != SUPPORTED_BINDINGS_VERSION {
+                    return Err(ApiError::validation(format!(
+                        "bindings_version {bv:?} is not supported (expected {SUPPORTED_BINDINGS_VERSION:?})"
+                    )));
+                }
+                wasmtime::component::Component::from_binary(state.runtime().engine(), &bytes)
+                    .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
+                (Some(bytes), Some("wasm".to_string()), Some(bv))
+            }
+            other => {
+                let source = body.source.as_deref().ok_or_else(|| {
+                    ApiError::validation(format!("source required when language={other:?}"))
+                })?;
+                let compiler = state.compiler().ok_or_else(|| {
+                    ApiError::compile_failed(
+                        "compiler sidecar not configured; set WM_COMPILER_URL or send a pre-compiled component",
+                    )
+                })?;
+                let artifact = compiler.compile(other, source).await.map_err(|e| match e {
+                    crate::compiler::CompilerError::CompileFailed {
+                        message,
+                        diagnostics,
+                    } => ApiError::compile_failed_with_diagnostics(message, diagnostics),
+                    other_err => ApiError::compile_failed(format!("{other_err}")),
+                })?;
+                wasmtime::component::Component::from_binary(
+                    state.runtime().engine(),
+                    &artifact.component,
+                )
+                .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
+                (
+                    Some(artifact.component),
+                    Some(other.to_string()),
+                    Some(artifact.bindings_version),
+                )
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let updated = state.routes().registry().update_route(
+        &group,
+        number,
+        PatchRoute {
+            methods: body.methods,
+            path: body.path,
+            language,
+            bindings_version,
+            compiled_wasm,
+        },
+    )?;
+    state.routes().refresh_after_update(updated.clone());
+    Ok(Json(RouteResponse::from(&updated)))
 }
 
 async fn delete_route(

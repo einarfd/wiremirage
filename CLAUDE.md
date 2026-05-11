@@ -9,12 +9,12 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–14 landed. The WIT contract is live at
+**Status:** slices 1–15 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
 `RouteTable` keyed by `{group}/{n}` slugs per `route-model.md`. The
-REST API at `/__api/routes` supports POST/GET/DELETE for both
+REST API at `/__api/routes` supports POST/GET/PATCH/DELETE for both
 pre-compiled wasm uploads and TypeScript source — the source path goes
 through a separate Node sidecar at `compiler/typescript/`
 (componentize-js + jco), reachable via `WM_COMPILER_URL`. The
@@ -24,10 +24,10 @@ routes stays open by design. Public probes: `GET /__health`,
 `GET /__ready`. Token CRUD lives at `/__api/tokens`; user CRUD lives
 at `/__api/users` (admin-only for cross-user actions, plus
 `GET /__api/users/me` for any authed caller). Routes carry `owner_id`
-and DELETE checks owner-or-admin. Every dispatched mock request lands
-in a per-group journal (`/__api/journal/{group}`); unmatched requests
-land in `/__api/unmatched` (admin-only). Both default to a 1h TTL.
-Groups are first-class lifecycle units (`/__api/groups`) with
+and PATCH/DELETE check owner-or-admin. Every dispatched mock request
+lands in a per-group journal (`/__api/journal/{group}`); unmatched
+requests land in `/__api/unmatched` (admin-only). Both default to a
+1h TTL. Groups are first-class lifecycle units (`/__api/groups`) with
 configured TTL (default 24h, max 30d) and sliding-on-traffic by
 default; cascade-delete wipes routes, kv/gkv state, and journal
 entries together. A background sweeper reaps the children of any
@@ -37,22 +37,31 @@ public probes. Auth via `WM_TOKEN` / `--token`, host via `WM_HOST` /
 `--host`. `--json` switches to machine-parseable output for scripts
 and agents. The MCP server (slice 10) is part of `wm-host` and
 mounts at `/__api/mcp` over the streamable-HTTP transport (rmcp).
-16 tools now cover identity, discovery, group/route CRUD, group
-state, the slice-11 streaming pair (`wait_for_request`,
-`tail_journal`) backed by `GET /__api/journal/tail` SSE on the host
-and a single-host broadcast bus inside `Journal`, plus the slice-13
-match probe (`find_route` MCP tool + `wm match` CLI + `GET
-/__api/match` host endpoint with `method_mismatch` and `prefix_match`
-near-misses). Same bearer-token auth throughout. Multi-host fan-out
-(Valkey pub/sub) and 3 remaining host-blocked tools (update_route /
-dry_run_route / clear_route_state) land in follow-up slices. The
-user-facing skill (slice 12) ships at `skill/wiremirage/` (with a
-debug sub-skill at `skill/wiremirage-debug/`) — `SKILL.md` + 3
-ready-to-run scripts teaching the CLI workflow. Slice 14 added admin
-user CRUD to the CLI (`wm users list/show/me/create/update/delete`)
-and `wm completion <shell>` for bash/zsh/fish/powershell. By design
-(per `mcp-surface.md`) user management is **not** in MCP — admins
-handle it via CLI/UI.
+17 tools now cover identity, discovery, group/route CRUD (with
+slice-15 `update_route`), group state, the slice-11 streaming pair
+(`wait_for_request`, `tail_journal`) backed by `GET
+/__api/journal/tail` SSE on the host and a single-host broadcast bus
+inside `Journal`, plus the slice-13 match probe (`find_route` MCP
+tool + `wm match` CLI + `GET /__api/match` host endpoint with
+`method_mismatch` and `prefix_match` near-misses). Same bearer-token
+auth throughout. Multi-host fan-out (Valkey pub/sub) and 2 remaining
+host-blocked tools (dry_run_route / clear_route_state) land in
+follow-up slices. The user-facing skill (slice 12) ships at
+`skill/wiremirage/` (with a debug sub-skill at
+`skill/wiremirage-debug/`) — `SKILL.md` + 3 ready-to-run scripts
+teaching the CLI workflow. Slice 14 added admin user CRUD to the CLI
+(`wm users list/show/me/create/update/delete`) and `wm completion
+<shell>` for bash/zsh/fish/powershell. Slice 15 added route update:
+`PATCH /__api/routes/{group}/{n}` plus the matching `wm routes
+update` CLI subcommand and `update_route` MCP tool. Mutable fields
+are `methods`, `path`, and the artifact triple
+(`source`/`compiled_wasm` + `language` + `bindings_version`); path
+or method changes re-validate pattern conflicts (excluding self) and
+swap the by-method-path index, and any wasm swap evicts the
+RouteTable's component cache for that route. MCP stays wasm-only on
+the artifact, matching `create_route`. By design (per
+`mcp-surface.md`) user management is **not** in MCP — admins handle
+it via CLI/UI.
 
 ## Where the design lives
 

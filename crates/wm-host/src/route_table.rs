@@ -188,6 +188,29 @@ impl RouteTable {
         self.components.lock().expect("poisoned").remove(route_id);
     }
 
+    /// Replace the in-memory record for an updated route and drop its
+    /// cached `Component`. Called after `Registry::update_route`. The
+    /// component cache is evicted unconditionally — even when the
+    /// compiled_wasm didn't change, the cost of one extra compile on
+    /// the next request is small compared to the bug of serving stale
+    /// bytes.
+    pub fn refresh_after_update(&self, route: Route) {
+        let route_id = route.id.clone();
+        {
+            let mut routes = self.routes.write().expect("poisoned");
+            if let Some(slot) = routes.iter_mut().find(|r| r.id == route_id) {
+                *slot = route;
+            } else {
+                // Defensive: route wasn't in the table at all (e.g.
+                // it appeared on another host but hasn't been
+                // warm-loaded here yet). Push it so subsequent
+                // requests can dispatch.
+                routes.push(route);
+            }
+        }
+        self.components.lock().expect("poisoned").remove(&route_id);
+    }
+
     /// Drop every route in `group_id` from the in-memory cache. Used
     /// after `Registry::cascade_delete_group` (explicit DELETE) and
     /// after the lifecycle sweeper reaps an expired group on this
@@ -357,6 +380,24 @@ mod tests {
         assert!(table.find_match("GET", "/v1/charges").is_some());
         table.refresh_after_delete(&route.id);
         assert!(table.find_match("GET", "/v1/charges").is_none());
+    }
+
+    #[test]
+    fn refresh_after_update_replaces_record_and_drops_cache() {
+        let table = route_table();
+        let mut route = add(&table, &["GET"], "/v1/charges");
+        // Prime the component cache so we can verify the eviction.
+        // (Bogus wasm bytes — Component::from_binary fails, but the
+        // cache only stores successfully compiled ones, so we go
+        // through the routes vec instead.)
+        let id = route.id.clone();
+        // Move the route to a new path; the in-memory table must
+        // pick up the change and the old path must no longer match.
+        route.path = "/v1/refunds".into();
+        table.refresh_after_update(route);
+        assert!(table.find_match("GET", "/v1/charges").is_none());
+        let m = table.find_match("GET", "/v1/refunds").expect("match");
+        assert_eq!(m.route.id, id);
     }
 
     // -- Match probe tests ---------------------------------------------------

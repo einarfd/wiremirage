@@ -16,7 +16,7 @@ use crate::SUPPORTED_BINDINGS_VERSION;
 use crate::mcp::context::{auth_from, ensure_route_owner_or_admin};
 use crate::mcp::error::{forbidden, map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
-use crate::registry::{NewRoute, Route};
+use crate::registry::{NewRoute, PatchRoute, Route};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RouteRecord {
@@ -92,6 +92,23 @@ pub struct CreateRouteArgs {
     pub compiled_wasm_b64: Option<String>,
     /// Bindings version the upload was built against. Defaults to
     /// the host's supported version.
+    pub bindings_version: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UpdateRouteArgs {
+    /// Route slug `{group}/{number}`.
+    pub route: String,
+    /// Replace the method list. Omit to leave it unchanged.
+    pub methods: Option<Vec<String>>,
+    /// Replace the path pattern. Omit to leave it unchanged.
+    pub path: Option<String>,
+    /// Replace the compiled wasm. Base64-encoded component bytes.
+    /// Source-based updates go through REST / `wm routes update
+    /// --source-file` — MCP stays wasm-only, matching `create_route`.
+    pub compiled_wasm_b64: Option<String>,
+    /// Bindings version of the new wasm. Required when
+    /// `compiled_wasm_b64` is set.
     pub bindings_version: Option<String>,
 }
 
@@ -209,6 +226,71 @@ impl WmMcpServer {
         // Keep the in-memory route table coherent.
         self.state.routes().refresh_after_create(route.clone());
         Ok(Json(RouteRecord::from(&route)))
+    }
+
+    #[tool(
+        name = "update_route",
+        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, or `compiled_wasm_b64`. MCP stays wasm-only for the artifact (source-based updates use REST or `wm routes update --source-file`)."
+    )]
+    pub async fn update_route(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<UpdateRouteArgs>,
+    ) -> Result<Json<RouteRecord>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let (group_ref, number) = parse_slug(&args.route)?;
+        let existing = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        if !auth.is_admin && existing.owner_id != auth.user_id {
+            return Err(forbidden(
+                "only the route's owner or an admin may update it",
+            ));
+        }
+
+        let (compiled_wasm, language, bindings_version) = match args.compiled_wasm_b64 {
+            Some(b64) => {
+                let bytes = B64.decode(&b64).map_err(|e| {
+                    validation(format!("compiled_wasm_b64 is not valid base64: {e}"))
+                })?;
+                let bv = args
+                    .bindings_version
+                    .unwrap_or_else(|| SUPPORTED_BINDINGS_VERSION.into());
+                if bv != SUPPORTED_BINDINGS_VERSION {
+                    return Err(validation(format!(
+                        "bindings_version {bv:?} is not supported (expected {:?})",
+                        SUPPORTED_BINDINGS_VERSION
+                    )));
+                }
+                wasmtime::component::Component::from_binary(self.state.runtime().engine(), &bytes)
+                    .map_err(|e| validation(format!("component validation: {e}")))?;
+                (Some(bytes), Some("wasm".to_string()), Some(bv))
+            }
+            None => (None, None, None),
+        };
+
+        if args.methods.is_none() && args.path.is_none() && compiled_wasm.is_none() {
+            return Err(validation(
+                "update_route needs at least one of `methods`, `path`, `compiled_wasm_b64`",
+            ));
+        }
+
+        let updated = self
+            .state
+            .routes()
+            .registry()
+            .update_route(
+                &group_ref,
+                number,
+                PatchRoute {
+                    methods: args.methods,
+                    path: args.path,
+                    language,
+                    bindings_version,
+                    compiled_wasm,
+                },
+            )
+            .map_err(map_registry_error)?;
+        self.state.routes().refresh_after_update(updated.clone());
+        Ok(Json(RouteRecord::from(&updated)))
     }
 
     #[tool(

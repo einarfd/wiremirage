@@ -17,7 +17,8 @@ use thiserror::Error;
 use crate::models::{
     ApiErrorBody, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateTokenResponse,
     GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse, ListJournalResponse,
-    ListRoutesResponse, ListTokensResponse, PatchGroupBody, ReadyResponse, RouteRecord,
+    ListRoutesResponse, ListTokensResponse, PatchGroupBody, PatchRouteBody, ReadyResponse,
+    RouteRecord,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -223,6 +224,20 @@ impl Client {
             Method::GET,
             &format!("/__api/routes/{}/{number}", urlencode(group)),
             None::<&()>,
+        )
+        .await
+    }
+
+    pub async fn patch_route(
+        &self,
+        slug: &str,
+        body: &PatchRouteBody,
+    ) -> Result<RouteRecord, ClientError> {
+        let (group, number) = split_route_slug(slug)?;
+        self.send(
+            Method::PATCH,
+            &format!("/__api/routes/{}/{number}", urlencode(group)),
+            Some(body),
         )
         .await
     }
