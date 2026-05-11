@@ -124,6 +124,57 @@ pub struct PatchRouteBody {
     pub source: Option<String>,
 }
 
+// -- Route state + dry-run ---------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RouteStateEntry {
+    pub key: String,
+    pub kind: String,
+    /// Set when `kind == "bytes"`. Collection-typed values report
+    /// their cardinality via `length` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListRouteStateResponse {
+    pub entries: Vec<RouteStateEntry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DryRunBody {
+    pub method: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_params: Option<Vec<(String, String)>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub query: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DryRunResult {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub handler_logs: Vec<DryRunLog>,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+    pub snapshot_keys: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DryRunLog {
+    pub level: String,
+    pub message: String,
+    pub timestamp: DateTime<Utc>,
+}
+
 // -- Journal -----------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

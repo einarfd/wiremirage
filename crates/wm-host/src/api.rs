@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthContext, AuthError, Token, User};
 use crate::journal::{JournalError, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedRecord};
-use crate::registry::{Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, render_slug};
+use crate::registry::{
+    Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, RouteStateEntry, render_slug,
+};
 use crate::server::is_reserved_path;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
@@ -38,6 +40,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/__api/routes/{group}/{number}",
             get(get_route).patch(patch_route).delete(delete_route),
+        )
+        .route(
+            "/__api/routes/{group}/{number}/state",
+            get(get_route_state).delete(delete_route_state),
+        )
+        .route(
+            "/__api/routes/{group}/{number}/dry-run",
+            post(dry_run_route),
         )
         .route("/__api/tokens", post(create_token).get(list_tokens))
         .route("/__api/tokens/{name}", get(get_token).delete(delete_token))
@@ -603,6 +613,79 @@ async fn delete_route(
     state.routes().registry().delete_route(&group, number)?;
     state.routes().refresh_after_delete(&route.id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+// -- Per-route state ----------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct ListRouteStateResponse {
+    entries: Vec<RouteStateEntry>,
+}
+
+async fn get_route_state(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+) -> Result<Json<ListRouteStateResponse>, ApiError> {
+    let route = state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group, number)?;
+    if route.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may read its state",
+        ));
+    }
+    let entries = state.routes().registry().list_route_state(&group, number)?;
+    Ok(Json(ListRouteStateResponse { entries }))
+}
+
+async fn delete_route_state(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+) -> Result<StatusCode, ApiError> {
+    let route = state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group, number)?;
+    if route.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may clear its state",
+        ));
+    }
+    state
+        .routes()
+        .registry()
+        .clear_route_state(&group, number)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// -- Dry-run ------------------------------------------------------------------
+
+async fn dry_run_route(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+    Json(body): Json<crate::dry_run::DryRunRequest>,
+) -> Result<Json<crate::dry_run::DryRunResponse>, ApiError> {
+    let route = state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group, number)?;
+    if route.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may dry-run it",
+        ));
+    }
+    if !body.path.starts_with('/') {
+        return Err(ApiError::validation("dry-run path must start with /"));
+    }
+    let resp =
+        crate::dry_run::dry_run(state.runtime().clone(), state.routes().clone(), route, body)
+            .await
+            .map_err(|e| ApiError::internal(format!("dry-run: {e}")))?;
+    Ok(Json(resp))
 }
 
 // -- /__api/tokens ------------------------------------------------------------

@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use wm_core::{
-    Client, ClientError, CreateGroupBody, CreateTokenBody, CreateUserBody, MatchResponse,
-    PatchGroupBody, PatchRouteBody, PatchUserBody,
+    Client, ClientError, CreateGroupBody, CreateTokenBody, CreateUserBody, DryRunBody,
+    MatchResponse, PatchGroupBody, PatchRouteBody, PatchUserBody,
 };
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
@@ -390,6 +390,95 @@ async fn patch_route_by_non_owner_is_forbidden() {
         matches!(err, ClientError::Forbidden(_)),
         "expected Forbidden, got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn route_state_list_and_clear_via_client() {
+    let h = start().await;
+    let client = client(&h.host_url);
+
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/state".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: bootstrap_user_id(&h),
+        })
+        .expect("create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route.clone());
+
+    // Plant some state directly so we exercise the list/clear path
+    // without needing a working wasm fixture.
+    let mut bucket = h
+        .state
+        .runtime()
+        .storage()
+        .route_bucket(&route.group_id, &route.id)
+        .expect("route bucket");
+    bucket.set("count", b"5".to_vec()).expect("set");
+    bucket.list_push("events", b"a".to_vec()).expect("push");
+
+    let listed = client.list_route_state(&slug).await.expect("list");
+    assert_eq!(listed.entries.len(), 2);
+    let count = listed
+        .entries
+        .iter()
+        .find(|e| e.key == "count")
+        .expect("count present");
+    assert_eq!(count.kind, "bytes");
+    assert_eq!(count.value.as_deref(), Some(b"5".as_slice()));
+
+    client.clear_route_state(&slug).await.expect("clear");
+    let empty = client.list_route_state(&slug).await.expect("list 2");
+    assert!(empty.entries.is_empty());
+}
+
+#[tokio::test]
+async fn dry_run_against_bogus_wasm_returns_error_shape() {
+    let h = start().await;
+    let client = client(&h.host_url);
+    // The route's compiled_wasm is `b"FAKE"`, which will fail to
+    // compile when the runtime tries to instantiate it. We're
+    // verifying the dry-run *endpoint* returns the wire shape — the
+    // error surfaces in the response body's `error` field, not as a
+    // 500 from the HTTP layer.
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/dry".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: bootstrap_user_id(&h),
+        })
+        .expect("create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let result = client
+        .dry_run_route(
+            &slug,
+            &DryRunBody {
+                method: "POST".into(),
+                path: "/v1/dry".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("dry_run_route");
+    assert_eq!(result.status, 500);
+    assert!(result.error.is_some(), "expected error message");
 }
 
 #[tokio::test]

@@ -78,7 +78,9 @@ mod tests {
     /// and forgot somewhere" regressions; the names are the
     /// public-facing contract for MCP clients and the design doc.
     /// Slice 10 shipped 13 tools; slice 11 added 2 streaming tools;
-    /// slice 13 added `find_route`; slice 15 added `update_route`.
+    /// slice 13 added `find_route`; slice 15 added `update_route`;
+    /// slice 16 added `show_route_state`, `clear_route_state`, and
+    /// `dry_run_route`.
     #[test]
     fn server_exposes_all_expected_tools() {
         let server = WmMcpServer::new(Arc::new(empty_state()));
@@ -107,6 +109,10 @@ mod tests {
             "find_route",
             // Slice 15
             "update_route",
+            // Slice 16
+            "clear_route_state",
+            "dry_run_route",
+            "show_route_state",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");

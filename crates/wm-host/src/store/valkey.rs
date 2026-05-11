@@ -70,6 +70,66 @@ pub fn scan_with_prefix(
         .map_err(|e| classify(e, full_prefix))
 }
 
+/// `TYPE key`. Returns the lowercase Redis type name ("string", "list",
+/// "hash", "set") or `None` when the key doesn't exist. Maps "string"
+/// to "bytes" for symmetry with the in-memory backend's `MemValue::kind`.
+pub fn kind(conn: &mut redis::Connection, key: &str) -> Result<Option<&'static str>, StoreError> {
+    let ty: String = redis::cmd("TYPE")
+        .arg(key)
+        .query(conn)
+        .map_err(|e| classify(e, key))?;
+    Ok(match ty.as_str() {
+        "none" => None,
+        "string" => Some("bytes"),
+        "list" => Some("list"),
+        "hash" => Some("hash"),
+        "set" => Some("set"),
+        // Sorted-sets / streams / etc. — we never write them but a
+        // co-resident application might, so surface a generic label
+        // instead of panicking.
+        _ => Some("other"),
+    })
+}
+
+/// Copy every key under `src_prefix` to the same suffix under
+/// `dst_prefix`. Uses Valkey's `COPY` command (available since 6.2),
+/// which preserves value type. `REPLACE` lets us overwrite the
+/// destination if a stale dry-run root somehow lingered.
+pub fn copy_with_prefix(
+    conn: &mut redis::Connection,
+    src_prefix: &str,
+    dst_prefix: &str,
+) -> Result<u64, StoreError> {
+    let src_keys = scan_with_prefix(conn, src_prefix)?;
+    let mut copied = 0u64;
+    for src in src_keys {
+        let suffix = &src[src_prefix.len()..];
+        let dst = format!("{dst_prefix}{suffix}");
+        let ok: i64 = redis::cmd("COPY")
+            .arg(&src)
+            .arg(&dst)
+            .arg("REPLACE")
+            .query(conn)
+            .map_err(|e| classify(e, &src))?;
+        if ok == 1 {
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
+/// `PEXPIRE key millis`. Used to put a short TTL on the dry-run
+/// namespace root keys so a crash mid-dry-run doesn't leave orphans
+/// forever. Caller still tries the explicit `DEL` on success.
+pub fn pexpire(conn: &mut redis::Connection, key: &str, millis: u64) -> Result<(), StoreError> {
+    let _: i64 = redis::cmd("PEXPIRE")
+        .arg(key)
+        .arg(millis)
+        .query(conn)
+        .map_err(|e| classify(e, key))?;
+    Ok(())
+}
+
 // -- List ops --
 
 pub fn list_push(

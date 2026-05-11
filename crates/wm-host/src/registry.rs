@@ -135,6 +135,21 @@ pub struct PatchRoute {
     pub compiled_wasm: Option<Vec<u8>>,
 }
 
+/// One entry from a route's per-route kv namespace. `kind` is the
+/// storage-level type — `"bytes"`, `"list"`, `"hash"`, `"set"`, or
+/// `"other"` (for a co-resident application's exotic Redis types).
+/// `value` is `Some` only for `kind = "bytes"`; for collection kinds
+/// `length` carries the element / field / member count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteStateEntry {
+    pub key: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+}
+
 /// Slug rendering: `{group_name}/{number}`.
 pub fn render_slug(group_name: &str, number: u32) -> String {
     format!("{group_name}/{number}")
@@ -631,6 +646,71 @@ impl Registry {
             return Err(RegistryError::NotFound);
         }
         decode_route(&fields)
+    }
+
+    /// List the per-route kv entries for the given route. Returns each
+    /// key alongside its storage-level kind. For bytes-typed values
+    /// the value bytes are inlined; for list/hash/set values the
+    /// payload is summarised (length / field count / member count)
+    /// so the caller can render a compact overview without paying for
+    /// the full contents. Used by `GET /__api/routes/{group}/{n}/state`.
+    pub fn list_route_state(
+        &self,
+        group_ref: &str,
+        number: u32,
+    ) -> Result<Vec<RouteStateEntry>, RegistryError> {
+        let route = self.get_route_by_slug(group_ref, number)?;
+        let mut bucket = self.storage.route_bucket(&route.group_id, &route.id)?;
+        let keys = bucket.list_keys(None)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let kind = bucket.kind(&key)?.unwrap_or("bytes");
+            let entry = match kind {
+                "bytes" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "bytes".into(),
+                    value: bucket.get(&key)?,
+                    length: None,
+                },
+                "list" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "list".into(),
+                    value: None,
+                    length: Some(bucket.list_length(&key)?),
+                },
+                "hash" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "hash".into(),
+                    value: None,
+                    length: Some(bucket.hash_keys(&key)?.len() as u64),
+                },
+                "set" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "set".into(),
+                    value: None,
+                    length: Some(bucket.set_members(&key)?.len() as u64),
+                },
+                other => RouteStateEntry {
+                    key: key.clone(),
+                    kind: other.into(),
+                    value: None,
+                    length: None,
+                },
+            };
+            out.push(entry);
+        }
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(out)
+    }
+
+    /// Clear the per-route kv namespace for the given route. The
+    /// route itself stays; just its private state is wiped. Used by
+    /// `DELETE /__api/routes/{group}/{n}/state`.
+    pub fn clear_route_state(&self, group_ref: &str, number: u32) -> Result<u64, RegistryError> {
+        let route = self.get_route_by_slug(group_ref, number)?;
+        let mut bucket = self.bucket()?;
+        let count = bucket.delete_with_prefix(&format!("kv:{}:{}:", route.group_id, route.id))?;
+        Ok(count)
     }
 
     /// Replace a subset of mutable fields on an existing route. Path /
@@ -1171,6 +1251,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(updated.path, "/v1/foo");
+    }
+
+    #[test]
+    fn list_route_state_reports_bytes_and_collections() {
+        let registry = fresh_registry();
+        let r = registry
+            .create_route(sample_new_route(None, "/v1/state"))
+            .unwrap();
+        // Plant a mix of value types directly into the route's bucket
+        // so we exercise all four kinds in one pass.
+        let mut bucket = registry.storage.route_bucket(&r.group_id, &r.id).unwrap();
+        bucket.set("count", b"5".to_vec()).unwrap();
+        bucket.list_push("events", b"a".to_vec()).unwrap();
+        bucket.list_push("events", b"b".to_vec()).unwrap();
+        bucket.hash_set("h", "f", b"v".to_vec()).unwrap();
+        bucket.set_add("members", "alice").unwrap();
+        bucket.set_add("members", "bob").unwrap();
+
+        let entries = registry.list_route_state(&r.group_name, r.number).unwrap();
+        // Sorted by key.
+        let by_key: std::collections::HashMap<_, _> =
+            entries.into_iter().map(|e| (e.key.clone(), e)).collect();
+        let count = by_key.get("count").expect("count present");
+        assert_eq!(count.kind, "bytes");
+        assert_eq!(count.value.as_deref(), Some(b"5".as_slice()));
+        let events = by_key.get("events").expect("events present");
+        assert_eq!(events.kind, "list");
+        assert_eq!(events.length, Some(2));
+        let h = by_key.get("h").expect("hash present");
+        assert_eq!(h.kind, "hash");
+        assert_eq!(h.length, Some(1));
+        let members = by_key.get("members").expect("set present");
+        assert_eq!(members.kind, "set");
+        assert_eq!(members.length, Some(2));
+    }
+
+    #[test]
+    fn clear_route_state_wipes_keys() {
+        let registry = fresh_registry();
+        let r = registry
+            .create_route(sample_new_route(None, "/v1/state"))
+            .unwrap();
+        let mut bucket = registry.storage.route_bucket(&r.group_id, &r.id).unwrap();
+        bucket.set("a", b"1".to_vec()).unwrap();
+        bucket.set("b", b"2".to_vec()).unwrap();
+        drop(bucket);
+
+        let cleared = registry.clear_route_state(&r.group_name, r.number).unwrap();
+        assert_eq!(cleared, 2);
+        let entries = registry.list_route_state(&r.group_name, r.number).unwrap();
+        assert!(entries.is_empty());
     }
 
     #[test]

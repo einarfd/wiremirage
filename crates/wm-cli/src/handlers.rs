@@ -17,12 +17,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use wm_core::{
     Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateUserBody,
-    PatchGroupBody, PatchRouteBody, PatchUserBody,
+    DryRunBody, PatchGroupBody, PatchRouteBody, PatchUserBody,
 };
 
 use crate::cli::{
     AddRouteArgs, Cli, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, JournalCommand,
-    RoutesCommand, TokensCommand, UpdateRouteArgs, UpdateUserArgs, UsersCommand,
+    RoutesCommand, TestRouteArgs, TokensCommand, UpdateRouteArgs, UpdateUserArgs, UsersCommand,
 };
 use crate::format::{self, Format};
 
@@ -266,6 +266,26 @@ async fn handle_routes(
             let r = client.patch_route(&slug, &body.1).await?;
             format::render_route(&r, format);
         }
+        RoutesCommand::State { slug, clear } => {
+            if clear {
+                client.clear_route_state(&slug).await?;
+                if matches!(format, Format::Human) {
+                    println!("cleared state for {slug}");
+                }
+            } else {
+                let list = client.list_route_state(&slug).await?;
+                format::render_route_state(&list, format);
+            }
+        }
+        RoutesCommand::Test(args) => {
+            let (slug, body) = build_test_route_body(args)?;
+            // The default request path is the route's own path. Fetch
+            // the route first so the agent can `wm routes test slug`
+            // without typing the path; supply `--path` to override.
+            let body = fill_default_test_path(client, &slug, body).await?;
+            let result = client.dry_run_route(&slug, &body).await?;
+            format::render_dry_run(&result, format);
+        }
         RoutesCommand::Delete { slug, force: _ } => {
             client.delete_route(&slug).await?;
             if matches!(format, Format::Human) {
@@ -389,6 +409,62 @@ fn build_add_route_body(args: AddRouteArgs) -> Result<CreateRouteBody, ClientErr
 fn read_to_string(path: &str) -> Result<String, ClientError> {
     std::fs::read_to_string(Path::new(path))
         .map_err(|e| ClientError::Validation(format!("read {path}: {e}")))
+}
+
+/// Translate `TestRouteArgs` into `(slug, DryRunBody)`. Headers and
+/// path-params are parsed from their `KEY:VALUE` / `NAME=VALUE`
+/// inline forms. Body accepts `@FILE` to load from disk.
+fn build_test_route_body(args: TestRouteArgs) -> Result<(String, DryRunBody), ClientError> {
+    let mut headers = Vec::with_capacity(args.headers.len());
+    for raw in &args.headers {
+        let (k, v) = raw.split_once(':').ok_or_else(|| {
+            ClientError::Validation(format!("--header must be 'KEY: VALUE', got {raw:?}"))
+        })?;
+        headers.push((k.trim().to_string(), v.trim().to_string()));
+    }
+    let mut path_params = Vec::with_capacity(args.path_params.len());
+    for raw in &args.path_params {
+        let (k, v) = raw.split_once('=').ok_or_else(|| {
+            ClientError::Validation(format!("--path-param must be 'NAME=VALUE', got {raw:?}"))
+        })?;
+        path_params.push((k.trim().to_string(), v.trim().to_string()));
+    }
+    let body = match args.body {
+        Some(s) if s.starts_with('@') => read_bytes(&s[1..])?,
+        Some(s) => s.into_bytes(),
+        None => Vec::new(),
+    };
+    Ok((
+        args.slug,
+        DryRunBody {
+            method: args.method,
+            path: args.path.unwrap_or_default(),
+            headers,
+            body,
+            path_params: if path_params.is_empty() {
+                None
+            } else {
+                Some(path_params)
+            },
+            query: Vec::new(),
+        },
+    ))
+}
+
+/// Default the dry-run request path to the route's own path. The
+/// agent typically wants "run this route's handler against itself";
+/// supplying `--path` overrides this. One extra GET is a fine price
+/// for an obvious default.
+async fn fill_default_test_path(
+    client: &Client,
+    slug: &str,
+    mut body: DryRunBody,
+) -> Result<DryRunBody, ClientError> {
+    if body.path.is_empty() {
+        let route = client.get_route(slug).await?;
+        body.path = route.path;
+    }
+    Ok(body)
 }
 
 fn read_bytes(path: &str) -> Result<Vec<u8>, ClientError> {

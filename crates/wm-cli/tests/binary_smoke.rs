@@ -353,6 +353,153 @@ async fn wm_routes_update_changes_path() {
 }
 
 #[tokio::test]
+async fn wm_routes_state_lists_and_clears() {
+    let h = start().await;
+    let bootstrap_id = h
+        .state
+        .auth()
+        .get_user_by_name("bootstrap")
+        .expect("read")
+        .expect("present")
+        .id;
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/state-smoke".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: bootstrap_id,
+        })
+        .expect("create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route.clone());
+
+    // Plant kv directly so the CLI listing has something to show.
+    let mut bucket = h
+        .state
+        .runtime()
+        .storage()
+        .route_bucket(&route.group_id, &route.id)
+        .expect("route bucket");
+    bucket.set("flag", b"on".to_vec()).expect("set");
+
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+    let slug_for_cmd = slug.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host,
+                "--token",
+                &token,
+                "--json",
+                "routes",
+                "state",
+                &slug_for_cmd,
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(list.status.success(), "{:?}", list);
+    let parsed: serde_json::Value = serde_json::from_slice(&list.stdout).expect("json");
+    let entries = parsed["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["key"], "flag");
+
+    // --clear and verify empty.
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+    let slug_for_cmd = slug.clone();
+    let del = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host,
+                "--token",
+                &token,
+                "routes",
+                "state",
+                &slug_for_cmd,
+                "--clear",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(del.status.success(), "{:?}", del);
+}
+
+#[tokio::test]
+async fn wm_routes_test_dry_runs_against_bogus_wasm() {
+    let h = start().await;
+    let bootstrap_id = h
+        .state
+        .auth()
+        .get_user_by_name("bootstrap")
+        .expect("read")
+        .expect("present")
+        .id;
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/dry-smoke".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            owner_id: bootstrap_id,
+        })
+        .expect("create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+    let slug_for_cmd = slug.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host,
+                "--token",
+                &token,
+                "--json",
+                "routes",
+                "test",
+                &slug_for_cmd,
+                "--method",
+                "POST",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    // The CLI itself succeeds (exit 0); the dry-run *result* carries
+    // the error in its body. That's the contract — handler failures
+    // are part of the response shape, not the HTTP outcome.
+    assert!(out.status.success(), "{:?}", out);
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(parsed["status"], 500);
+    assert!(parsed["error"].is_string());
+}
+
+#[tokio::test]
 async fn wm_routes_update_requires_at_least_one_field() {
     let h = start().await;
     let host = h.host_url.clone();

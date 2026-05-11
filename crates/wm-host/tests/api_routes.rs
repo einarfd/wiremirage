@@ -799,6 +799,208 @@ async fn patch_route_with_empty_body_is_bad_request() {
     assert_eq!(body["error"]["code"], "validation_failed");
 }
 
+// -- Per-route state + dry-run (slice 16) -----------------------------------
+
+#[tokio::test]
+async fn route_state_list_and_clear_round_trip() {
+    let h = Harness::start().await;
+    // Counter handler ticks an `incr("count", 1)` per request; after
+    // two calls we should see kv:{group}:{route}:count == 2.
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/bump-state",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": counter_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+
+    // Drive two real calls to populate state.
+    for _ in 0..2 {
+        h.client
+            .get(h.url("/v1/bump-state"))
+            .send()
+            .await
+            .expect("get");
+    }
+
+    // GET state lists the counter.
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .send()
+        .await
+        .expect("get state");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let entries = body["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1, "exactly one kv key expected");
+    assert_eq!(entries[0]["key"], "count");
+    assert_eq!(entries[0]["kind"], "bytes");
+
+    // DELETE state wipes it. (The counter handler ignores the old
+    // value on the next call; we just confirm the listing is empty.)
+    let del = h
+        .client
+        .delete(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .send()
+        .await
+        .expect("delete state");
+    assert_eq!(del.status().as_u16(), 204);
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .send()
+        .await
+        .expect("get state");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert!(body["entries"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn route_state_endpoints_are_owner_or_admin() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/state-locked",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+    let (_alice_id, alice) = h.provision_user("alice-state", false);
+    let resp = alice
+        .get(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+    let del = alice
+        .delete(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(del.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn dry_run_does_not_journal_or_mutate_state() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/dryrun-target",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": counter_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+
+    // One real call so there's state to snapshot.
+    let real = h
+        .client
+        .get(h.url("/v1/dryrun-target"))
+        .send()
+        .await
+        .expect("get")
+        .text()
+        .await
+        .expect("text");
+    assert_eq!(real, "count=1");
+
+    // Dry-run the same route. The snapshot sees count=1, so the
+    // handler's incr returns 2 — but the *real* state still reads 1.
+    let resp = h
+        .client
+        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .json(&json!({
+            "method": "GET",
+            "path": "/v1/dryrun-target",
+        }))
+        .send()
+        .await
+        .expect("post dry-run");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["status"], 200);
+    assert!(body["snapshot_keys"].as_u64().unwrap() >= 1);
+    let dry_body = body["body"].as_array().expect("body array");
+    let bytes: Vec<u8> = dry_body.iter().map(|v| v.as_u64().unwrap() as u8).collect();
+    assert_eq!(String::from_utf8(bytes).unwrap(), "count=2");
+
+    // Real state untouched: state listing still says 1, and a real
+    // call returns count=2 (not count=3 as it would if the dry-run
+    // had bumped the real counter).
+    let after = h
+        .client
+        .get(h.url("/v1/dryrun-target"))
+        .send()
+        .await
+        .expect("get")
+        .text()
+        .await
+        .expect("text");
+    assert_eq!(after, "count=2", "dry-run must not mutate real state");
+
+    // And no journal entry for the dry-run.
+    let journal: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/__api/journal/{group}")))
+        .send()
+        .await
+        .expect("journal get")
+        .json()
+        .await
+        .expect("json");
+    let entries = journal["entries"].as_array().expect("entries");
+    // Two real calls were made; dry-run must not have added a third.
+    assert_eq!(entries.len(), 2, "dry-run must not journal");
+}
+
+#[tokio::test]
+async fn dry_run_non_owner_forbidden() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/dryrun-locked",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+    let (_alice_id, alice) = h.provision_user("alice-dry", false);
+    let resp = alice
+        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .json(&json!({"method": "POST", "path": "/v1/dryrun-locked"}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
 #[tokio::test]
 async fn patch_route_non_owner_non_admin_forbidden() {
     let h = Harness::start().await;

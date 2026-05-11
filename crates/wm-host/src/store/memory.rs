@@ -8,7 +8,7 @@ use super::StoreError;
 
 pub type MemStore = HashMap<String, MemValue>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MemValue {
     Bytes(Vec<u8>),
     List(VecDeque<Vec<u8>>),
@@ -17,7 +17,7 @@ pub enum MemValue {
 }
 
 impl MemValue {
-    fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
             MemValue::Bytes(_) => "bytes",
             MemValue::List(_) => "list",
@@ -25,6 +25,33 @@ impl MemValue {
             MemValue::Set(_) => "set",
         }
     }
+}
+
+/// Return the storage-level kind of `key` if present. Used by per-route
+/// state inspection to label keys whose value isn't a bytes-typed entry
+/// (lists, hashes, sets get their own renderings).
+pub fn kind(store: &MemStore, key: &str) -> Option<&'static str> {
+    store.get(key).map(MemValue::kind)
+}
+
+/// Copy every entry under `src_prefix` to the same suffix under
+/// `dst_prefix`. Preserves value type (bytes / list / hash / set) by
+/// cloning the `MemValue` in place. Returns the number of entries
+/// copied. Used by the dry-run snapshot path.
+pub fn copy_with_prefix(store: &mut MemStore, src_prefix: &str, dst_prefix: &str) -> u64 {
+    let pairs: Vec<(String, MemValue)> = store
+        .iter()
+        .filter(|(k, _)| k.starts_with(src_prefix))
+        .map(|(k, v)| {
+            let suffix = &k[src_prefix.len()..];
+            (format!("{dst_prefix}{suffix}"), v.clone())
+        })
+        .collect();
+    let n = pairs.len() as u64;
+    for (k, v) in pairs {
+        store.insert(k, v);
+    }
+    n
 }
 
 fn wrong_type(key: &str, actual: &'static str, expected: &'static str) -> StoreError {

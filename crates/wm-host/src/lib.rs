@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod bindings;
 pub mod compiler;
+pub mod dry_run;
 pub mod host_state;
 pub mod journal;
 pub mod journal_filter;

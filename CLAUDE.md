@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–15 landed. The WIT contract is live at
+**Status:** slices 1–16 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -37,31 +37,40 @@ public probes. Auth via `WM_TOKEN` / `--token`, host via `WM_HOST` /
 `--host`. `--json` switches to machine-parseable output for scripts
 and agents. The MCP server (slice 10) is part of `wm-host` and
 mounts at `/__api/mcp` over the streamable-HTTP transport (rmcp).
-17 tools now cover identity, discovery, group/route CRUD (with
+20 tools now cover identity, discovery, group/route CRUD (with
 slice-15 `update_route`), group state, the slice-11 streaming pair
 (`wait_for_request`, `tail_journal`) backed by `GET
 /__api/journal/tail` SSE on the host and a single-host broadcast bus
-inside `Journal`, plus the slice-13 match probe (`find_route` MCP
-tool + `wm match` CLI + `GET /__api/match` host endpoint with
-`method_mismatch` and `prefix_match` near-misses). Same bearer-token
-auth throughout. Multi-host fan-out (Valkey pub/sub) and 2 remaining
-host-blocked tools (dry_run_route / clear_route_state) land in
-follow-up slices. The user-facing skill (slice 12) ships at
-`skill/wiremirage/` (with a debug sub-skill at
-`skill/wiremirage-debug/`) — `SKILL.md` + 3 ready-to-run scripts
-teaching the CLI workflow. Slice 14 added admin user CRUD to the CLI
-(`wm users list/show/me/create/update/delete`) and `wm completion
-<shell>` for bash/zsh/fish/powershell. Slice 15 added route update:
-`PATCH /__api/routes/{group}/{n}` plus the matching `wm routes
-update` CLI subcommand and `update_route` MCP tool. Mutable fields
-are `methods`, `path`, and the artifact triple
-(`source`/`compiled_wasm` + `language` + `bindings_version`); path
-or method changes re-validate pattern conflicts (excluding self) and
-swap the by-method-path index, and any wasm swap evicts the
-RouteTable's component cache for that route. MCP stays wasm-only on
-the artifact, matching `create_route`. By design (per
-`mcp-surface.md`) user management is **not** in MCP — admins handle
-it via CLI/UI.
+inside `Journal`, the slice-13 match probe (`find_route` MCP tool +
+`wm match` CLI + `GET /__api/match` host endpoint with
+`method_mismatch` and `prefix_match` near-misses), and the slice-16
+route-state + dry-run trio (`show_route_state`, `clear_route_state`,
+`dry_run_route`). Same bearer-token auth throughout. Multi-host
+fan-out (Valkey pub/sub) lands in a follow-up. The user-facing
+skill (slice 12) ships at `skill/wiremirage/` (with a debug
+sub-skill at `skill/wiremirage-debug/`) — `SKILL.md` + 3
+ready-to-run scripts teaching the CLI workflow. Slice 14 added
+admin user CRUD to the CLI (`wm users
+list/show/me/create/update/delete`) and `wm completion <shell>` for
+bash/zsh/fish/powershell. Slice 15 added route update: `PATCH
+/__api/routes/{group}/{n}` plus the matching `wm routes update` CLI
+subcommand and `update_route` MCP tool. Mutable fields are
+`methods`, `path`, and the artifact triple (`source`/`compiled_wasm`
++ `language` + `bindings_version`); path or method changes
+re-validate pattern conflicts (excluding self) and swap the
+by-method-path index, and any wasm swap evicts the RouteTable's
+component cache for that route. MCP stays wasm-only on the
+artifact, matching `create_route`. Slice 16 added per-route state +
+dry-run: `GET/DELETE /__api/routes/{group}/{n}/state` for listing
+and clearing the route's private kv, plus `POST
+.../{n}/dry-run` for running the handler against a synthetic
+request. Dry-run snapshots `kv:` and `gkv:` to `dryrun:{run_id}:` so
+state writes are isolated and discarded on completion; the journal
+is untouched. The CLI wraps both as `wm routes state` (list /
+`--clear`) and `wm routes test`. MCP exposes `show_route_state`,
+`clear_route_state`, and `dry_run_route` (all owner-or-admin). By
+design (per `mcp-surface.md`) user management is **not** in MCP —
+admins handle it via CLI/UI.
 
 ## Where the design lives
 

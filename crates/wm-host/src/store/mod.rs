@@ -73,14 +73,76 @@ impl Storage {
 
     /// Open the route-private bucket scoped to `(group, route)`.
     pub fn route_bucket(&self, group_ulid: &str, route_ulid: &str) -> Result<Bucket, StoreError> {
-        let prefix = format!("kv:{group_ulid}:{route_ulid}:");
-        self.bucket_with_prefix(prefix)
+        self.route_bucket_under("", group_ulid, route_ulid)
     }
 
     /// Open the group-shared bucket scoped to `group`.
     pub fn group_bucket(&self, group_ulid: &str) -> Result<Bucket, StoreError> {
-        let prefix = format!("gkv:{group_ulid}:");
+        self.group_bucket_under("", group_ulid)
+    }
+
+    /// Open the route-private bucket under a custom root prefix. With
+    /// `root = ""` this is identical to `route_bucket`; the dry-run
+    /// path passes `"dryrun:{run_id}:"` so handler reads and writes
+    /// land in a per-run namespace that gets discarded on completion.
+    pub fn route_bucket_under(
+        &self,
+        root: &str,
+        group_ulid: &str,
+        route_ulid: &str,
+    ) -> Result<Bucket, StoreError> {
+        let prefix = format!("{root}kv:{group_ulid}:{route_ulid}:");
         self.bucket_with_prefix(prefix)
+    }
+
+    /// Open the group-shared bucket under a custom root prefix. See
+    /// `route_bucket_under` for context.
+    pub fn group_bucket_under(&self, root: &str, group_ulid: &str) -> Result<Bucket, StoreError> {
+        let prefix = format!("{root}gkv:{group_ulid}:");
+        self.bucket_with_prefix(prefix)
+    }
+
+    /// Deep-copy every key under `src_prefix` (storage-level, no bucket
+    /// prefix prepended) to the same suffix under `dst_prefix`. Used
+    /// by the dry-run path to snapshot a route + group's state into a
+    /// disposable namespace.
+    pub fn copy_keys_with_prefix(
+        &self,
+        src_prefix: &str,
+        dst_prefix: &str,
+    ) -> Result<u64, StoreError> {
+        match self {
+            Storage::InMemory(store) => {
+                let mut store = store.lock().expect("poisoned");
+                Ok(memory::copy_with_prefix(&mut store, src_prefix, dst_prefix))
+            }
+            Storage::Valkey(client) => {
+                let mut conn = client
+                    .get_connection()
+                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
+                valkey::copy_with_prefix(&mut conn, src_prefix, dst_prefix)
+            }
+        }
+    }
+
+    /// Set a millisecond-precision TTL on every key under `prefix`.
+    /// Used to mark the dry-run namespace for automatic Valkey reaping
+    /// in case the host crashes between snapshot and cleanup. In-memory
+    /// is a no-op (a restart wipes everything anyway).
+    pub fn set_pttl_with_prefix(&self, prefix: &str, millis: u64) -> Result<(), StoreError> {
+        match self {
+            Storage::InMemory(_) => Ok(()),
+            Storage::Valkey(client) => {
+                let mut conn = client
+                    .get_connection()
+                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
+                let keys = valkey::scan_with_prefix(&mut conn, prefix)?;
+                for k in keys {
+                    valkey::pexpire(&mut conn, &k, millis)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Open a bucket with no key prefix, for host-internal admin records
@@ -231,6 +293,25 @@ impl Bucket {
             Bucket::Valkey { conn, prefix } => {
                 let fk = format!("{prefix}{key}");
                 valkey::incr(conn, &fk, by).map_err(|e| restore_user_key(e, prefix))
+            }
+        }
+    }
+
+    /// Storage-level type of `key`, or `None` when the key is absent.
+    /// Returns `"bytes"`, `"list"`, `"hash"`, `"set"` (or `"other"` for
+    /// a co-resident application's exotic types on Valkey). Used by
+    /// state-inspection endpoints to label keys whose typed value
+    /// won't fit in a generic `Vec<u8>` field.
+    pub fn kind(&mut self, key: &str) -> Result<Option<&'static str>, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let store = store.lock().expect("poisoned");
+                Ok(memory::kind(&store, &fk))
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                valkey::kind(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
         }
     }

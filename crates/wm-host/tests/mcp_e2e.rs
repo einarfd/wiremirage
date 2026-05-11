@@ -149,6 +149,10 @@ async fn list_tools_returns_all_expected_tools() {
         "find_route",
         // Slice 15
         "update_route",
+        // Slice 16
+        "clear_route_state",
+        "dry_run_route",
+        "show_route_state",
     ];
     expected.sort();
     assert_eq!(names, expected);

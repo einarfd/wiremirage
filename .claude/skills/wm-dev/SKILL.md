@@ -423,6 +423,50 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Per-route state + dry-run (slice 16)
+
+The second half of the route-debug pair. Three new host endpoints,
+three new MCP tools, and `wm routes state` / `wm routes test` on
+the CLI.
+
+- **State endpoints:** `GET /__api/routes/{group}/{n}/state`
+  lists each kv key with its storage-level kind (`bytes` / `list` /
+  `hash` / `set` / `other`); bytes inline the value, collections
+  report `length`. `DELETE` wipes the route's private kv namespace
+  via the existing `delete_with_prefix`. Both owner-or-admin.
+- **Dry-run endpoint:** `POST /__api/routes/{group}/{n}/dry-run`
+  with a synthetic request body. Lives in `crates/wm-host/src/dry_run.rs`
+  to keep server.rs lean. Owner-or-admin.
+- **Snapshot semantics:** the route's `kv:{group}:{route}:*` and
+  the group's `gkv:{group}:*` are deep-copied (preserving type) to
+  a `dryrun:{run_id}:` root via `Storage::copy_keys_with_prefix`
+  (in-memory clones `MemValue`; Valkey uses the `COPY` command).
+  The handler is instantiated with buckets whose prefix points at
+  the shifted root, so reads + writes go to the snapshot. On
+  completion, one `delete_with_prefix("dryrun:{run_id}:")` wipes
+  the snapshot. Journal is **not** written.
+- **Crash safety:** every key in the dry-run namespace gets a 60s
+  `PEXPIRE` so a host crash mid-dry-run doesn't leave orphans
+  forever. No-op for the in-memory backend (restart wipes
+  everything).
+- **Handler trap behavior:** wasm traps become part of the dry-run
+  *response* (status 500, `error` field set, partial logs
+  preserved). The HTTP outcome stays 200 — the agent asked "what
+  would happen?", and the trap *is* the answer.
+- **`Bucket::kind(key)` introspection** added so the state listing
+  can label values without using only typed getters. Returns
+  `bytes` / `list` / `hash` / `set` / `other` / `None` (missing).
+- **CLI:** `wm routes state <slug>` (list / `--clear`) and `wm
+  routes test <slug> --method POST [--path /foo] [--header X:Y]
+  [--body STRING|@FILE] [--path-param k=v]`. The CLI defaults the
+  request path to the route's own path (one extra GET to fetch the
+  route record) so `wm routes test slug` works without extra
+  typing.
+- **MCP:** `show_route_state`, `clear_route_state`, `dry_run_route`
+  — all in `mcp/tools/state.rs` (renamed from "State tools" to
+  "State + dry-run tools"). Bytes values are base64-encoded on
+  the wire to keep the schema clean for JSON consumers.
+
 ## Route update (slice 15)
 
 `PATCH /__api/routes/{group}/{n}` mutates a route in place. The

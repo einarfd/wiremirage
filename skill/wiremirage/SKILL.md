@@ -63,6 +63,16 @@ wm routes add --group stripe-mock --method POST --path /v1/charges \
 # `add`; pass only what you want to change. Owner-or-admin only.
 # wm routes update stripe-mock/1 --source-file /tmp/charge-v2.ts
 
+# Inspect / clear the route's private kv state (useful between test
+# phases when you want a clean slate without re-creating the route).
+# wm routes state stripe-mock/1                 # list
+# wm routes state stripe-mock/1 --clear         # wipe
+
+# Dry-run the handler against a synthetic request: see what it
+# returns without involving the SUT, with state reads/writes
+# happening against a discarded snapshot. No journal entry.
+# wm routes test stripe-mock/1 --method POST --body '{"x":1}'
+
 # Run your test that hits http://$WM_HOST/v1/charges. Mock traffic is
 # unauthenticated.
 curl -X POST $WM_HOST/v1/charges -d '{}'

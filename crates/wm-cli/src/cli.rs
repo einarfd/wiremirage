@@ -174,6 +174,20 @@ pub enum RoutesCommand {
     /// Update a route's mutable fields. Pass at least one of `--method`,
     /// `--path`, `--source-file`, or `--wasm-file`. Owner-or-admin only.
     Update(UpdateRouteArgs),
+    /// List or clear the route's per-route kv state. Default lists;
+    /// `--clear` wipes (route record stays). Owner-or-admin only.
+    State {
+        /// Route slug `{group}/{n}`.
+        slug: String,
+        /// Wipe all per-route kv keys for this route. The route
+        /// itself stays alive.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Dry-run the route's handler against a synthetic request. State
+    /// reads see a point-in-time snapshot; writes land in the
+    /// snapshot and are discarded after the call. Skips the journal.
+    Test(TestRouteArgs),
     /// Delete a route.
     Delete {
         /// Route slug `{group}/{n}`.
@@ -181,6 +195,30 @@ pub enum RoutesCommand {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TestRouteArgs {
+    /// Route slug `{group}/{n}` (e.g. `stripe-mock/7`).
+    pub slug: String,
+    /// HTTP method to pass to the handler.
+    #[arg(long, default_value = "GET")]
+    pub method: String,
+    /// Request path. Defaults to the route's own path. Must start
+    /// with `/` if supplied.
+    #[arg(long)]
+    pub path: Option<String>,
+    /// `KEY: VALUE` header. Repeatable.
+    #[arg(long = "header", value_name = "KEY:VALUE")]
+    pub headers: Vec<String>,
+    /// Inline request body. Use `@FILE` to read from disk.
+    #[arg(long)]
+    pub body: Option<String>,
+    /// `name=value` path-param override. Repeatable. By default the
+    /// handler sees an empty path-params list (the dry-run path
+    /// doesn't re-run the matcher).
+    #[arg(long = "path-param", value_name = "NAME=VALUE")]
+    pub path_params: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]

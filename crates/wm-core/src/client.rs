@@ -16,9 +16,9 @@ use thiserror::Error;
 
 use crate::models::{
     ApiErrorBody, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateTokenResponse,
-    GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse, ListJournalResponse,
-    ListRoutesResponse, ListTokensResponse, PatchGroupBody, PatchRouteBody, ReadyResponse,
-    RouteRecord,
+    DryRunBody, DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse,
+    ListJournalResponse, ListRouteStateResponse, ListRoutesResponse, ListTokensResponse,
+    PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -247,6 +247,42 @@ impl Client {
         self.send_no_body(
             Method::DELETE,
             &format!("/__api/routes/{}/{number}", urlencode(group)),
+        )
+        .await
+    }
+
+    pub async fn list_route_state(
+        &self,
+        slug: &str,
+    ) -> Result<ListRouteStateResponse, ClientError> {
+        let (group, number) = split_route_slug(slug)?;
+        self.send(
+            Method::GET,
+            &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+            None::<&()>,
+        )
+        .await
+    }
+
+    pub async fn clear_route_state(&self, slug: &str) -> Result<(), ClientError> {
+        let (group, number) = split_route_slug(slug)?;
+        self.send_no_body(
+            Method::DELETE,
+            &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+        )
+        .await
+    }
+
+    pub async fn dry_run_route(
+        &self,
+        slug: &str,
+        body: &DryRunBody,
+    ) -> Result<DryRunResult, ClientError> {
+        let (group, number) = split_route_slug(slug)?;
+        self.send(
+            Method::POST,
+            &format!("/__api/routes/{}/{number}/dry-run", urlencode(group)),
+            Some(body),
         )
         .await
     }

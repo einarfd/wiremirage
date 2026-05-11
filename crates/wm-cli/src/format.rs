@@ -10,9 +10,10 @@
 
 use serde::Serialize;
 use wm_core::{
-    GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse, ListJournalResponse,
-    ListRoutesResponse, ListTokensResponse, ListUsersResponse, MatchResponse, NearMiss,
-    NearMissReason, RouteRecord, TokenRecord, UserRecord,
+    DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse,
+    ListJournalResponse, ListRouteStateResponse, ListRoutesResponse, ListTokensResponse,
+    ListUsersResponse, MatchResponse, NearMiss, NearMissReason, RouteRecord, TokenRecord,
+    UserRecord,
 };
 
 /// Output mode requested via the global `--json` flag.
@@ -429,6 +430,75 @@ fn print_near_miss_reason(nm: &NearMiss) {
             println!(
                 "    reason: prefix_match (segment {idx}: expected {expected:?}, got {got:?})"
             );
+        }
+    }
+}
+
+// -- Route state -------------------------------------------------------------
+
+pub fn render_route_state(list: &ListRouteStateResponse, format: Format) {
+    match format {
+        Format::Json => print_json(list),
+        Format::Human => {
+            if list.entries.is_empty() {
+                println!("(no state)");
+                return;
+            }
+            let rows: Vec<[String; 3]> = list
+                .entries
+                .iter()
+                .map(|e| {
+                    let detail = match e.kind.as_str() {
+                        "bytes" => match &e.value {
+                            Some(v) => match std::str::from_utf8(v) {
+                                Ok(s) => s.to_string(),
+                                Err(_) => format!("<{} bytes>", v.len()),
+                            },
+                            None => "<empty>".into(),
+                        },
+                        "list" | "hash" | "set" => {
+                            format!("len={}", e.length.unwrap_or(0))
+                        }
+                        _ => "(unknown type)".into(),
+                    };
+                    [e.key.clone(), e.kind.clone(), detail]
+                })
+                .collect();
+            print_table(&["KEY", "KIND", "VALUE"], &rows);
+        }
+    }
+}
+
+// -- Dry-run -----------------------------------------------------------------
+
+pub fn render_dry_run(r: &DryRunResult, format: Format) {
+    match format {
+        Format::Json => print_json(r),
+        Format::Human => {
+            println!("status: {}", r.status);
+            println!("duration_ms: {}", r.duration_ms);
+            println!("snapshot_keys: {}", r.snapshot_keys);
+            if let Some(err) = &r.error {
+                println!("error: {err}");
+            }
+            if !r.headers.is_empty() {
+                println!("headers:");
+                for (k, v) in &r.headers {
+                    println!("  {k}: {v}");
+                }
+            }
+            if !r.body.is_empty() {
+                match std::str::from_utf8(&r.body) {
+                    Ok(s) => println!("body:\n{s}"),
+                    Err(_) => println!("body: <{} non-utf8 bytes>", r.body.len()),
+                }
+            }
+            if !r.handler_logs.is_empty() {
+                println!("logs:");
+                for log in &r.handler_logs {
+                    println!("  [{}] {}", log.level, log.message);
+                }
+            }
         }
     }
 }

@@ -22,8 +22,14 @@ and TypeScript source (the latter goes through a Node sidecar at
 /__api/routes/{group}/{n}` (slice 15): `methods`, `path`, and the
 handler artifact swap together; path/method changes re-run pattern
 conflict detection, and any wasm swap evicts the in-memory component
-cache. Bearer-token auth gates the `/__api/*` surface; mock traffic
-to user routes stays open by design (SUTs don't have tokens).
+cache. Per-route state can be inspected and cleared via `GET/DELETE
+/__api/routes/{group}/{n}/state`, and a route's handler can be run
+against a synthetic request via `POST .../{n}/dry-run` — dry-run
+snapshots route + group kv into a `dryrun:{run_id}:` namespace so
+writes are isolated and discarded on completion, no journal entry
+created (slice 16). Bearer-token auth gates the `/__api/*` surface;
+mock traffic to user routes stays open by design (SUTs don't have
+tokens).
 Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup. Token
 and user management live at `/__api/tokens` and `/__api/users`
 (admin-only for cross-user actions; `GET /__api/users/me` for self).
@@ -34,10 +40,12 @@ units with TTL (default 24h, sliding-on-traffic by default); explicit
 DELETE cascades routes, kv/gkv state, and journal entries together,
 and a background sweeper reaps groups that hit their TTL. The `wm` CLI
 wraps the REST surface end-to-end: groups, routes (including `wm
-routes update`), journal, tokens, and the public probes — see "Using
-the CLI" below. The MCP server is part of the host and mounts at
-`/__api/mcp` over the streamable-HTTP transport; 17 tools cover
-identity, discovery, group/route CRUD (now including `update_route`),
+routes update`, `wm routes state`, `wm routes test`), journal,
+tokens, and the public probes — see "Using the CLI" below. The MCP
+server is part of the host and mounts at `/__api/mcp` over the
+streamable-HTTP transport; 20 tools cover identity, discovery,
+group/route CRUD (now including `update_route`), per-route state
+(`show_route_state`, `clear_route_state`), dry-run (`dry_run_route`),
 the live-tail streaming pair (`wait_for_request`, `tail_journal`),
 and the match probe (`find_route`, mirrored by `wm match` and `GET
 /__api/match`). All behind the same bearer-token auth. Live tail
@@ -150,6 +158,8 @@ wm routes add --group stripe-mock --method POST --path /v1/charges \
   --source-file handler.ts                 # compiles via the sidecar
 wm routes list
 wm routes update stripe-mock/1 --source-file new-handler.ts  # PATCH
+wm routes state stripe-mock/1              # list per-route kv
+wm routes test stripe-mock/1 --method POST # dry-run (no journal, isolated state)
 wm journal list stripe-mock                # newest first, paginated
 wm tokens create ci-runner                 # plaintext printed once
 wm groups delete stripe-mock --force       # cascades routes, kv, journal
@@ -188,22 +198,25 @@ claude mcp add --transport http wiremirage \
   --header "Authorization: Bearer wmt_..."
 ```
 
-The current surface is 17 tools — identity (`who_am_i`), discovery
+The current surface is 20 tools — identity (`who_am_i`), discovery
 (`summarize_workspace`, `list_recent_unmatched`, `find_route`),
 group CRUD (`list_groups`, `show_group`, `create_group`,
 `delete_group`, `refresh_group_ttl`), route CRUD (`list_routes`,
 `show_route`, `create_route`, `update_route`, `delete_route`),
-`clear_group_state`, and the slice-11 streaming pair
-(`wait_for_request`, `tail_journal`). The streaming tools subscribe
-to a single-host broadcast bus inside the host and return
+state + dry-run (`clear_group_state`, `show_route_state`,
+`clear_route_state`, `dry_run_route`), and the slice-11 streaming
+pair (`wait_for_request`, `tail_journal`). The streaming tools
+subscribe to a single-host broadcast bus inside the host and return
 accumulated entries when their stop condition fires (count + timeout
 for `wait_for_request`; max_entries + idle timeout for
 `tail_journal`). `find_route` mirrors the `wm match` CLI and `GET
 /__api/match` REST endpoint shipped in slice 13. `update_route`
 (slice 15) is wasm-only at the MCP layer, matching `create_route`;
 source-based updates go through REST or `wm routes update
---source-file`. `dry_run_route` / per-route state and multi-host
-pub/sub for the bus land in follow-up slices.
+--source-file`. `dry_run_route` (slice 16) snapshots route + group
+state into a per-run namespace so the handler can read/write without
+mutating the real store, and discards the snapshot on completion.
+Multi-host pub/sub for the bus lands in a follow-up slice.
 
 ## License
 
