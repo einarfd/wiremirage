@@ -364,6 +364,75 @@ async fn counter_state_persists_across_calls_in_memory() {
     }
 }
 
+// -- Activity tracking (slice 17) ---------------------------------------------
+
+#[tokio::test]
+async fn activity_fields_bump_on_dispatch() {
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/activity",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap().to_string();
+    let number = created["number"].as_u64().unwrap();
+    let location = format!("/__api/routes/{group}/{number}");
+
+    // Fresh route: never hit.
+    assert_eq!(created["hits_total"], 0);
+    assert!(
+        created.get("last_hit_at").is_none() || created["last_hit_at"].is_null(),
+        "fresh route should not have last_hit_at: {created}"
+    );
+
+    // Drive three real dispatches against the route.
+    for _ in 0..3 {
+        h.client
+            .get(h.url("/v1/activity"))
+            .send()
+            .await
+            .expect("get");
+    }
+
+    // The route's hits_total should now be 3 with last_hit_at set.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url(&location))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["hits_total"], 3);
+    assert!(
+        body["last_hit_at"].is_string(),
+        "expected RFC3339 last_hit_at, got {body}"
+    );
+
+    // The group should have a matching last_activity_at.
+    let g_body: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/__api/groups/{group}")))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        g_body["last_activity_at"].is_string(),
+        "expected last_activity_at on group, got {g_body}"
+    );
+}
+
 // -- Validation / errors -------------------------------------------------------
 
 #[tokio::test]

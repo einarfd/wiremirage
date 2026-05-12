@@ -423,6 +423,42 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Activity tracking (slice 17)
+
+Per-record bookkeeping bumped on every matched dispatch. Drives the
+"most recently active" default sort for list endpoints (which lands
+as slice 18) but the fields themselves are useful immediately.
+
+- **Fields added:** `Route.hits_total` (`u64`), `Route.last_hit_at`
+  (`Option<DateTime<Utc>>`), `Group.last_activity_at` (same).
+- **Dispatch-path call:** `registry.record_route_hit(group_id,
+  route_id, now)` in `server::dispatch_inner`, after the journal
+  write and alongside the sliding-TTL bump. Best-effort — a failure
+  logs `tracing::warn` and doesn't change the SUT's response. Three
+  storage operations per matched request: `HSET route:{id}
+  last_hit_at`, `HINCRBY route:{id} hits_total`, `HSET group:{id}
+  last_activity_at`.
+- **Backward compat:** pre-slice-17 records won't have the fields.
+  `decode_route` / `decode_group` use a new `utf8_opt` helper that
+  returns `None` on missing-field rather than erroring; `hits_total`
+  defaults to `0`, `last_hit_at` / `last_activity_at` default to
+  `None`. First post-upgrade dispatch populates them.
+- **Cleanup paths updated:** the field lists in `delete_route` and
+  `cascade_delete_group` include the new field names so a deleted
+  record leaves no stragglers in storage.
+- **Surface:** `RouteResponse` / `GroupResponse` (REST),
+  `RouteRecord` / `GroupRecord` (wm-core models + MCP tool types)
+  all expose the new fields. JSON output uses
+  `skip_serializing_if = "Option::is_none"` for the timestamp
+  fields so never-hit records don't surface `"last_hit_at":null` —
+  the field is just absent.
+- **Tests:** registry unit test
+  (`record_route_hit_bumps_counter_and_timestamps`) covers the
+  fresh-route, first-hit, second-hit sequence. Tier-2
+  `activity_fields_bump_on_dispatch` drives three real HTTP
+  requests against a route and verifies the fields propagate
+  through to `GET /__api/routes/{slug}` and `GET /__api/groups/{name}`.
+
 ## Per-route state + dry-run (slice 16)
 
 The second half of the route-debug pair. Three new host endpoints,

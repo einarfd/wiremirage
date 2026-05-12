@@ -140,6 +140,9 @@ struct RouteResponse {
     bindings_version: String,
     created_at: String,
     owner_id: String,
+    hits_total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_hit_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +166,8 @@ impl From<&Route> for RouteResponse {
             bindings_version: r.bindings_version.clone(),
             created_at: r.created_at.to_rfc3339(),
             owner_id: r.owner_id.clone(),
+            hits_total: r.hits_total,
+            last_hit_at: r.last_hit_at.map(|ts| ts.to_rfc3339()),
         }
     }
 }
@@ -1129,6 +1134,8 @@ struct GroupResponse {
     ttl_seconds: u64,
     sliding_ttl: bool,
     created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity_at: Option<String>,
 }
 
 impl From<&Group> for GroupResponse {
@@ -1141,6 +1148,7 @@ impl From<&Group> for GroupResponse {
             ttl_seconds: g.ttl_seconds,
             sliding_ttl: g.sliding_ttl,
             created_at: g.created_at.to_rfc3339(),
+            last_activity_at: g.last_activity_at.map(|ts| ts.to_rfc3339()),
         }
     }
 }

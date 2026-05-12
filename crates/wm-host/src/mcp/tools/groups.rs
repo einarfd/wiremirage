@@ -24,6 +24,9 @@ pub struct GroupRecord {
     pub sliding_ttl: bool,
     pub implicit: bool,
     pub created_at: String,
+    /// Most recent matched dispatch against any route in the group.
+    /// `None` for groups that have never seen traffic.
+    pub last_activity_at: Option<String>,
 }
 
 impl From<&Group> for GroupRecord {
@@ -36,6 +39,7 @@ impl From<&Group> for GroupRecord {
             sliding_ttl: g.sliding_ttl,
             implicit: g.implicit,
             created_at: g.created_at.to_rfc3339(),
+            last_activity_at: g.last_activity_at.map(|ts| ts.to_rfc3339()),
         }
     }
 }

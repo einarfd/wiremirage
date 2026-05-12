@@ -38,6 +38,10 @@ pub struct GroupRecord {
     pub ttl_seconds: u64,
     pub sliding_ttl: bool,
     pub created_at: String,
+    /// Most recent matched dispatch against any route in the group.
+    /// `None` for groups that have never seen traffic.
+    #[serde(default)]
+    pub last_activity_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -75,6 +79,14 @@ pub struct RouteRecord {
     pub bindings_version: String,
     pub created_at: String,
     pub owner_id: String,
+    /// Cumulative count of matched dispatches against this route.
+    /// `0` for never-hit routes.
+    #[serde(default)]
+    pub hits_total: u64,
+    /// Most recent matched dispatch against this route. `None` for
+    /// never-hit routes.
+    #[serde(default)]
+    pub last_hit_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

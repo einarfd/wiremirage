@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–16 landed. The WIT contract is live at
+**Status:** slices 1–17 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -68,9 +68,15 @@ request. Dry-run snapshots `kv:` and `gkv:` to `dryrun:{run_id}:` so
 state writes are isolated and discarded on completion; the journal
 is untouched. The CLI wraps both as `wm routes state` (list /
 `--clear`) and `wm routes test`. MCP exposes `show_route_state`,
-`clear_route_state`, and `dry_run_route` (all owner-or-admin). By
-design (per `mcp-surface.md`) user management is **not** in MCP —
-admins handle it via CLI/UI.
+`clear_route_state`, and `dry_run_route` (all owner-or-admin).
+Slice 17 added activity tracking — `hits_total` + `last_hit_at`
+on every route record, `last_activity_at` on every group record.
+Bumped by the dispatch path on every matched request (two `HSET`s
++ one `HINCRBY` per match; best-effort like the journal write).
+The fields surface in REST / wm-core / MCP responses; sort-by-
+activity on list endpoints is the next slice (REST list-surface).
+By design (per `mcp-surface.md`) user management is **not** in
+MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 

@@ -29,6 +29,11 @@ pub struct RouteRecord {
     pub bindings_version: String,
     pub owner_id: String,
     pub created_at: String,
+    /// Cumulative count of matched dispatches against this route.
+    pub hits_total: u64,
+    /// Most recent matched dispatch against this route. `None` for
+    /// never-hit routes.
+    pub last_hit_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -52,6 +57,8 @@ impl From<&Route> for RouteRecord {
             bindings_version: r.bindings_version.clone(),
             owner_id: r.owner_id.clone(),
             created_at: r.created_at.to_rfc3339(),
+            hits_total: r.hits_total,
+            last_hit_at: r.last_hit_at.map(|ts| ts.to_rfc3339()),
         }
     }
 }

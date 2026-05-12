@@ -64,6 +64,15 @@ pub struct Route {
     /// User ULID of the caller that created the route. DELETE/PATCH require
     /// the caller to match this id (or to be admin).
     pub owner_id: String,
+    /// Cumulative count of matched dispatches against this route. Bumped
+    /// on every successful match; `0` for never-hit routes. Used as the
+    /// `hits_total` field in REST responses and as a sort column on
+    /// `GET /__api/routes`.
+    pub hits_total: u64,
+    /// Timestamp of the most recent matched dispatch. `None` for
+    /// never-hit routes (or routes that pre-date this field). Used as
+    /// the default sort column on `GET /__api/routes`.
+    pub last_hit_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,6 +95,10 @@ pub struct Group {
     /// default to `true` so they live as long as traffic flows;
     /// explicit groups default to `true` too but can opt out.
     pub sliding_ttl: bool,
+    /// Timestamp of the most recent matched dispatch against any
+    /// route in this group. `None` for groups that have never seen
+    /// traffic. Used as the default sort column on `GET /__api/groups`.
+    pub last_activity_at: Option<DateTime<Utc>>,
 }
 
 /// Default lifetime for a newly created group when the caller doesn't
@@ -250,6 +263,7 @@ impl Registry {
             owner_id: params.owner_id,
             ttl_seconds,
             sliding_ttl: params.sliding_ttl.unwrap_or(DEFAULT_GROUP_SLIDING_TTL),
+            last_activity_at: None,
         };
         write_group(&mut bucket, &group)?;
         bucket.set_ttl(&format!("group:{}", group.id), group.ttl_seconds)?;
@@ -342,6 +356,34 @@ impl Registry {
         Ok(true)
     }
 
+    /// Record a matched dispatch against this route: bumps the
+    /// route's `hits_total` counter, stamps `last_hit_at`, and stamps
+    /// `last_activity_at` on the parent group. Called on every
+    /// successful dispatch from the dispatcher. Best-effort: callers
+    /// log on failure and move on (a journal write also happens
+    /// alongside, so an operator notices).
+    pub fn record_route_hit(
+        &self,
+        group_id: &str,
+        route_id: &str,
+        when: DateTime<Utc>,
+    ) -> Result<(), RegistryError> {
+        let mut bucket = self.bucket()?;
+        let ts = when.to_rfc3339();
+        bucket.hash_set(
+            &format!("route:{route_id}"),
+            "last_hit_at",
+            ts.clone().into_bytes(),
+        )?;
+        bucket.hash_incr(&format!("route:{route_id}"), "hits_total", 1)?;
+        bucket.hash_set(
+            &format!("group:{group_id}"),
+            "last_activity_at",
+            ts.into_bytes(),
+        )?;
+        Ok(())
+    }
+
     /// Reset the group's Valkey TTL to its configured `ttl_seconds`.
     /// Cheap; used by the explicit refresh endpoint.
     pub fn refresh_group(&self, group_id: &str) -> Result<Group, RegistryError> {
@@ -394,6 +436,8 @@ impl Registry {
                 "compiled_wasm",
                 "created_at",
                 "owner_id",
+                "hits_total",
+                "last_hit_at",
             ] {
                 bucket.hash_delete(&format!("route:{route_id}"), field)?;
             }
@@ -419,6 +463,7 @@ impl Registry {
                 "owner_id",
                 "ttl_seconds",
                 "sliding_ttl",
+                "last_activity_at",
             ] {
                 bucket.hash_delete(&format!("group:{group_id}"), field)?;
             }
@@ -465,6 +510,7 @@ impl Registry {
             owner_id: owner_id.to_string(),
             ttl_seconds: DEFAULT_GROUP_TTL_SECONDS,
             sliding_ttl: DEFAULT_GROUP_SLIDING_TTL,
+            last_activity_at: None,
         };
         write_group(bucket, &group)?;
         bucket.set_ttl(&format!("group:{}", group.id), group.ttl_seconds)?;
@@ -538,6 +584,8 @@ impl Registry {
             compiled_wasm: params.compiled_wasm,
             created_at: Utc::now(),
             owner_id: params.owner_id,
+            hits_total: 0,
+            last_hit_at: None,
         };
 
         // Write the record + indexes.
@@ -634,6 +682,8 @@ impl Registry {
             "compiled_wasm",
             "created_at",
             "owner_id",
+            "hits_total",
+            "last_hit_at",
         ] {
             bucket.hash_delete(&format!("route:{route_id}"), field)?;
         }
@@ -950,6 +1000,11 @@ fn decode_group(fields: &HashMap<String, Vec<u8>>) -> Result<Group, RegistryErro
             .parse()
             .map_err(|e| RegistryError::Malformed(format!("ttl_seconds: {e}")))?,
         sliding_ttl: utf8(fields, "sliding_ttl")? == "1",
+        // Activity fields are optional — pre-slice-17 records won't
+        // have them. Treat absent as "never".
+        last_activity_at: utf8_opt(fields, "last_activity_at")
+            .map(|s| parse_ts(&s))
+            .transpose()?,
     })
 }
 
@@ -976,6 +1031,18 @@ fn decode_route(fields: &HashMap<String, Vec<u8>>) -> Result<Route, RegistryErro
             .ok_or_else(|| RegistryError::Malformed("compiled_wasm missing".into()))?,
         created_at: parse_ts(&utf8(fields, "created_at")?)?,
         owner_id: utf8(fields, "owner_id")?,
+        // Activity fields are optional — pre-slice-17 records won't
+        // have them. Treat absent hits_total as 0, last_hit_at as None.
+        hits_total: utf8_opt(fields, "hits_total")
+            .map(|s| {
+                s.parse()
+                    .map_err(|e| RegistryError::Malformed(format!("hits_total: {e}")))
+            })
+            .transpose()?
+            .unwrap_or(0),
+        last_hit_at: utf8_opt(fields, "last_hit_at")
+            .map(|s| parse_ts(&s))
+            .transpose()?,
     })
 }
 
@@ -985,6 +1052,15 @@ fn utf8(fields: &HashMap<String, Vec<u8>>, name: &str) -> Result<String, Registr
         .ok_or_else(|| RegistryError::Malformed(format!("field {name} missing")))?;
     String::from_utf8(bytes.clone())
         .map_err(|_| RegistryError::Malformed(format!("field {name} not utf-8")))
+}
+
+/// Optional-field variant of `utf8`: returns `None` when the field is
+/// absent (not malformed). Used for fields added in later slices so
+/// decoding pre-existing records doesn't fail.
+fn utf8_opt(fields: &HashMap<String, Vec<u8>>, name: &str) -> Option<String> {
+    fields
+        .get(name)
+        .and_then(|b| String::from_utf8(b.clone()).ok())
 }
 
 fn parse_ts(s: &str) -> Result<DateTime<Utc>, RegistryError> {
@@ -1251,6 +1327,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(updated.path, "/v1/foo");
+    }
+
+    #[test]
+    fn record_route_hit_bumps_counter_and_timestamps() {
+        let registry = fresh_registry();
+        let r = registry
+            .create_route(sample_new_route(None, "/v1/foo"))
+            .unwrap();
+        // Fresh route: zero hits, no last-hit timestamp; group has
+        // no last-activity timestamp either.
+        assert_eq!(r.hits_total, 0);
+        assert!(r.last_hit_at.is_none());
+        let g_before = registry.read_group_by_ref(&r.group_name).unwrap();
+        assert!(g_before.last_activity_at.is_none());
+
+        let t1 = Utc::now();
+        registry.record_route_hit(&r.group_id, &r.id, t1).unwrap();
+
+        let after_one = registry.get_route_by_slug(&r.group_name, r.number).unwrap();
+        assert_eq!(after_one.hits_total, 1);
+        assert_eq!(after_one.last_hit_at, Some(round_trip_rfc3339(t1)));
+        let g_after_one = registry.read_group_by_ref(&r.group_name).unwrap();
+        assert_eq!(g_after_one.last_activity_at, Some(round_trip_rfc3339(t1)));
+
+        // Second hit: counter advances, timestamp updates.
+        let t2 = t1 + chrono::Duration::seconds(1);
+        registry.record_route_hit(&r.group_id, &r.id, t2).unwrap();
+        let after_two = registry.get_route_by_slug(&r.group_name, r.number).unwrap();
+        assert_eq!(after_two.hits_total, 2);
+        assert_eq!(after_two.last_hit_at, Some(round_trip_rfc3339(t2)));
+    }
+
+    /// Round-trip through `to_rfc3339` + `parse_ts` to match what the
+    /// storage layer does. Timestamps lose sub-microsecond precision
+    /// crossing the wire so we compare values after the same lossy
+    /// transform that decode applies.
+    fn round_trip_rfc3339(ts: DateTime<Utc>) -> DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(&ts.to_rfc3339())
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     #[test]

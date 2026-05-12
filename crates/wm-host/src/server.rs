@@ -360,6 +360,18 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         tracing::warn!(error = %e, "failed to record journal entry");
     }
 
+    // Activity tracking: bump per-route counter + stamp last_hit_at /
+    // last_activity_at. Best-effort like the journal write — a failure
+    // here is logged but doesn't change what the SUT sees. Drives the
+    // "most recently active" sort defaults on list endpoints.
+    if let Err(e) = state.routes().registry().record_route_hit(
+        &matched.route.group_id,
+        &matched.route.id,
+        chrono::Utc::now(),
+    ) {
+        tracing::warn!(error = %e, "activity tracking failed");
+    }
+
     // Sliding TTL bump: best-effort. A failure here would mean Valkey
     // is unhappy, in which case the journal write above probably also
     // failed and the operator already knows. Don't punish the SUT.
