@@ -12,8 +12,8 @@ use serde::Serialize;
 use wm_core::{
     DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse,
     ListJournalResponse, ListRouteStateResponse, ListRoutesResponse, ListTokensResponse,
-    ListUsersResponse, MatchResponse, NearMiss, NearMissReason, RouteRecord, TokenRecord,
-    UserRecord,
+    ListUnmatchedResponse, ListUsersResponse, MatchResponse, NearMiss, NearMissReason, RouteRecord,
+    TokenRecord, UnmatchedRecord, UserRecord,
 };
 
 /// Output mode requested via the global `--json` flag.
@@ -70,6 +70,7 @@ pub fn render_group_list(list: &ListGroupsResponse, format: Format) {
         Format::Human => {
             if list.groups.is_empty() {
                 println!("(no groups)");
+                print_pagination_footer(list.groups.len(), list.total, list.next_offset);
                 return;
             }
             let rows: Vec<[String; 5]> = list
@@ -79,24 +80,21 @@ pub fn render_group_list(list: &ListGroupsResponse, format: Format) {
                     [
                         g.name.clone(),
                         g.ttl_seconds.to_string(),
-                        if g.sliding_ttl {
-                            "yes".into()
-                        } else {
-                            "no".into()
-                        },
                         if g.implicit {
                             "yes".into()
                         } else {
                             "no".into()
                         },
+                        g.last_activity_at.clone().unwrap_or_else(|| "-".into()),
                         g.created_at.clone(),
                     ]
                 })
                 .collect();
             print_table(
-                &["NAME", "TTL_SECONDS", "SLIDING", "IMPLICIT", "CREATED_AT"],
+                &["NAME", "TTL_S", "IMPLICIT", "LAST_ACTIVITY", "CREATED_AT"],
                 &rows,
             );
+            print_pagination_footer(list.groups.len(), list.total, list.next_offset);
         }
     }
 }
@@ -126,9 +124,10 @@ pub fn render_route_list(list: &ListRoutesResponse, format: Format) {
         Format::Human => {
             if list.routes.is_empty() {
                 println!("(no routes)");
+                print_pagination_footer(list.routes.len(), list.total, list.next_offset);
                 return;
             }
-            let rows: Vec<[String; 5]> = list
+            let rows: Vec<[String; 6]> = list
                 .routes
                 .iter()
                 .map(|r| {
@@ -137,14 +136,16 @@ pub fn render_route_list(list: &ListRoutesResponse, format: Format) {
                         r.methods.join(","),
                         r.path.clone(),
                         r.language.clone(),
-                        r.created_at.clone(),
+                        r.hits_total.to_string(),
+                        r.last_hit_at.clone().unwrap_or_else(|| "-".into()),
                     ]
                 })
                 .collect();
             print_table(
-                &["SLUG", "METHODS", "PATH", "LANGUAGE", "CREATED_AT"],
+                &["SLUG", "METHODS", "PATH", "LANG", "HITS", "LAST_HIT"],
                 &rows,
             );
+            print_pagination_footer(list.routes.len(), list.total, list.next_offset);
         }
     }
 }
@@ -222,6 +223,64 @@ pub fn render_journal_list(list: &ListJournalResponse, format: Format) {
     }
 }
 
+// -- Unmatched ---------------------------------------------------------------
+
+pub fn render_unmatched_list(list: &ListUnmatchedResponse, format: Format) {
+    match format {
+        Format::Json => print_json(list),
+        Format::Human => {
+            if list.entries.is_empty() {
+                println!("(no unmatched entries)");
+                return;
+            }
+            let rows: Vec<[String; 4]> = list
+                .entries
+                .iter()
+                .map(|e| {
+                    [
+                        e.number.to_string(),
+                        e.request.method.clone(),
+                        e.request.path.clone(),
+                        e.created_at.to_rfc3339(),
+                    ]
+                })
+                .collect();
+            print_table(&["NUMBER", "METHOD", "PATH", "WHEN"], &rows);
+            if let Some(b) = list.next_before {
+                println!("\n(next page: --before={b})");
+            }
+        }
+    }
+}
+
+pub fn render_unmatched_entry(u: &UnmatchedRecord, format: Format) {
+    match format {
+        Format::Json => print_json(u),
+        Format::Human => {
+            println!("number:     {}", u.number);
+            println!("trace_id:   {}", u.trace_id.as_deref().unwrap_or("-"));
+            println!("when:       {}", u.created_at);
+            println!(
+                "request:    {} {} ({} bytes{})",
+                u.request.method,
+                u.request.path,
+                u.request.original_body_size,
+                if u.request.body_truncated {
+                    ", truncated"
+                } else {
+                    ""
+                }
+            );
+            if !u.near_misses.is_empty() {
+                println!("near_misses:");
+                for slug in &u.near_misses {
+                    println!("  {slug}");
+                }
+            }
+        }
+    }
+}
+
 // -- Tokens ------------------------------------------------------------------
 
 pub fn render_token_list(list: &ListTokensResponse, format: Format) {
@@ -291,6 +350,20 @@ fn print_table<const N: usize>(headers: &[&str; N], rows: &[[String; N]]) {
     print_row(headers, &widths);
     for row in rows {
         print_row(&row.iter().map(String::as_str).collect::<Vec<_>>(), &widths);
+    }
+}
+
+/// Footer for offset-paginated list responses. Prints
+/// `(showing K of N; --offset M for the next page)` when there are
+/// further results, or `(showing K of N)` when this is the last page.
+/// Skipped entirely when `total == 0` and nothing is shown.
+fn print_pagination_footer(shown: usize, total: u64, next_offset: Option<u64>) {
+    if total == 0 {
+        return;
+    }
+    match next_offset {
+        Some(off) => println!("\n(showing {shown} of {total}; --offset {off} for the next page)"),
+        None => println!("\n(showing {shown} of {total})"),
     }
 }
 

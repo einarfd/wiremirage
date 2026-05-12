@@ -607,3 +607,139 @@ async fn invalid_token_fails_to_connect() {
         "expected initialize to fail with bad token"
     );
 }
+
+// -- Slice 19: MCP list filters / sort / pagination --------------------------
+
+#[tokio::test]
+async fn list_groups_supports_name_prefix_and_pagination() {
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    for name in ["alpha", "beta", "gamma"] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("create_group").with_arguments(
+                    serde_json::json!({ "name": name })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("create_group");
+    }
+
+    // Name prefix filter.
+    let resp = client
+        .call_tool(
+            CallToolRequestParams::new("list_groups").with_arguments(
+                serde_json::json!({ "name_prefix": "alp" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("list_groups");
+    let body = resp.structured_content.expect("structured");
+    let names: Vec<&str> = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["alpha"]);
+    assert_eq!(body["total"], 1);
+
+    // Pagination: limit=2 over 3 groups → next_offset=2.
+    let resp = client
+        .call_tool(
+            CallToolRequestParams::new("list_groups").with_arguments(
+                serde_json::json!({ "limit": 2, "sort": "name", "dir": "asc" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("list_groups");
+    let body = resp.structured_content.expect("structured");
+    assert_eq!(body["groups"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["next_offset"], 2);
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn list_routes_bad_sort_returns_filter_error() {
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let err = client
+        .call_tool(
+            CallToolRequestParams::new("list_routes").with_arguments(
+                serde_json::json!({ "sort": "bogus" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    // The handler rejects via map_filter_error → ErrorData; rmcp
+    // surfaces that as a call error.
+    assert!(err.is_err(), "expected error for bogus sort");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn list_recent_unmatched_filters_by_path_pattern() {
+    let h = start().await;
+
+    // Seed unmatched entries directly via the journal, like the CLI
+    // smoke test does — the MCP filter is the part under test.
+    for path in ["/v1/a", "/v1/b", "/v2/c"] {
+        h.state
+            .journal()
+            .record_unmatched(wm_host::journal::NewUnmatchedEntry {
+                trace_id: None,
+                request: wm_host::journal::RequestEnvelope {
+                    method: "GET".into(),
+                    path: path.into(),
+                    headers: vec![],
+                    body: vec![],
+                    body_truncated: false,
+                    original_body_size: 0,
+                },
+            })
+            .expect("record unmatched");
+    }
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let resp = client
+        .call_tool(
+            CallToolRequestParams::new("list_recent_unmatched").with_arguments(
+                serde_json::json!({ "path_pattern": "/v1/*" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("list_recent_unmatched");
+    let body = resp.structured_content.expect("structured");
+    assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+
+    client.cancel().await.expect("cancel");
+}

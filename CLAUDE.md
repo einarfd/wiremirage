@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–18 landed. The WIT contract is live at
+**Status:** slices 1–19 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -92,9 +92,19 @@ Validation failures surface `code: validation_failed` with
 returns 403. wm-core gains `ListRoutesParams` / `ListGroupsParams`
 / `ListJournalParams` / `ListUnmatchedParams` plus
 `Client::list_*_with(params)` methods (no-arg variants kept as
-forwarders); CLI/MCP filter flags land in slice 19. By design
-(per `mcp-surface.md`) user management is **not** in MCP — admins
-handle it via CLI/UI.
+forwarders). Slice 19 wraps slice 18 in the CLI and MCP: `wm
+groups list`, `wm routes list`, `wm journal list` each gain the
+matching flags (`--method`, `--path-pattern`, `--since`, `--sort
+last_hit_at`, `--limit`, `--offset`, etc.) and human output prints
+a `(showing K of N; --offset M for the next page)` footer. A new
+`wm unmatched list` (admin-only) covers the host-wide unmatched
+view, with `wm unmatched show <n>` for individual records. MCP
+tools `list_groups`, `list_routes`, `list_recent_unmatched` gain
+the same arg fields; non-admin still pinned to self. The route /
+group sort comparators are promoted to `pub(crate)` in `api.rs`
+so both surfaces share them. By design (per `mcp-surface.md`)
+user management is **not** in MCP — admins handle it via
+CLI/UI.
 
 ## Where the design lives
 

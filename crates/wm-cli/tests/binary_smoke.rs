@@ -635,3 +635,226 @@ async fn wm_completion_emits_shell_specific_output() {
     // zsh scripts start with `#compdef <bin>`.
     assert!(stdout.contains("#compdef wm"), "zsh output was: {stdout}");
 }
+
+// -- Slice 19: list filter / sort / pagination flags --------------------------
+
+#[tokio::test]
+async fn wm_groups_list_filters_by_name_prefix() {
+    let h = start().await;
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+
+    for name in ["alpha", "beta"] {
+        let host_c = host.clone();
+        let token_c = token.clone();
+        let name = name.to_string();
+        let create = tokio::task::spawn_blocking(move || {
+            Command::cargo_bin("wm")
+                .expect("locate wm binary")
+                .args([
+                    "--host", &host_c, "--token", &token_c, "groups", "create", &name,
+                ])
+                .output()
+                .expect("run wm")
+        })
+        .await
+        .expect("blocking");
+        assert!(create.status.success());
+    }
+
+    let host_c = host.clone();
+    let token_c = token.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host_c,
+                "--token",
+                &token_c,
+                "--json",
+                "groups",
+                "list",
+                "--name-prefix",
+                "alp",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(
+        list.status.success(),
+        "list stderr: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list json parses");
+    let names: Vec<&str> = parsed["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["alpha"]);
+    assert_eq!(parsed["total"], 1);
+}
+
+#[tokio::test]
+async fn wm_routes_list_paginates_with_total_and_next_offset() {
+    let h = start().await;
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+
+    // Resolve the bootstrap admin's user id — we need it to set the
+    // route owner, since list_routes is owner-scoped for non-admins
+    // (we use the admin token, but the route's owner field must still
+    // be a real user id).
+    let admin_id = h
+        .state
+        .auth()
+        .authenticate(BOOTSTRAP_TOKEN)
+        .expect("auth")
+        .expect("authed")
+        .user_id;
+
+    // Create one explicit group, then three routes inside it. Use the
+    // registry API directly to avoid needing a real wasm fixture; the
+    // list_routes path doesn't care about the bytes.
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .create_group(wm_host::registry::NewGroup {
+            name: "g1".into(),
+            owner_id: admin_id.clone(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    for path in ["/v1/a", "/v1/b", "/v1/c"] {
+        let r = h
+            .state
+            .routes()
+            .registry()
+            .create_route(wm_host::registry::NewRoute {
+                group: Some(group.name.clone()),
+                methods: vec!["GET".into()],
+                path: path.into(),
+                language: "wasm".into(),
+                bindings_version: wm_host::SUPPORTED_BINDINGS_VERSION.into(),
+                compiled_wasm: vec![0, 0, 0, 0], // bytes don't matter for list
+                owner_id: admin_id.clone(),
+            })
+            .expect("create route");
+        // The REST handler refreshes the RouteTable's snapshot after
+        // create; mirror that here so `list_routes` sees the new routes.
+        h.state.routes().refresh_after_create(r);
+    }
+
+    let host_c = host.clone();
+    let token_c = token.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host", &host_c, "--token", &token_c, "--json", "routes", "list", "--limit", "2",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(
+        list.status.success(),
+        "list stderr: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list json parses");
+    assert_eq!(parsed["routes"].as_array().unwrap().len(), 2);
+    assert_eq!(parsed["total"], 3);
+    assert_eq!(parsed["next_offset"], 2);
+}
+
+#[tokio::test]
+async fn wm_unmatched_list_filters_by_path_pattern() {
+    let h = start().await;
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+
+    // Seed three unmatched entries by writing them directly to the
+    // journal. Avoids needing reqwest in wm-cli's dev-deps; the smoke
+    // test is about the CLI's --path-pattern flag, not the dispatch
+    // path that produces unmatched records.
+    for path in ["/v1/a", "/v1/b", "/v2/c"] {
+        h.state
+            .journal()
+            .record_unmatched(wm_host::journal::NewUnmatchedEntry {
+                trace_id: None,
+                request: wm_host::journal::RequestEnvelope {
+                    method: "GET".into(),
+                    path: path.into(),
+                    headers: vec![],
+                    body: vec![],
+                    body_truncated: false,
+                    original_body_size: 0,
+                },
+            })
+            .expect("record unmatched");
+    }
+
+    let host_c = host.clone();
+    let token_c = token.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host",
+                &host_c,
+                "--token",
+                &token_c,
+                "--json",
+                "unmatched",
+                "list",
+                "--path-pattern",
+                "/v1/*",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(
+        list.status.success(),
+        "list stderr: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list json parses");
+    assert_eq!(parsed["entries"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn wm_routes_list_bad_sort_exits_with_validation_error() {
+    let h = start().await;
+    let host = h.host_url.clone();
+    let token = BOOTSTRAP_TOKEN.to_string();
+
+    let host_c = host.clone();
+    let token_c = token.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("wm")
+            .expect("locate wm binary")
+            .args([
+                "--host", &host_c, "--token", &token_c, "routes", "list", "--sort", "bogus",
+            ])
+            .output()
+            .expect("run wm")
+    })
+    .await
+    .expect("blocking");
+    assert!(!list.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&list.stderr);
+    assert!(
+        stderr.contains("sort") || stderr.contains("bogus"),
+        "stderr was: {stderr}"
+    );
+}

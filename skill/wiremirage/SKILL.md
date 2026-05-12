@@ -125,6 +125,10 @@ The handler also imports a `log` interface (see `wit/wiremirage.wit`) — log li
 
 `wm journal list <group>` shows every dispatched request to that group, newest first. `wm journal show <group>/<n>` shows the full entry: request, response, handler logs, timing, errors. The journal has a 1-hour TTL; for longer-lived debugging, pull entries off and store them yourself.
 
+The list commands (`wm routes list`, `wm groups list`, `wm journal list`, `wm unmatched list`) all accept filter / sort / pagination flags — `--method`, `--path-pattern '/v1/*'`, `--status 5xx`, `--since 5m`, `--q stripe`, `--sort last_hit_at --dir desc`, `--limit 20 --offset 40`. The list output includes a `(showing K of N; --offset M for the next page)` footer when paginated. Run `wm <command> --help` for the exact flag set per command.
+
+`wm unmatched list` (admin-only) is the host-wide view of requests that arrived but didn't match any route — reach for it when debugging "my mock isn't firing". Same filter vocabulary minus `route` and `status`.
+
 For host-wide observation, the MCP server exposes two streaming tools — `wait_for_request` (block until N matching entries arrive, with timeout) and `tail_journal` (stream entries until idle or max-entries). Reach for these when a Bash-friendly polling loop would be awkward; agents with MCP access tend to find them more ergonomic than `while true; do wm journal list ...` patterns.
 
 ## Gotchas

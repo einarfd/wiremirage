@@ -20,6 +20,7 @@ use crate::models::{
     ListGroupsResponse, ListJournalParams, ListJournalResponse, ListRouteStateResponse,
     ListRoutesParams, ListRoutesResponse, ListTokensResponse, ListUnmatchedParams,
     ListUnmatchedResponse, PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
+    UnmatchedRecord,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -362,6 +363,16 @@ impl Client {
             format!("/__api/unmatched?{qs}")
         };
         self.send(Method::GET, &path, None::<&()>).await
+    }
+
+    /// Show one unmatched entry by its host-wide number. Admin-only.
+    pub async fn get_unmatched_entry(&self, number: u64) -> Result<UnmatchedRecord, ClientError> {
+        self.send(
+            Method::GET,
+            &format!("/__api/unmatched/{number}"),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn get_journal_entry(

@@ -50,6 +50,9 @@ pub enum Command {
     /// Inspect request journal entries.
     #[command(subcommand)]
     Journal(JournalCommand),
+    /// Inspect host-wide unmatched-request entries. Admin-only.
+    #[command(subcommand)]
+    Unmatched(UnmatchedCommand),
     /// Manage API tokens.
     #[command(subcommand)]
     Tokens(TokensCommand),
@@ -76,7 +79,7 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum GroupsCommand {
     /// List groups. Non-admin sees only their own; admin sees all.
-    List,
+    List(GroupsListArgs),
     /// Create a group.
     Create(CreateGroupArgs),
     /// Show one group.
@@ -161,7 +164,7 @@ pub struct UpdateGroupArgs {
 #[derive(Debug, Subcommand)]
 pub enum RoutesCommand {
     /// List routes.
-    List,
+    List(RoutesListArgs),
     /// Add a route. Pass exactly one of `--source-file` (handler
     /// source for compile via the sidecar) or `--wasm-file`
     /// (pre-built `.component.wasm`).
@@ -285,25 +288,155 @@ pub struct UpdateRouteArgs {
     pub bindings_version: String,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct GroupsListArgs {
+    /// Filter to groups owned by this user (name or ULID). Admin-only;
+    /// non-admin callers automatically see only their own groups.
+    #[arg(long)]
+    pub owner_id: Option<String>,
+    /// Match groups whose name starts with this prefix.
+    #[arg(long)]
+    pub name_prefix: Option<String>,
+    /// Free-text needle (case-insensitive substring match against name).
+    #[arg(long)]
+    pub q: Option<String>,
+    /// Lower bound on `last_activity_at`. Duration suffix (`5m`, `1h`,
+    /// `2d`, `30s`) or RFC 3339 timestamp.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Upper bound on `last_activity_at`. Same format as `--since`.
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Show only implicit groups (`true`) or only explicit (`false`).
+    /// Omit for both.
+    #[arg(long)]
+    pub implicit: Option<bool>,
+    /// Sort column: `created_at` (default), `name`, `last_activity_at`.
+    #[arg(long)]
+    pub sort: Option<String>,
+    /// Sort direction: `asc` or `desc`. Default `desc`.
+    #[arg(long)]
+    pub dir: Option<String>,
+    /// Start offset for pagination. Default 0.
+    #[arg(long)]
+    pub offset: Option<u64>,
+    /// Page size. Default 50, max 200.
+    #[arg(long)]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RoutesListArgs {
+    /// Filter to routes inside this group (name or ULID).
+    #[arg(long)]
+    pub group: Option<String>,
+    /// Filter to routes owned by this user. Admin-only.
+    #[arg(long)]
+    pub owner_id: Option<String>,
+    /// HTTP method filter (uppercase, e.g. `GET`, or `ANY`).
+    #[arg(long)]
+    pub method: Option<String>,
+    /// `*`-glob over the route's path (e.g. `/v1/*`).
+    #[arg(long)]
+    pub path_pattern: Option<String>,
+    /// Lower bound on `last_hit_at`. Duration or RFC 3339.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Upper bound on `last_hit_at`. Same format as `--since`.
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Free-text needle (case-insensitive substring match against
+    /// path or methods).
+    #[arg(long)]
+    pub q: Option<String>,
+    /// Sort column: `created_at` (default), `last_hit_at`, `hits_total`.
+    #[arg(long)]
+    pub sort: Option<String>,
+    /// Sort direction. Default `desc`.
+    #[arg(long)]
+    pub dir: Option<String>,
+    #[arg(long)]
+    pub offset: Option<u64>,
+    #[arg(long)]
+    pub limit: Option<u64>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum JournalCommand {
     /// List journal entries for a group, newest first.
-    List {
-        /// Group name or ULID.
-        group: String,
-        /// Cursor for the next page: return entries with `number <
-        /// before`. Omit to start at the newest.
-        #[arg(long)]
-        before: Option<u32>,
-        /// Max entries per page. Capped at 100 host-side.
-        #[arg(long)]
-        limit: Option<usize>,
-    },
+    List(JournalListArgs),
     /// Show one journal entry.
     Show {
         /// Entry slug — `{group}/journal/{n}` or `{group}/{n}`.
         slug: String,
     },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct JournalListArgs {
+    /// Group name or ULID.
+    pub group: String,
+    /// Cursor for the next page: return entries with `number <
+    /// before`. Omit to start at the newest.
+    #[arg(long)]
+    pub before: Option<u32>,
+    /// Max entries per page. Capped at 100 host-side.
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Restrict to a single route within the group. Slug form
+    /// `{group}/{n}` (the path-scoped group must match).
+    #[arg(long)]
+    pub route: Option<String>,
+    /// HTTP method filter.
+    #[arg(long)]
+    pub method: Option<String>,
+    /// `*`-glob over the entry's `matched_pattern`.
+    #[arg(long)]
+    pub path_pattern: Option<String>,
+    /// Status filter: `2xx` / `3xx` / `4xx` / `5xx` or an exact code
+    /// like `503`.
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Lower bound on `created_at`. Duration or RFC 3339.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Upper bound on `created_at`. Same format as `--since`.
+    #[arg(long)]
+    pub until: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UnmatchedCommand {
+    /// List unmatched-request entries. Admin-only host-side.
+    List(UnmatchedListArgs),
+    /// Show one unmatched entry by its journal number.
+    Show {
+        /// Entry number (host-wide, monotonic).
+        number: u64,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UnmatchedListArgs {
+    /// Cursor for the next page: return entries with `number <
+    /// before`. Omit to start at the newest.
+    #[arg(long)]
+    pub before: Option<u64>,
+    /// Max entries per page. Capped at 100 host-side.
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// HTTP method filter.
+    #[arg(long)]
+    pub method: Option<String>,
+    /// `*`-glob over the request path.
+    #[arg(long)]
+    pub path_pattern: Option<String>,
+    /// Lower bound on `created_at`.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Upper bound on `created_at`.
+    #[arg(long)]
+    pub until: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

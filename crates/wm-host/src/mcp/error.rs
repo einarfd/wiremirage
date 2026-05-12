@@ -9,6 +9,7 @@
 use rmcp::ErrorData;
 use serde_json::json;
 
+use crate::api_filters::FilterParseError;
 use crate::journal::JournalError;
 use crate::registry::RegistryError;
 
@@ -47,6 +48,23 @@ pub fn map_registry_error(err: RegistryError) -> ErrorData {
         RegistryError::Storage(e) => internal(format!("storage: {e}")),
         RegistryError::Malformed(msg) => internal(format!("malformed registry record: {msg}")),
     }
+}
+
+pub fn map_filter_error(err: FilterParseError) -> ErrorData {
+    // Mirror the REST surface: `owner_id` from a non-admin caller is a
+    // forbidden, everything else is validation_failed. Surface the
+    // parameter name in the structured `data` payload so MCP clients
+    // (and humans) can pinpoint the offending field.
+    let parameter = err.parameter();
+    let code = if matches!(err, FilterParseError::OwnerNonAdmin) {
+        "forbidden"
+    } else {
+        "validation_failed"
+    };
+    ErrorData::invalid_params(
+        err.to_string(),
+        Some(json!({ "code": code, "parameter": parameter })),
+    )
 }
 
 pub fn map_journal_error(err: JournalError) -> ErrorData {

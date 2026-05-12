@@ -607,13 +607,13 @@ async fn list_routes(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RouteSortKey {
+pub(crate) enum RouteSortKey {
     CreatedAt,
     LastHitAt,
     HitsTotal,
 }
 
-fn parse_route_sort(raw: Option<&str>) -> Result<RouteSortKey, FilterParseError> {
+pub(crate) fn parse_route_sort(raw: Option<&str>) -> Result<RouteSortKey, FilterParseError> {
     match raw {
         None | Some("created_at") => Ok(RouteSortKey::CreatedAt),
         Some("last_hit_at") => Ok(RouteSortKey::LastHitAt),
@@ -622,7 +622,7 @@ fn parse_route_sort(raw: Option<&str>) -> Result<RouteSortKey, FilterParseError>
     }
 }
 
-fn sort_routes(routes: &mut [Route], key: RouteSortKey, dir: SortDir) {
+pub(crate) fn sort_routes(routes: &mut [Route], key: RouteSortKey, dir: SortDir) {
     routes.sort_by(|a, b| {
         let ord = match key {
             RouteSortKey::CreatedAt => a.created_at.cmp(&b.created_at),
@@ -644,7 +644,7 @@ fn sort_routes(routes: &mut [Route], key: RouteSortKey, dir: SortDir) {
     });
 }
 
-fn route_matches_since_until(
+pub(crate) fn route_matches_since_until(
     r: &Route,
     since: Option<chrono::DateTime<chrono::Utc>>,
     until: Option<chrono::DateTime<chrono::Utc>>,
@@ -670,7 +670,7 @@ fn route_matches_since_until(
     true
 }
 
-fn route_matches_q(r: &Route, needle: &str) -> bool {
+pub(crate) fn route_matches_q(r: &Route, needle: &str) -> bool {
     let n = needle.to_ascii_lowercase();
     r.path.to_ascii_lowercase().contains(&n)
         || r.methods
@@ -678,7 +678,7 @@ fn route_matches_q(r: &Route, needle: &str) -> bool {
             .any(|m| m.to_ascii_lowercase().contains(&n))
 }
 
-fn parse_pagination(
+pub(crate) fn parse_pagination(
     offset: Option<u64>,
     limit: Option<u64>,
 ) -> Result<(u64, u64), FilterParseError> {
@@ -689,6 +689,23 @@ fn parse_pagination(
     }
     let lim = raw_limit.min(MAX_LIST_LIMIT);
     Ok((off, lim))
+}
+
+/// `crate::mcp` reuses the offset slicing.
+pub(crate) fn slice_for_page<T: Clone>(
+    items: &[T],
+    offset: u64,
+    limit: u64,
+) -> (Vec<T>, u64, Option<u64>) {
+    let total = items.len() as u64;
+    let start = offset.min(total) as usize;
+    let end = (start as u64 + limit).min(total) as usize;
+    let next_offset = if (end as u64) < total {
+        Some(end as u64)
+    } else {
+        None
+    };
+    (items[start..end].to_vec(), total, next_offset)
 }
 
 async fn get_route(
@@ -1633,13 +1650,13 @@ async fn list_groups(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GroupSortKey {
+pub(crate) enum GroupSortKey {
     CreatedAt,
     Name,
     LastActivityAt,
 }
 
-fn parse_group_sort(raw: Option<&str>) -> Result<GroupSortKey, FilterParseError> {
+pub(crate) fn parse_group_sort(raw: Option<&str>) -> Result<GroupSortKey, FilterParseError> {
     match raw {
         None | Some("created_at") => Ok(GroupSortKey::CreatedAt),
         Some("name") => Ok(GroupSortKey::Name),
@@ -1648,7 +1665,7 @@ fn parse_group_sort(raw: Option<&str>) -> Result<GroupSortKey, FilterParseError>
     }
 }
 
-fn sort_groups(groups: &mut [Group], key: GroupSortKey, dir: SortDir) {
+pub(crate) fn sort_groups(groups: &mut [Group], key: GroupSortKey, dir: SortDir) {
     groups.sort_by(|a, b| {
         let ord = match key {
             GroupSortKey::CreatedAt => a.created_at.cmp(&b.created_at),
@@ -1667,7 +1684,7 @@ fn sort_groups(groups: &mut [Group], key: GroupSortKey, dir: SortDir) {
     });
 }
 
-fn group_matches_since_until(
+pub(crate) fn group_matches_since_until(
     g: &Group,
     since: Option<chrono::DateTime<chrono::Utc>>,
     until: Option<chrono::DateTime<chrono::Utc>>,

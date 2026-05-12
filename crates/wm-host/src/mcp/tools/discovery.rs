@@ -11,9 +11,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::api_filters::{glob_match, parse_since, validate_method};
 use crate::journal::UnmatchedCursor;
 use crate::mcp::context::auth_from;
-use crate::mcp::error::{forbidden, map_journal_error, map_registry_error, validation};
+use crate::mcp::error::{
+    forbidden, map_filter_error, map_journal_error, map_registry_error, validation,
+};
 use crate::mcp::server::WmMcpServer;
 use crate::mcp::tools::routes::RouteRecord;
 use crate::registry::render_slug;
@@ -54,11 +57,27 @@ pub struct GroupSummary {
 pub struct ListRecentUnmatchedArgs {
     /// Max entries to return. Capped at 100 host-side. Defaults to 20.
     pub limit: Option<u32>,
+    /// Cursor for the next page: return entries with `number < before`.
+    /// Omit to start at the newest.
+    pub before: Option<u64>,
+    /// HTTP method filter (uppercase, e.g. `GET`).
+    pub method: Option<String>,
+    /// `*`-glob over the request path.
+    pub path_pattern: Option<String>,
+    /// Lower bound on `created_at`. Duration suffix (`5m`, `1h`, `2d`,
+    /// `30s`) or RFC 3339 timestamp.
+    pub since: Option<String>,
+    /// Upper bound on `created_at`.
+    pub until: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListRecentUnmatchedResult {
     pub entries: Vec<UnmatchedSummary>,
+    /// Cursor for the next page; absent when the returned page
+    /// reached the oldest entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -180,7 +199,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "list_recent_unmatched",
-        description = "List recent unmatched-request entries — requests that arrived at the host but didn't match any route. Use this when the SUT seems to be hitting WireMirage but the mock isn't firing. Admin-only."
+        description = "List recent unmatched-request entries — requests that arrived at the host but didn't match any route. Use this when the SUT seems to be hitting WireMirage but the mock isn't firing. Cursor-paginated (`before` / `limit`). Optional filters: `method`, `path_pattern` glob, `since`/`until` against `created_at`. Admin-only."
     )]
     pub async fn list_recent_unmatched(
         &self,
@@ -191,8 +210,29 @@ impl WmMcpServer {
         if !auth.is_admin {
             return Err(forbidden("admin-only"));
         }
+        let method = args
+            .method
+            .as_deref()
+            .map(validate_method)
+            .transpose()
+            .map_err(map_filter_error)?;
+        let now = chrono::Utc::now();
+        let since = args
+            .since
+            .as_deref()
+            .map(|s| parse_since(s, now))
+            .transpose()
+            .map_err(map_filter_error)?;
+        let until = args
+            .until
+            .as_deref()
+            .map(|s| parse_since(s, now))
+            .transpose()
+            .map_err(map_filter_error)?;
+        let path_pattern = args.path_pattern.clone();
+
         let cursor = UnmatchedCursor {
-            before: None,
+            before: args.before,
             limit: args.limit.unwrap_or(20) as usize,
         };
         let records = self
@@ -200,8 +240,38 @@ impl WmMcpServer {
             .journal()
             .list_unmatched(cursor)
             .map_err(map_journal_error)?;
-        let entries = records
+        let next_before = records.last().filter(|e| e.number > 1).map(|e| e.number);
+
+        let any_filter =
+            method.is_some() || path_pattern.is_some() || since.is_some() || until.is_some();
+        let entries: Vec<UnmatchedSummary> = records
             .into_iter()
+            .filter(|r| {
+                if !any_filter {
+                    return true;
+                }
+                if let Some(m) = method.as_deref()
+                    && !m.eq_ignore_ascii_case(&r.request.method)
+                {
+                    return false;
+                }
+                if let Some(p) = path_pattern.as_deref()
+                    && !glob_match(p, &r.request.path)
+                {
+                    return false;
+                }
+                if let Some(s) = since
+                    && r.created_at < s
+                {
+                    return false;
+                }
+                if let Some(u) = until
+                    && r.created_at > u
+                {
+                    return false;
+                }
+                true
+            })
             .map(|r| UnmatchedSummary {
                 number: r.number,
                 method: r.request.method,
@@ -210,7 +280,10 @@ impl WmMcpServer {
                 trace_id: r.trace_id,
             })
             .collect();
-        Ok(Json(ListRecentUnmatchedResult { entries }))
+        Ok(Json(ListRecentUnmatchedResult {
+            entries,
+            next_before,
+        }))
     }
 
     #[tool(

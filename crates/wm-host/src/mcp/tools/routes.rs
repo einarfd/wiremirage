@@ -13,6 +13,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::SUPPORTED_BINDINGS_VERSION;
+use crate::api::{
+    parse_pagination, parse_route_sort, route_matches_q, route_matches_since_until, slice_for_page,
+    sort_routes,
+};
+use crate::api_filters::{FilterParseError, SortDir, glob_match, parse_since, validate_method};
 use crate::mcp::context::{auth_from, ensure_route_owner_or_admin};
 use crate::mcp::error::{forbidden, map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
@@ -68,13 +73,43 @@ pub struct ListRoutesArgs {
     /// Optional group filter (name or ULID).
     pub group: Option<String>,
     /// When `true`, return only routes the caller owns. Defaults to
-    /// `false` (admin sees all; non-admin sees their own regardless).
+    /// `false` for admin (sees all) and `true` for non-admin (sees own).
     pub mine: Option<bool>,
+    /// Restrict to routes owned by this user. Admin-only — non-admin
+    /// callers must use `mine: true` or omit. Takes precedence over
+    /// `mine` when both are set.
+    pub owner_id: Option<String>,
+    /// HTTP method filter (uppercase, e.g. `GET`, or `ANY`).
+    pub method: Option<String>,
+    /// `*`-glob over the route's defined path (e.g. `/v1/*`).
+    pub path_pattern: Option<String>,
+    /// Lower bound on `last_hit_at`. Duration suffix (`5m`, `1h`,
+    /// `2d`, `30s`) or RFC 3339 timestamp.
+    pub since: Option<String>,
+    /// Upper bound on `last_hit_at`.
+    pub until: Option<String>,
+    /// Free-text needle (case-insensitive substring) against path
+    /// and methods.
+    pub q: Option<String>,
+    /// Sort column: `created_at` (default), `last_hit_at`, `hits_total`.
+    pub sort: Option<String>,
+    /// Sort direction: `asc` or `desc`. Default `desc`.
+    pub dir: Option<String>,
+    /// Page offset (default 0).
+    pub offset: Option<u64>,
+    /// Page size (default 50, max 200).
+    pub limit: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListRoutesResult {
     pub routes: Vec<RouteRecord>,
+    /// Total matches after filters, before pagination.
+    pub total: u64,
+    /// Pass back as `offset` to fetch the next page; absent when the
+    /// returned page reached the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -146,7 +181,7 @@ fn parse_slug(slug: &str) -> Result<(String, u32), ErrorData> {
 impl WmMcpServer {
     #[tool(
         name = "list_routes",
-        description = "List routes. Filter by group, by owner (--mine), or both. Non-admin sees only their own; admin sees all unless `mine: true`."
+        description = "List routes with optional filters / sort / pagination. Filter by `group`, owner (`mine: true` or admin-only `owner_id`), `method`, `path_pattern` glob, `since`/`until` against `last_hit_at`, free-text `q`. Sort by `created_at` (default), `last_hit_at`, or `hits_total`. Paginate with `offset` + `limit` (default 50, max 200). Response carries `total` + `next_offset`. Non-admin always sees only their own routes."
     )]
     pub async fn list_routes(
         &self,
@@ -154,25 +189,93 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListRoutesArgs>,
     ) -> Result<Json<ListRoutesResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let only_mine = args.mine.unwrap_or(!auth.is_admin);
-        let mut routes = if only_mine {
-            self.state
-                .routes()
-                .registry()
-                .list_routes_by_owner(&auth.user_id)
-                .map_err(map_registry_error)?
+
+        // Parse + validate everything up-front so a bad filter fails
+        // before we touch storage.
+        let (offset, limit) = parse_pagination(args.offset, args.limit)
+            .map_err(crate::mcp::error::map_filter_error)?;
+        let dir = SortDir::parse(args.dir.as_deref(), SortDir::Desc)
+            .map_err(crate::mcp::error::map_filter_error)?;
+        let sort_key =
+            parse_route_sort(args.sort.as_deref()).map_err(crate::mcp::error::map_filter_error)?;
+        let method = args
+            .method
+            .as_deref()
+            .map(validate_method)
+            .transpose()
+            .map_err(crate::mcp::error::map_filter_error)?;
+        let now = chrono::Utc::now();
+        let since = args
+            .since
+            .as_deref()
+            .map(|s| parse_since(s, now))
+            .transpose()
+            .map_err(crate::mcp::error::map_filter_error)?;
+        let until = args
+            .until
+            .as_deref()
+            .map(|s| parse_since(s, now))
+            .transpose()
+            .map_err(crate::mcp::error::map_filter_error)?;
+
+        // Owner scoping: admins choose any owner / all-owners / mine;
+        // non-admins are pinned to themselves regardless of `mine`.
+        let owner_filter: Option<String> = if auth.is_admin {
+            if let Some(o) = args.owner_id.clone() {
+                Some(o)
+            } else if args.mine.unwrap_or(false) {
+                Some(auth.user_id.clone())
+            } else {
+                None
+            }
         } else {
-            self.state
-                .routes()
-                .registry()
-                .list_routes()
-                .map_err(map_registry_error)?
+            if args.owner_id.is_some() {
+                return Err(crate::mcp::error::map_filter_error(
+                    FilterParseError::OwnerNonAdmin,
+                ));
+            }
+            Some(auth.user_id.clone())
         };
-        if let Some(group_ref) = args.group.as_deref() {
-            routes.retain(|r| r.group_id == group_ref || r.group_name == group_ref);
-        }
+
+        let all = self
+            .state
+            .routes()
+            .registry()
+            .list_routes()
+            .map_err(map_registry_error)?;
+
+        let mut filtered: Vec<Route> = all
+            .into_iter()
+            .filter(|r| match owner_filter.as_deref() {
+                Some(o) => r.owner_id == o,
+                None => true,
+            })
+            .filter(|r| match args.group.as_deref() {
+                Some(g) => r.group_name == g || r.group_id == g,
+                None => true,
+            })
+            .filter(|r| match method.as_deref() {
+                Some(m) => r.methods.iter().any(|rm| rm == m),
+                None => true,
+            })
+            .filter(|r| match args.path_pattern.as_deref() {
+                Some(p) => glob_match(p, &r.path),
+                None => true,
+            })
+            .filter(|r| route_matches_since_until(r, since, until))
+            .filter(|r| match args.q.as_deref() {
+                Some(needle) => route_matches_q(r, needle),
+                None => true,
+            })
+            .collect();
+
+        sort_routes(&mut filtered, sort_key, dir);
+
+        let (page, total, next_offset) = slice_for_page(&filtered, offset, limit);
         Ok(Json(ListRoutesResult {
-            routes: routes.iter().map(RouteRecord::from).collect(),
+            routes: page.iter().map(RouteRecord::from).collect(),
+            total,
+            next_offset,
         }))
     }
 

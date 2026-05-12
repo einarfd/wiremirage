@@ -423,6 +423,67 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## CLI + MCP list flags (slice 19)
+
+Wraps slice 18 in the user-facing surfaces: the `wm` CLI list
+commands gain filter/sort/pagination flags, MCP tools gain the same
+arg fields, and `wm unmatched list` lands as a new top-level
+command (admin-only).
+
+- **CLI:**
+  - `wm routes list` — `--group`, `--owner-id`, `--method`,
+    `--path-pattern`, `--since`, `--until`, `--q`, `--sort`,
+    `--dir`, `--offset`, `--limit`.
+  - `wm groups list` — `--owner-id`, `--name-prefix`, `--q`,
+    `--since`, `--until`, `--implicit`, `--sort`, `--dir`,
+    `--offset`, `--limit`.
+  - `wm journal list <group>` — keeps `--before` / `--limit`,
+    adds `--route`, `--method`, `--path-pattern`, `--status`,
+    `--since`, `--until`.
+  - `wm unmatched list` (new) — admin-only, cursor + same filters
+    (no `route`, no `status`). `wm unmatched show <n>` reads one
+    entry.
+- **Human output:** the list renderers now show `LAST_HIT` /
+  `HITS` on routes and `LAST_ACTIVITY` / `IMPLICIT` on groups
+  (replacing the slice-9 columns since they're more useful than
+  `LANG` / `SLIDING`). Paginated output ends with
+  `(showing K of N; --offset M for the next page)`. JSON output
+  carries the response verbatim (already includes `total` /
+  `next_offset`).
+- **wm-core:** flags map 1:1 onto `ListGroupsParams`,
+  `ListRoutesParams`, `ListJournalParams`, `ListUnmatchedParams`
+  via small `*_list_params` helpers in `wm-cli::handlers`.
+  `Client::get_unmatched_entry` is new (admin-only). `UnmatchedRecord`
+  was already added in slice 18.
+- **MCP:**
+  - `list_routes` — args extended with `owner_id`, `method`,
+    `path_pattern`, `since`, `until`, `q`, `sort`, `dir`, `offset`,
+    `limit`; result carries `total` + `next_offset`. Existing
+    `group` + `mine` kept; non-admin still pinned to self.
+  - `list_groups` — args extended with the full set
+    (`name_prefix`, `q`, `owner_id`, `since`, `until`, `implicit`,
+    `sort`, `dir`, `offset`, `limit`); result carries `total` +
+    `next_offset`.
+  - `list_recent_unmatched` — args extended with `before` (cursor),
+    `method`, `path_pattern`, `since`, `until`; result carries
+    `next_before`.
+  - All three call the shared filter primitives via
+    `crate::api::{...}` and `crate::api_filters::{...}`. Filter
+    parse failures map to `ErrorData` via the new
+    `map_filter_error` helper in `mcp/error.rs` — the structured
+    `data` payload carries `{ code, parameter }` mirroring the
+    REST error shape.
+- **Shared helpers refactor:** the route / group sort comparators
+  + `parse_pagination` + `slice_for_page` in `api.rs` were
+  promoted to `pub(crate)` so the MCP tools reuse them — same
+  semantics on both surfaces (notably: never-hit routes sort to
+  the bottom of an activity sort, regardless of direction).
+- **Tests:** four new CLI smoke tests (`binary_smoke.rs`) cover
+  `--name-prefix`, `--limit`/`--offset`, `wm unmatched list
+  --path-pattern`, and the bad-sort exit. Three new MCP e2e tests
+  (`mcp_e2e.rs`) cover the same shape over MCP. Tier-2 + unit
+  coverage from slice 18 carries over unchanged.
+
 ## List filter / sort / pagination (slice 18)
 
 Adds a shared filter + sort + offset-pagination vocabulary across the

@@ -17,12 +17,14 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use wm_core::{
     Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateUserBody,
-    DryRunBody, PatchGroupBody, PatchRouteBody, PatchUserBody,
+    DryRunBody, ListGroupsParams, ListJournalParams, ListRoutesParams, ListUnmatchedParams,
+    PatchGroupBody, PatchRouteBody, PatchUserBody,
 };
 
 use crate::cli::{
-    AddRouteArgs, Cli, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, JournalCommand,
-    RoutesCommand, TestRouteArgs, TokensCommand, UpdateRouteArgs, UpdateUserArgs, UsersCommand,
+    AddRouteArgs, Cli, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, GroupsListArgs,
+    JournalCommand, JournalListArgs, RoutesCommand, RoutesListArgs, TestRouteArgs, TokensCommand,
+    UnmatchedCommand, UnmatchedListArgs, UpdateRouteArgs, UpdateUserArgs, UsersCommand,
 };
 use crate::format::{self, Format};
 
@@ -64,6 +66,7 @@ pub async fn dispatch(args: Cli) -> anyhow::Result<ExitCode> {
         Command::Groups(cmd) => handle_groups(&client, cmd, format).await,
         Command::Routes(cmd) => handle_routes(&client, cmd, format).await,
         Command::Journal(cmd) => handle_journal(&client, cmd, format).await,
+        Command::Unmatched(cmd) => handle_unmatched(&client, cmd, format).await,
         Command::Tokens(cmd) => handle_tokens(&client, cmd, format).await,
         Command::Users(cmd) => handle_users(&client, cmd, format).await,
         Command::Match { method, path } => handle_match(&client, &method, &path, format).await,
@@ -160,8 +163,9 @@ async fn handle_groups(
     format: Format,
 ) -> Result<(), ClientError> {
     match cmd {
-        GroupsCommand::List => {
-            let list = client.list_groups().await?;
+        GroupsCommand::List(args) => {
+            let params = groups_list_params(args);
+            let list = client.list_groups_with(&params).await?;
             format::render_group_list(&list, format);
         }
         GroupsCommand::Create(args) => {
@@ -247,8 +251,9 @@ async fn handle_routes(
     format: Format,
 ) -> Result<(), ClientError> {
     match cmd {
-        RoutesCommand::List => {
-            let list = client.list_routes().await?;
+        RoutesCommand::List(args) => {
+            let params = routes_list_params(args);
+            let list = client.list_routes_with(&params).await?;
             format::render_route_list(&list, format);
         }
         RoutesCommand::Add(args) => {
@@ -479,12 +484,10 @@ async fn handle_journal(
     format: Format,
 ) -> Result<(), ClientError> {
     match cmd {
-        JournalCommand::List {
-            group,
-            before,
-            limit,
-        } => {
-            let list = client.list_journal(&group, before, limit).await?;
+        JournalCommand::List(args) => {
+            let group = args.group.clone();
+            let params = journal_list_params(args);
+            let list = client.list_journal_with(&group, &params).await?;
             format::render_journal_list(&list, format);
         }
         JournalCommand::Show { slug } => {
@@ -513,6 +516,82 @@ fn parse_journal_slug(slug: &str) -> Result<(&str, u32), ClientError> {
         ClientError::Validation(format!("journal slug 'group/N': N must be u32 ({e})"))
     })?;
     Ok((group, n))
+}
+
+fn groups_list_params(args: GroupsListArgs) -> ListGroupsParams {
+    ListGroupsParams {
+        owner_id: args.owner_id,
+        name_prefix: args.name_prefix,
+        q: args.q,
+        since: args.since,
+        until: args.until,
+        implicit: args.implicit,
+        sort: args.sort,
+        dir: args.dir,
+        offset: args.offset,
+        limit: args.limit,
+    }
+}
+
+fn routes_list_params(args: RoutesListArgs) -> ListRoutesParams {
+    ListRoutesParams {
+        group: args.group,
+        owner_id: args.owner_id,
+        method: args.method,
+        path_pattern: args.path_pattern,
+        since: args.since,
+        until: args.until,
+        q: args.q,
+        sort: args.sort,
+        dir: args.dir,
+        offset: args.offset,
+        limit: args.limit,
+    }
+}
+
+fn journal_list_params(args: JournalListArgs) -> ListJournalParams {
+    ListJournalParams {
+        before: args.before,
+        limit: args.limit,
+        route: args.route,
+        method: args.method,
+        path_pattern: args.path_pattern,
+        status: args.status,
+        since: args.since,
+        until: args.until,
+    }
+}
+
+fn unmatched_list_params(args: UnmatchedListArgs) -> ListUnmatchedParams {
+    ListUnmatchedParams {
+        before: args.before,
+        limit: args.limit,
+        method: args.method,
+        path_pattern: args.path_pattern,
+        since: args.since,
+        until: args.until,
+    }
+}
+
+// -- Unmatched ----------------------------------------------------------------
+
+async fn handle_unmatched(
+    client: &Client,
+    cmd: UnmatchedCommand,
+    format: Format,
+) -> Result<(), ClientError> {
+    match cmd {
+        UnmatchedCommand::List(args) => {
+            let params = unmatched_list_params(args);
+            let list = client.list_unmatched(&params).await?;
+            format::render_unmatched_list(&list, format);
+        }
+        UnmatchedCommand::Show { number } => {
+            let entry = client.get_unmatched_entry(number).await?;
+            format::render_unmatched_entry(&entry, format);
+        }
+    }
+    Ok(())
 }
 
 // -- Tokens ------------------------------------------------------------------
