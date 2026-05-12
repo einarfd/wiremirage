@@ -47,6 +47,14 @@ pub struct GroupRecord {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ListGroupsResponse {
     pub groups: Vec<GroupRecord>,
+    /// Total matches after filters, before pagination. Pre-slice-18
+    /// hosts omit this field; we default to 0 in that case.
+    #[serde(default)]
+    pub total: u64,
+    /// Pass back as `?offset=` to fetch the next page; `None` when
+    /// the returned page reached the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -98,6 +106,10 @@ pub struct GroupRef {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ListRoutesResponse {
     pub routes: Vec<RouteRecord>,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -248,6 +260,182 @@ pub struct ResourceUsage {
 pub struct ListJournalResponse {
     pub entries: Vec<JournalRecord>,
     pub next_before: Option<u32>,
+}
+
+// -- Unmatched ---------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UnmatchedRecord {
+    pub id: String,
+    pub number: u64,
+    pub trace_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub request: RequestEnvelope,
+    /// Routes that nearly matched (e.g. same path, different method).
+    /// Empty when no near-misses were detected.
+    #[serde(default)]
+    pub near_misses: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListUnmatchedResponse {
+    pub entries: Vec<UnmatchedRecord>,
+    pub next_before: Option<u64>,
+}
+
+// -- List parameters ---------------------------------------------------------
+//
+// One struct per list endpoint, all `Default` + builder-friendly. The
+// `to_query_string` helpers serialize to `key=value&...` with URL
+// encoding. Empty params produce an empty string (no `?` prefix); the
+// caller adds the prefix only when the result is non-empty.
+
+#[derive(Debug, Clone, Default)]
+pub struct ListGroupsParams {
+    pub owner_id: Option<String>,
+    pub name_prefix: Option<String>,
+    pub q: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub implicit: Option<bool>,
+    pub sort: Option<String>,
+    pub dir: Option<String>,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+impl ListGroupsParams {
+    pub fn to_query_string(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        push_opt(&mut parts, "owner_id", self.owner_id.as_deref());
+        push_opt(&mut parts, "name_prefix", self.name_prefix.as_deref());
+        push_opt(&mut parts, "q", self.q.as_deref());
+        push_opt(&mut parts, "since", self.since.as_deref());
+        push_opt(&mut parts, "until", self.until.as_deref());
+        if let Some(b) = self.implicit {
+            parts.push(format!("implicit={b}"));
+        }
+        push_opt(&mut parts, "sort", self.sort.as_deref());
+        push_opt(&mut parts, "dir", self.dir.as_deref());
+        push_opt_num(&mut parts, "offset", self.offset);
+        push_opt_num(&mut parts, "limit", self.limit);
+        parts.join("&")
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListRoutesParams {
+    pub group: Option<String>,
+    pub owner_id: Option<String>,
+    pub method: Option<String>,
+    pub path_pattern: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub q: Option<String>,
+    pub sort: Option<String>,
+    pub dir: Option<String>,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+impl ListRoutesParams {
+    pub fn to_query_string(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        push_opt(&mut parts, "group", self.group.as_deref());
+        push_opt(&mut parts, "owner_id", self.owner_id.as_deref());
+        push_opt(&mut parts, "method", self.method.as_deref());
+        push_opt(&mut parts, "path_pattern", self.path_pattern.as_deref());
+        push_opt(&mut parts, "since", self.since.as_deref());
+        push_opt(&mut parts, "until", self.until.as_deref());
+        push_opt(&mut parts, "q", self.q.as_deref());
+        push_opt(&mut parts, "sort", self.sort.as_deref());
+        push_opt(&mut parts, "dir", self.dir.as_deref());
+        push_opt_num(&mut parts, "offset", self.offset);
+        push_opt_num(&mut parts, "limit", self.limit);
+        parts.join("&")
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListJournalParams {
+    pub before: Option<u32>,
+    pub limit: Option<usize>,
+    pub route: Option<String>,
+    pub method: Option<String>,
+    pub path_pattern: Option<String>,
+    pub status: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+impl ListJournalParams {
+    pub fn to_query_string(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        push_opt_num(&mut parts, "before", self.before.map(|n| n as u64));
+        push_opt_num(&mut parts, "limit", self.limit.map(|n| n as u64));
+        push_opt(&mut parts, "route", self.route.as_deref());
+        push_opt(&mut parts, "method", self.method.as_deref());
+        push_opt(&mut parts, "path_pattern", self.path_pattern.as_deref());
+        push_opt(&mut parts, "status", self.status.as_deref());
+        push_opt(&mut parts, "since", self.since.as_deref());
+        push_opt(&mut parts, "until", self.until.as_deref());
+        parts.join("&")
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListUnmatchedParams {
+    pub before: Option<u64>,
+    pub limit: Option<usize>,
+    pub method: Option<String>,
+    pub path_pattern: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+impl ListUnmatchedParams {
+    pub fn to_query_string(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        push_opt_num(&mut parts, "before", self.before);
+        push_opt_num(&mut parts, "limit", self.limit.map(|n| n as u64));
+        push_opt(&mut parts, "method", self.method.as_deref());
+        push_opt(&mut parts, "path_pattern", self.path_pattern.as_deref());
+        push_opt(&mut parts, "since", self.since.as_deref());
+        push_opt(&mut parts, "until", self.until.as_deref());
+        parts.join("&")
+    }
+}
+
+fn push_opt(parts: &mut Vec<String>, key: &str, value: Option<&str>) {
+    if let Some(v) = value {
+        parts.push(format!("{key}={}", urlencode_param(v)));
+    }
+}
+
+fn push_opt_num<N: std::fmt::Display>(parts: &mut Vec<String>, key: &str, value: Option<N>) {
+    if let Some(v) = value {
+        parts.push(format!("{key}={v}"));
+    }
+}
+
+/// Minimal percent-encoding for query-string values — covers the
+/// characters that would otherwise break parsing (`&`, `=`, ` `, `+`,
+/// `?`, `#`) plus non-ASCII bytes. We deliberately don't reach for
+/// `urlencoding` or `url` to keep wm-core's dependency list lean —
+/// the alphabet of filter values is well-controlled.
+fn urlencode_param(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b'*' => {
+                out.push(*b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 // -- Tokens ------------------------------------------------------------------

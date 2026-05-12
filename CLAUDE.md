@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–17 landed. The WIT contract is live at
+**Status:** slices 1–18 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -75,8 +75,26 @@ Bumped by the dispatch path on every matched request (two `HSET`s
 + one `HINCRBY` per match; best-effort like the journal write).
 The fields surface in REST / wm-core / MCP responses; sort-by-
 activity on list endpoints is the next slice (REST list-surface).
-By design (per `mcp-surface.md`) user management is **not** in
-MCP — admins handle it via CLI/UI.
+Slice 18 added the REST list-surface: shared filter/sort/pagination
+across `GET /__api/routes`, `/__api/groups`, `/__api/journal/{group}`,
+and `/__api/unmatched`. Routes/groups use offset pagination
+(`?offset=&limit=`, response `{ ..., total, next_offset }`) with
+sort columns `created_at` / `last_hit_at` / `hits_total` for routes
+and `created_at` / `name` / `last_activity_at` for groups.
+Journal/unmatched keep cursor pagination and gain `method`,
+`path_pattern` (a `*`-glob), `status`, `since` / `until`, plus
+`route` on the journal endpoint. The shared parsing lives in
+`crates/wm-host/src/api_filters.rs`; the shared matcher is
+`JournalFilter` (extended with `since` / `until`, path_pattern now
+glob-matched, used by SSE tail + journal list + unmatched list).
+Validation failures surface `code: validation_failed` with
+`diagnostics: ["parameter=<name>"]`; a non-admin passing `owner_id`
+returns 403. wm-core gains `ListRoutesParams` / `ListGroupsParams`
+/ `ListJournalParams` / `ListUnmatchedParams` plus
+`Client::list_*_with(params)` methods (no-arg variants kept as
+forwarders); CLI/MCP filter flags land in slice 19. By design
+(per `mcp-surface.md`) user management is **not** in MCP — admins
+handle it via CLI/UI.
 
 ## Where the design lives
 

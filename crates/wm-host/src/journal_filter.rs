@@ -1,6 +1,8 @@
-//! Live-tail filters shared between `GET /__api/journal/tail` and
-//! the MCP streaming tools. Keeps filter parsing + matching in one
-//! place so the SSE handler and the MCP tools agree on semantics.
+//! Filters shared between `GET /__api/journal/tail` (SSE), the MCP
+//! streaming tools, and the paginated list endpoints
+//! `GET /__api/journal/{group}` + `GET /__api/unmatched`. Keeps
+//! filter parsing + matching in one place so the SSE handler, the
+//! MCP tools, and the list endpoints agree on semantics.
 //!
 //! Filters are conjunctive: every supplied field must match.
 //! Unmatched-request events skip filters that reference per-route
@@ -8,6 +10,9 @@
 //! sense without a matched route, so requiring them implicitly hides
 //! the unmatched stream.
 
+use chrono::{DateTime, Utc};
+
+use crate::api_filters::glob_match;
 use crate::journal::{JournalEvent, JournalRecord, UnmatchedRecord};
 
 /// Filter applied to journal events. All fields are optional; an
@@ -24,13 +29,23 @@ pub struct JournalFilter {
     /// HTTP method. Matches both handled (`request.method`) and
     /// unmatched events.
     pub method: Option<String>,
-    /// Exact match against the matched pattern (handled events) —
-    /// the route's path template, e.g. `/v1/charges/{id}`. Unmatched
-    /// events have no matched pattern; setting this hides them.
+    /// Glob match. For handled events, matches against the route's
+    /// `matched_pattern` (e.g. `/v1/charges/{id}`). For unmatched
+    /// events, matches against the request path. `*` is the wildcard
+    /// (matches any chars including `/`). Without `*` the match is
+    /// exact, so the slice-11 callers that passed literal patterns
+    /// continue to work unchanged.
     pub path_pattern: Option<String>,
     /// Status filter. `2xx` / `5xx` ranges or specific code.
     /// Unmatched events have no status; setting this hides them.
     pub status: Option<StatusFilter>,
+    /// Lower-bound timestamp filter — events strictly older than
+    /// this are excluded. Set by the paginated list endpoints; not
+    /// meaningful on the SSE tail.
+    pub since: Option<DateTime<Utc>>,
+    /// Upper-bound timestamp filter — events strictly newer than
+    /// this are excluded. Same scope as `since`.
+    pub until: Option<DateTime<Utc>>,
 }
 
 /// `{group}/{n}` slug after parsing.
@@ -119,7 +134,7 @@ impl JournalFilter {
         }
     }
 
-    fn matches_handled(&self, r: &JournalRecord) -> bool {
+    pub fn matches_handled(&self, r: &JournalRecord) -> bool {
         if let Some(group) = &self.group
             && r.group_name != *group
             && r.group_id != *group
@@ -140,7 +155,7 @@ impl JournalFilter {
             return false;
         }
         if let Some(pat) = &self.path_pattern
-            && r.matched_pattern != *pat
+            && !glob_match(pat, &r.matched_pattern)
         {
             return false;
         }
@@ -149,12 +164,22 @@ impl JournalFilter {
         {
             return false;
         }
+        if let Some(since) = self.since
+            && r.created_at < since
+        {
+            return false;
+        }
+        if let Some(until) = self.until
+            && r.created_at > until
+        {
+            return false;
+        }
         true
     }
 
-    fn matches_unmatched(&self, u: &UnmatchedRecord) -> bool {
+    pub fn matches_unmatched(&self, u: &UnmatchedRecord) -> bool {
         // Per-route filters implicitly hide unmatched events.
-        if self.route.is_some() || self.path_pattern.is_some() || self.status.is_some() {
+        if self.route.is_some() || self.status.is_some() {
             return false;
         }
         if self.group.is_some() {
@@ -163,6 +188,24 @@ impl JournalFilter {
         }
         if let Some(method) = &self.method
             && !method.eq_ignore_ascii_case(&u.request.method)
+        {
+            return false;
+        }
+        // `path_pattern` on unmatched events matches against the
+        // request path (there's no route pattern to compare against).
+        // Documented in rest-api.md's `GET /__api/unmatched` section.
+        if let Some(pat) = &self.path_pattern
+            && !glob_match(pat, &u.request.path)
+        {
+            return false;
+        }
+        if let Some(since) = self.since
+            && u.created_at < since
+        {
+            return false;
+        }
+        if let Some(until) = self.until
+            && u.created_at > until
         {
             return false;
         }
@@ -279,17 +322,67 @@ mod tests {
     }
 
     #[test]
-    fn path_pattern_is_exact_match_against_matched_pattern() {
+    fn path_pattern_literal_matches_only_matched_pattern() {
         let f = JournalFilter {
             path_pattern: Some("/v1/charges/{id}".into()),
             ..Default::default()
         };
+        // No wildcard in the pattern → exact match against the
+        // route's matched_pattern.
         assert!(f.matches(&handled("g", 1, "GET", "/v1/charges/{id}", 200)));
-        // The path the request actually came in on does not satisfy
-        // the filter — only the matched pattern does.
         assert!(!f.matches(&handled("g", 1, "GET", "/v1/charges", 200)));
-        // path_pattern hides unmatched
-        assert!(!f.matches(&unmatched("GET", "/v1/charges/{id}")));
+        // Unmatched events: path_pattern matches against the
+        // request path. The request path here is the literal
+        // `/v1/charges/{id}` (an attacker probing for the template)
+        // so the filter matches.
+        assert!(f.matches(&unmatched("GET", "/v1/charges/{id}")));
+        // A different unmatched path doesn't match.
+        assert!(!f.matches(&unmatched("GET", "/v2/charges")));
+    }
+
+    #[test]
+    fn path_pattern_glob_matches_wildcards() {
+        let f = JournalFilter {
+            path_pattern: Some("/v1/*".into()),
+            ..Default::default()
+        };
+        assert!(f.matches(&handled("g", 1, "GET", "/v1/charges", 200)));
+        assert!(f.matches(&handled("g", 1, "GET", "/v1/charges/{id}", 200)));
+        assert!(!f.matches(&handled("g", 1, "GET", "/v2/charges", 200)));
+        // Unmatched: same glob semantics, against the request path.
+        assert!(f.matches(&unmatched("GET", "/v1/anything")));
+        assert!(!f.matches(&unmatched("GET", "/v2/anything")));
+    }
+
+    #[test]
+    fn since_until_window_bounds_records() {
+        use chrono::TimeZone;
+        let base = chrono::Utc.with_ymd_and_hms(2026, 5, 12, 8, 0, 0).unwrap();
+        let mut record = match handled("g", 1, "POST", "/x", 200) {
+            JournalEvent::Handled(r) => r,
+            _ => unreachable!(),
+        };
+        record.created_at = base;
+        let event = JournalEvent::Handled(record);
+
+        let in_window = JournalFilter {
+            since: Some(base - chrono::Duration::seconds(1)),
+            until: Some(base + chrono::Duration::seconds(1)),
+            ..Default::default()
+        };
+        assert!(in_window.matches(&event));
+
+        let too_old = JournalFilter {
+            since: Some(base + chrono::Duration::seconds(1)),
+            ..Default::default()
+        };
+        assert!(!too_old.matches(&event));
+
+        let too_new = JournalFilter {
+            until: Some(base - chrono::Duration::seconds(1)),
+            ..Default::default()
+        };
+        assert!(!too_new.matches(&event));
     }
 
     #[test]

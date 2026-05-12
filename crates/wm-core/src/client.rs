@@ -16,9 +16,10 @@ use thiserror::Error;
 
 use crate::models::{
     ApiErrorBody, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateTokenResponse,
-    DryRunBody, DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse,
-    ListJournalResponse, ListRouteStateResponse, ListRoutesResponse, ListTokensResponse,
-    PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
+    DryRunBody, DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsParams,
+    ListGroupsResponse, ListJournalParams, ListJournalResponse, ListRouteStateResponse,
+    ListRoutesParams, ListRoutesResponse, ListTokensResponse, ListUnmatchedParams,
+    ListUnmatchedResponse, PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -143,7 +144,23 @@ impl Client {
     // -- Groups ---------------------------------------------------------
 
     pub async fn list_groups(&self) -> Result<ListGroupsResponse, ClientError> {
-        self.send(Method::GET, "/__api/groups", None::<&()>).await
+        self.list_groups_with(&ListGroupsParams::default()).await
+    }
+
+    /// List groups with explicit filter / sort / pagination params.
+    /// All fields on `params` are optional; an all-`None` params behaves
+    /// identically to `list_groups()`.
+    pub async fn list_groups_with(
+        &self,
+        params: &ListGroupsParams,
+    ) -> Result<ListGroupsResponse, ClientError> {
+        let qs = params.to_query_string();
+        let path = if qs.is_empty() {
+            "/__api/groups".to_string()
+        } else {
+            format!("/__api/groups?{qs}")
+        };
+        self.send(Method::GET, &path, None::<&()>).await
     }
 
     pub async fn create_group(&self, body: &CreateGroupBody) -> Result<GroupRecord, ClientError> {
@@ -208,7 +225,20 @@ impl Client {
     // -- Routes ---------------------------------------------------------
 
     pub async fn list_routes(&self) -> Result<ListRoutesResponse, ClientError> {
-        self.send(Method::GET, "/__api/routes", None::<&()>).await
+        self.list_routes_with(&ListRoutesParams::default()).await
+    }
+
+    pub async fn list_routes_with(
+        &self,
+        params: &ListRoutesParams,
+    ) -> Result<ListRoutesResponse, ClientError> {
+        let qs = params.to_query_string();
+        let path = if qs.is_empty() {
+            "/__api/routes".to_string()
+        } else {
+            format!("/__api/routes?{qs}")
+        };
+        self.send(Method::GET, &path, None::<&()>).await
     }
 
     pub async fn create_route(&self, body: &CreateRouteBody) -> Result<RouteRecord, ClientError> {
@@ -295,18 +325,42 @@ impl Client {
         before: Option<u32>,
         limit: Option<usize>,
     ) -> Result<ListJournalResponse, ClientError> {
-        let mut path = format!("/__api/journal/{}", urlencode(group));
-        let mut params: Vec<String> = Vec::new();
-        if let Some(b) = before {
-            params.push(format!("before={b}"));
-        }
-        if let Some(l) = limit {
-            params.push(format!("limit={l}"));
-        }
-        if !params.is_empty() {
-            path.push('?');
-            path.push_str(&params.join("&"));
-        }
+        self.list_journal_with(
+            group,
+            &ListJournalParams {
+                before,
+                limit,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn list_journal_with(
+        &self,
+        group: &str,
+        params: &ListJournalParams,
+    ) -> Result<ListJournalResponse, ClientError> {
+        let qs = params.to_query_string();
+        let path = if qs.is_empty() {
+            format!("/__api/journal/{}", urlencode(group))
+        } else {
+            format!("/__api/journal/{}?{qs}", urlencode(group))
+        };
+        self.send(Method::GET, &path, None::<&()>).await
+    }
+
+    /// List unmatched-request entries. Admin-only on the host side.
+    pub async fn list_unmatched(
+        &self,
+        params: &ListUnmatchedParams,
+    ) -> Result<ListUnmatchedResponse, ClientError> {
+        let qs = params.to_query_string();
+        let path = if qs.is_empty() {
+            "/__api/unmatched".to_string()
+        } else {
+            format!("/__api/unmatched?{qs}")
+        };
         self.send(Method::GET, &path, None::<&()>).await
     }
 

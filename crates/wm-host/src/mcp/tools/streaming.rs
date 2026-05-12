@@ -120,6 +120,8 @@ fn build_filter(
         method: method.map(String::from),
         path_pattern: path_pattern.map(String::from),
         status,
+        since: None,
+        until: None,
     })
 }
 

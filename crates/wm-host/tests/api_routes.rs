@@ -2605,3 +2605,327 @@ async fn match_probe_rejects_bad_path() {
         .expect("get");
     assert_eq!(resp.status().as_u16(), 400);
 }
+
+// -- Slice 18: list filtering / sort / pagination -----------------------------
+
+async fn make_three_routes(h: &Harness) {
+    // Three routes across two explicit groups so we can exercise the
+    // `group` filter as well as multi-method matching. Wasm bytes
+    // shared — the bytes don't matter for list queries. Groups have to
+    // be created up-front because POST /__api/routes treats a named
+    // group as a reference (404 if missing); only the no-group form
+    // creates an implicit group.
+    for name in ["alpha", "beta"] {
+        let r = h
+            .client
+            .post(h.url("/__api/groups"))
+            .json(&json!({ "name": name }))
+            .send()
+            .await
+            .expect("post group");
+        assert_eq!(r.status().as_u16(), 201, "{name} group create");
+    }
+
+    let body = |group: &str, methods: serde_json::Value, path: &str| {
+        json!({
+            "group": group,
+            "methods": methods,
+            "path": path,
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        })
+    };
+    let r = h
+        .create_route_body(body("alpha", json!(["GET"]), "/v1/a"))
+        .await;
+    assert_eq!(
+        r.status().as_u16(),
+        201,
+        "alpha/GET create: {}",
+        r.text().await.unwrap()
+    );
+    let r = h
+        .create_route_body(body("alpha", json!(["POST"]), "/v1/b"))
+        .await;
+    assert_eq!(
+        r.status().as_u16(),
+        201,
+        "alpha/POST create: {}",
+        r.text().await.unwrap()
+    );
+    let r = h
+        .create_route_body(body("beta", json!(["GET", "POST"]), "/v2/c"))
+        .await;
+    assert_eq!(
+        r.status().as_u16(),
+        201,
+        "beta create: {}",
+        r.text().await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn list_routes_filters_by_group_and_method() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await;
+
+    // Filter to group alpha only.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes?group=alpha"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["routes"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 2);
+    assert!(body["next_offset"].is_null());
+
+    // Filter to method POST only — matches `alpha` route 2 and
+    // the multi-method `beta` route.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes?method=POST"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["routes"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 2);
+
+    // Combine: group=alpha + method=POST → one route.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes?group=alpha&method=POST"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["routes"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn list_routes_glob_pattern() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await;
+
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes?path_pattern=/v1/*"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["routes"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 2);
+}
+
+#[tokio::test]
+async fn list_routes_pagination_returns_next_offset() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await;
+
+    // Page 1: limit 2, expect next_offset=2 and total=3.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes?limit=2"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["routes"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["next_offset"], 2);
+
+    // Page 2: starting at offset 2, one entry remains, no next_offset.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes?limit=2&offset=2"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["routes"].as_array().unwrap().len(), 1);
+    assert_eq!(body["total"], 3);
+    assert!(body["next_offset"].is_null());
+}
+
+#[tokio::test]
+async fn list_routes_rejects_bad_sort_with_parameter_diagnostic() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .get(h.url("/__api/routes?sort=bogus"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "validation_failed");
+    let diags = body["error"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics");
+    assert!(diags.iter().any(|d| d == "parameter=sort"));
+}
+
+#[tokio::test]
+async fn list_routes_owner_id_filter_is_admin_only() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await;
+    let (_other_id, other_client) = h.provision_user("eve", false);
+
+    // Non-admin caller passing `owner_id` → 403 with parameter diagnostic.
+    let resp = other_client
+        .get(h.url("/__api/routes?owner_id=somebody"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let diags = body["error"]["diagnostics"].as_array().unwrap();
+    assert!(diags.iter().any(|d| d == "parameter=owner_id"));
+}
+
+#[tokio::test]
+async fn list_routes_non_admin_only_sees_own() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await;
+    let (_other_id, other_client) = h.provision_user("eve", false);
+
+    // Eve owns nothing, so her list is empty.
+    let body: serde_json::Value = other_client
+        .get(h.url("/__api/routes"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["routes"].as_array().unwrap().len(), 0);
+    assert_eq!(body["total"], 0);
+}
+
+#[tokio::test]
+async fn list_groups_filters_by_name_prefix() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await; // creates implicit groups `alpha` and `beta`
+
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/groups?name_prefix=alp"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let groups = body["groups"].as_array().expect("groups");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["name"], "alpha");
+    assert_eq!(body["total"], 1);
+}
+
+#[tokio::test]
+async fn list_groups_sort_by_name_asc() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await;
+
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/groups?sort=name&dir=asc"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let groups = body["groups"].as_array().expect("groups");
+    let names: Vec<&str> = groups.iter().map(|g| g["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["alpha", "beta"]);
+}
+
+#[tokio::test]
+async fn list_journal_filters_by_method_and_status() {
+    let h = Harness::start().await;
+    make_three_routes(&h).await;
+
+    // Drive some traffic: GET /v1/a, POST /v1/b, GET /v2/c.
+    for (method, path) in [("GET", "/v1/a"), ("POST", "/v1/b"), ("GET", "/v2/c")] {
+        let mut req = h.client.request(
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
+            h.url(path),
+        );
+        if method == "POST" {
+            req = req.body("{}");
+        }
+        let resp = req.send().await.expect("call");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    // Filter alpha's journal by GET method → just one entry.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/journal/alpha?method=GET"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+
+    // Filter by status 2xx — all three are echo successes, so alpha
+    // shows both entries.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/journal/alpha?status=2xx"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+
+    // Bad status filter surfaces with parameter diagnostic.
+    let resp = h
+        .client
+        .get(h.url("/__api/journal/alpha?status=bogus"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn list_unmatched_filters_by_path_pattern() {
+    let h = Harness::start().await;
+    // No routes registered → every request lands in unmatched.
+    for path in ["/v1/a", "/v1/b", "/v2/c"] {
+        let _ = h.client.get(h.url(path)).send().await.expect("call");
+    }
+
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/unmatched?path_pattern=/v1/*"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+}

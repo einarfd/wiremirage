@@ -26,8 +26,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+use crate::api_filters::{FilterParseError, SortDir, glob_match, parse_since, validate_method};
 use crate::auth::{AuthContext, AuthError, Token, User};
 use crate::journal::{JournalError, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedRecord};
+use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::registry::{
     Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, RouteStateEntry, render_slug,
 };
@@ -175,7 +177,49 @@ impl From<&Route> for RouteResponse {
 #[derive(Debug, Serialize)]
 struct ListRoutesResponse {
     routes: Vec<RouteResponse>,
+    /// Total matches after filters, before pagination. Lets the UI
+    /// render "1–20 of 137" without re-asking.
+    total: u64,
+    /// Pass back as `?offset=` to fetch the next page; absent when
+    /// the returned page reached the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<u64>,
 }
+
+#[derive(Debug, Deserialize, Default)]
+struct RoutesListQuery {
+    /// Group name or ULID. Filters to routes in that group only.
+    group: Option<String>,
+    /// Restrict to routes owned by `owner_id`. Admin-only — non-admin
+    /// callers may not impersonate-list. Non-admin callers always see
+    /// their own routes only and may not pass this parameter.
+    owner_id: Option<String>,
+    /// HTTP method filter (uppercase, e.g. `GET`, or `ANY`).
+    method: Option<String>,
+    /// `*`-glob over the route's defined `path` (e.g. `/v1/*`).
+    path_pattern: Option<String>,
+    /// Lower bound on `last_hit_at`. Duration suffix (`5m`, `1h`,
+    /// `2d`, `30s`) or RFC 3339 timestamp. Routes that have never
+    /// been hit are excluded.
+    since: Option<String>,
+    /// Upper bound on `last_hit_at`.
+    until: Option<String>,
+    /// Free-text needle. Substring-matched (case-insensitive) against
+    /// the route's path and methods.
+    q: Option<String>,
+    /// Sort column: `created_at` (default), `last_hit_at`, `hits_total`.
+    sort: Option<String>,
+    /// Sort direction: `asc` or `desc`. Default `desc`.
+    dir: Option<String>,
+    offset: Option<u64>,
+    limit: Option<u64>,
+}
+
+/// Default + max for `?limit=` on the list endpoints. Kept here
+/// rather than in `api_filters` because the cap is policy-level,
+/// not parser-level.
+const DEFAULT_LIST_LIMIT: u64 = 50;
+const MAX_LIST_LIMIT: u64 = 200;
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -268,6 +312,31 @@ impl ApiError {
             code: "internal_error",
             message: msg.into(),
             diagnostics: Vec::new(),
+        }
+    }
+}
+
+impl From<FilterParseError> for ApiError {
+    fn from(err: FilterParseError) -> Self {
+        let status = if matches!(err, FilterParseError::OwnerNonAdmin) {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        let code = if matches!(err, FilterParseError::OwnerNonAdmin) {
+            "forbidden"
+        } else {
+            "validation_failed"
+        };
+        let parameter = err.parameter();
+        Self {
+            status,
+            code,
+            message: err.to_string(),
+            // Surface the offending parameter name as a diagnostic so
+            // clients (CLI, web UI) can pinpoint the bad field without
+            // string-parsing the message.
+            diagnostics: vec![format!("parameter={parameter}")],
         }
     }
 }
@@ -457,11 +526,169 @@ async fn create_route(
 
 async fn list_routes(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
+    Query(q): Query<RoutesListQuery>,
 ) -> Result<Json<ListRoutesResponse>, ApiError> {
+    let now = chrono::Utc::now();
+    let (offset, limit) = parse_pagination(q.offset, q.limit)?;
+    let dir = SortDir::parse(q.dir.as_deref(), SortDir::Desc)?;
+    let sort_key = parse_route_sort(q.sort.as_deref())?;
+    let method = q.method.as_deref().map(validate_method).transpose()?;
+    let since = q
+        .since
+        .as_deref()
+        .map(|s| parse_since(s, now))
+        .transpose()?;
+    let until = q
+        .until
+        .as_deref()
+        .map(|s| parse_since(s, now))
+        .transpose()?;
+
+    // Non-admin scoping: refuse owner_id, always restrict to self.
+    // Admin: owner_id is optional; absent means "all owners".
+    let owner_filter: Option<String> = if auth.is_admin {
+        q.owner_id.clone()
+    } else {
+        if q.owner_id.is_some() {
+            return Err(FilterParseError::OwnerNonAdmin.into());
+        }
+        Some(auth.user_id.clone())
+    };
+
+    // Start from a snapshot — small data set; in-memory filter/sort
+    // is cheap and avoids racing the RouteTable's cache.
     let snapshot = state.routes().snapshot();
-    let routes = snapshot.iter().map(RouteResponse::from).collect();
-    Ok(Json(ListRoutesResponse { routes }))
+    let mut filtered: Vec<Route> = snapshot
+        .iter()
+        .filter(|r| match owner_filter.as_deref() {
+            Some(owner) => r.owner_id == owner,
+            None => true,
+        })
+        .filter(|r| match q.group.as_deref() {
+            Some(g) => r.group_name == g || r.group_id == g,
+            None => true,
+        })
+        .filter(|r| match method.as_deref() {
+            Some(m) => r.methods.iter().any(|rm| rm == m),
+            None => true,
+        })
+        .filter(|r| match q.path_pattern.as_deref() {
+            Some(p) => glob_match(p, &r.path),
+            None => true,
+        })
+        .filter(|r| route_matches_since_until(r, since, until))
+        .filter(|r| match q.q.as_deref() {
+            Some(needle) => route_matches_q(r, needle),
+            None => true,
+        })
+        .cloned()
+        .collect();
+
+    sort_routes(&mut filtered, sort_key, dir);
+
+    let total = filtered.len() as u64;
+    let start = offset.min(total) as usize;
+    let end = (start as u64 + limit).min(total) as usize;
+    let next_offset = if (end as u64) < total {
+        Some(end as u64)
+    } else {
+        None
+    };
+    let page = filtered[start..end]
+        .iter()
+        .map(RouteResponse::from)
+        .collect();
+    Ok(Json(ListRoutesResponse {
+        routes: page,
+        total,
+        next_offset,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteSortKey {
+    CreatedAt,
+    LastHitAt,
+    HitsTotal,
+}
+
+fn parse_route_sort(raw: Option<&str>) -> Result<RouteSortKey, FilterParseError> {
+    match raw {
+        None | Some("created_at") => Ok(RouteSortKey::CreatedAt),
+        Some("last_hit_at") => Ok(RouteSortKey::LastHitAt),
+        Some("hits_total") => Ok(RouteSortKey::HitsTotal),
+        Some(other) => Err(FilterParseError::BadSort(other.to_string())),
+    }
+}
+
+fn sort_routes(routes: &mut [Route], key: RouteSortKey, dir: SortDir) {
+    routes.sort_by(|a, b| {
+        let ord = match key {
+            RouteSortKey::CreatedAt => a.created_at.cmp(&b.created_at),
+            // None sorts last in desc, first in asc — i.e. never-hit
+            // routes always appear at the bottom of an activity sort.
+            // That matches what a user expects: "show me the busy ones."
+            RouteSortKey::LastHitAt => match (a.last_hit_at, b.last_hit_at) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (None, None) => std::cmp::Ordering::Equal,
+            },
+            RouteSortKey::HitsTotal => a.hits_total.cmp(&b.hits_total),
+        };
+        match dir {
+            SortDir::Asc => ord,
+            SortDir::Desc => ord.reverse(),
+        }
+    });
+}
+
+fn route_matches_since_until(
+    r: &Route,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    if since.is_none() && until.is_none() {
+        return true;
+    }
+    let Some(ts) = r.last_hit_at else {
+        // Never-hit routes have no activity timestamp to compare. A
+        // bounded window inherently excludes them.
+        return false;
+    };
+    if let Some(s) = since
+        && ts < s
+    {
+        return false;
+    }
+    if let Some(u) = until
+        && ts > u
+    {
+        return false;
+    }
+    true
+}
+
+fn route_matches_q(r: &Route, needle: &str) -> bool {
+    let n = needle.to_ascii_lowercase();
+    r.path.to_ascii_lowercase().contains(&n)
+        || r.methods
+            .iter()
+            .any(|m| m.to_ascii_lowercase().contains(&n))
+}
+
+fn parse_pagination(
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Result<(u64, u64), FilterParseError> {
+    let off = offset.unwrap_or(0);
+    let raw_limit = limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if raw_limit == 0 {
+        return Err(FilterParseError::BadLimit("0".into()));
+    }
+    let lim = raw_limit.min(MAX_LIST_LIMIT);
+    Ok((off, lim))
 }
 
 async fn get_route(
@@ -983,12 +1210,28 @@ struct JournalListQuery {
     /// Cap on entries returned. The journal clamps to its own max
     /// (currently 100). `None` defaults to that cap.
     limit: Option<usize>,
+    /// Route slug `{group}/{n}` — restrict to a single route within
+    /// the path-scoped group.
+    route: Option<String>,
+    method: Option<String>,
+    /// `*`-glob over the entry's `matched_pattern`.
+    path_pattern: Option<String>,
+    /// `2xx` / `3xx` / `4xx` / `5xx` or a specific code like `503`.
+    status: Option<String>,
+    /// Lower bound on `created_at`. Duration suffix or RFC 3339.
+    since: Option<String>,
+    until: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct UnmatchedListQuery {
     before: Option<u64>,
     limit: Option<usize>,
+    method: Option<String>,
+    /// `*`-glob over the requested path (no matched route exists).
+    path_pattern: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1042,16 +1285,89 @@ async fn list_journal(
             "must be an admin or own a route in this group to read its journal",
         ));
     }
+    let filter = build_journal_filter_from_query(
+        Some(&group_record.name),
+        q.route.as_deref(),
+        q.method.as_deref(),
+        q.path_pattern.as_deref(),
+        q.status.as_deref(),
+        q.since.as_deref(),
+        q.until.as_deref(),
+    )?;
+    let any_filter = filter.route.is_some()
+        || filter.method.is_some()
+        || filter.path_pattern.is_some()
+        || filter.status.is_some()
+        || filter.since.is_some()
+        || filter.until.is_some();
+
     let cursor = ListCursor {
         before: q.before,
         limit: q.limit.unwrap_or(100),
     };
     let entries = state.journal().list_for_group(&group_record.id, cursor)?;
     let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+    // Filter the page in memory. Cursor-based pagination is over the
+    // unfiltered stream — `next_before` always reflects the oldest
+    // raw entry seen so the caller can keep walking even when their
+    // filters reject everything on a page.
+    let entries = if any_filter {
+        entries
+            .into_iter()
+            .filter(|r| filter.matches_handled(r))
+            .collect()
+    } else {
+        entries
+    };
     Ok(Json(ListJournalResponse {
         entries,
         next_before,
     }))
+}
+
+/// Build a `JournalFilter` from the REST query parameters. `group`
+/// is supplied separately because the journal endpoint is
+/// path-scoped — we want the group filter to track the URL, not the
+/// `?group=` query parameter.
+fn build_journal_filter_from_query(
+    group: Option<&str>,
+    route: Option<&str>,
+    method: Option<&str>,
+    path_pattern: Option<&str>,
+    status: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<JournalFilter, ApiError> {
+    let now = chrono::Utc::now();
+    let route = route
+        .map(RouteSlug::parse)
+        .transpose()
+        .map_err(|e| ApiError::validation(format!("invalid `route`: {e}")))?;
+    let status = status
+        .map(StatusFilter::parse)
+        .transpose()
+        .map_err(|e| ApiError::validation(format!("invalid `status`: {e}")))?;
+    let method = method
+        .map(validate_method)
+        .transpose()
+        .map_err(ApiError::from)?;
+    let since = since
+        .map(|s| parse_since(s, now))
+        .transpose()
+        .map_err(ApiError::from)?;
+    let until = until
+        .map(|s| parse_since(s, now))
+        .transpose()
+        .map_err(ApiError::from)?;
+    Ok(JournalFilter {
+        group: group.map(String::from),
+        route,
+        method,
+        path_pattern: path_pattern.map(String::from),
+        status,
+        since,
+        until,
+    })
 }
 
 async fn get_journal_entry(
@@ -1079,12 +1395,34 @@ async fn list_unmatched(
     Query(q): Query<UnmatchedListQuery>,
 ) -> Result<Json<ListUnmatchedResponse>, ApiError> {
     require_admin(&auth)?;
+    let filter = build_journal_filter_from_query(
+        None,
+        None,
+        q.method.as_deref(),
+        q.path_pattern.as_deref(),
+        None,
+        q.since.as_deref(),
+        q.until.as_deref(),
+    )?;
+    let any_filter = filter.method.is_some()
+        || filter.path_pattern.is_some()
+        || filter.since.is_some()
+        || filter.until.is_some();
+
     let cursor = UnmatchedCursor {
         before: q.before,
         limit: q.limit.unwrap_or(100),
     };
     let entries = state.journal().list_unmatched(cursor)?;
     let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+    let entries = if any_filter {
+        entries
+            .into_iter()
+            .filter(|r| filter.matches_unmatched(r))
+            .collect()
+    } else {
+        entries
+    };
     Ok(Json(ListUnmatchedResponse {
         entries,
         next_before,
@@ -1156,6 +1494,32 @@ impl From<&Group> for GroupResponse {
 #[derive(Debug, Serialize)]
 struct ListGroupsResponse {
     groups: Vec<GroupResponse>,
+    total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GroupsListQuery {
+    /// Restrict to groups owned by `owner_id`. Admin-only; non-admin
+    /// callers always see only their own groups.
+    owner_id: Option<String>,
+    /// Prefix match on group name (exact-case).
+    name_prefix: Option<String>,
+    /// Free-text needle. Substring-matched (case-insensitive) against
+    /// the group's name.
+    q: Option<String>,
+    /// Lower bound on `last_activity_at`.
+    since: Option<String>,
+    until: Option<String>,
+    /// `true` → only implicit groups; `false` → only explicit. Omit
+    /// for both.
+    implicit: Option<bool>,
+    /// Sort column: `created_at` (default), `name`, `last_activity_at`.
+    sort: Option<String>,
+    dir: Option<String>,
+    offset: Option<u64>,
+    limit: Option<u64>,
 }
 
 /// Fetch a group by reference (name or ULID), and require the caller
@@ -1194,17 +1558,137 @@ async fn create_group(
 async fn list_groups(
     State(state): State<AppState>,
     auth: AuthContext,
+    Query(q): Query<GroupsListQuery>,
 ) -> Result<Json<ListGroupsResponse>, ApiError> {
-    let groups = if auth.is_admin {
-        state.routes().registry().list_groups()?
+    let now = chrono::Utc::now();
+    let (offset, limit) = parse_pagination(q.offset, q.limit)?;
+    let dir = SortDir::parse(q.dir.as_deref(), SortDir::Desc)?;
+    let sort_key = parse_group_sort(q.sort.as_deref())?;
+    let since = q
+        .since
+        .as_deref()
+        .map(|s| parse_since(s, now))
+        .transpose()?;
+    let until = q
+        .until
+        .as_deref()
+        .map(|s| parse_since(s, now))
+        .transpose()?;
+
+    // Same owner-scoping rule as list_routes: non-admins may not name
+    // someone else and always see their own groups.
+    let owner_filter: Option<String> = if auth.is_admin {
+        q.owner_id.clone()
     } else {
-        state
-            .routes()
-            .registry()
-            .list_groups_by_owner(&auth.user_id)?
+        if q.owner_id.is_some() {
+            return Err(FilterParseError::OwnerNonAdmin.into());
+        }
+        Some(auth.user_id.clone())
     };
-    let groups = groups.iter().map(GroupResponse::from).collect();
-    Ok(Json(ListGroupsResponse { groups }))
+
+    let groups = match owner_filter.as_deref() {
+        Some(owner) => state.routes().registry().list_groups_by_owner(owner)?,
+        None => state.routes().registry().list_groups()?,
+    };
+
+    let mut filtered: Vec<Group> = groups
+        .into_iter()
+        .filter(|g| match q.name_prefix.as_deref() {
+            Some(p) => g.name.starts_with(p),
+            None => true,
+        })
+        .filter(|g| match q.q.as_deref() {
+            Some(needle) => g
+                .name
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase()),
+            None => true,
+        })
+        .filter(|g| group_matches_since_until(g, since, until))
+        .filter(|g| match q.implicit {
+            Some(want) => g.implicit == want,
+            None => true,
+        })
+        .collect();
+
+    sort_groups(&mut filtered, sort_key, dir);
+
+    let total = filtered.len() as u64;
+    let start = offset.min(total) as usize;
+    let end = (start as u64 + limit).min(total) as usize;
+    let next_offset = if (end as u64) < total {
+        Some(end as u64)
+    } else {
+        None
+    };
+    let page = filtered[start..end]
+        .iter()
+        .map(GroupResponse::from)
+        .collect();
+    Ok(Json(ListGroupsResponse {
+        groups: page,
+        total,
+        next_offset,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupSortKey {
+    CreatedAt,
+    Name,
+    LastActivityAt,
+}
+
+fn parse_group_sort(raw: Option<&str>) -> Result<GroupSortKey, FilterParseError> {
+    match raw {
+        None | Some("created_at") => Ok(GroupSortKey::CreatedAt),
+        Some("name") => Ok(GroupSortKey::Name),
+        Some("last_activity_at") => Ok(GroupSortKey::LastActivityAt),
+        Some(other) => Err(FilterParseError::BadSort(other.to_string())),
+    }
+}
+
+fn sort_groups(groups: &mut [Group], key: GroupSortKey, dir: SortDir) {
+    groups.sort_by(|a, b| {
+        let ord = match key {
+            GroupSortKey::CreatedAt => a.created_at.cmp(&b.created_at),
+            GroupSortKey::Name => a.name.cmp(&b.name),
+            GroupSortKey::LastActivityAt => match (a.last_activity_at, b.last_activity_at) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (None, None) => std::cmp::Ordering::Equal,
+            },
+        };
+        match dir {
+            SortDir::Asc => ord,
+            SortDir::Desc => ord.reverse(),
+        }
+    });
+}
+
+fn group_matches_since_until(
+    g: &Group,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    if since.is_none() && until.is_none() {
+        return true;
+    }
+    let Some(ts) = g.last_activity_at else {
+        return false;
+    };
+    if let Some(s) = since
+        && ts < s
+    {
+        return false;
+    }
+    if let Some(u) = until
+        && ts > u
+    {
+        return false;
+    }
+    true
 }
 
 async fn get_group(
@@ -1334,6 +1818,8 @@ async fn tail_journal(
         method: q.method.clone(),
         path_pattern: q.path_pattern.clone(),
         status,
+        since: None,
+        until: None,
     };
 
     // Auth gate. When a group is supplied, owner-or-admin on that

@@ -423,6 +423,76 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## List filter / sort / pagination (slice 18)
+
+Adds a shared filter + sort + offset-pagination vocabulary across the
+four REST list endpoints (`GET /__api/routes`, `/__api/groups`,
+`/__api/journal/{group}`, `/__api/unmatched`). Implementation is
+in-memory at the handler layer — small data sets, cheap to filter
+and sort each request.
+
+- **Parsing module:** `crates/wm-host/src/api_filters.rs` owns
+  `glob_match` (`*`-wildcards over a flat string), `parse_since`
+  (RFC 3339 or duration suffix `30s`/`5m`/`1h`/`2d`), `SortDir`,
+  `validate_method`, and `FilterParseError` (with a
+  `parameter()` accessor naming the offending query field).
+- **Routes endpoint:** `?group=`, `?owner_id=` (admin-only —
+  non-admin caller gets 403 with `parameter=owner_id` diagnostic),
+  `?method=`, `?path_pattern=` (glob over the defined path),
+  `?since=` / `?until=` (against `last_hit_at`; routes with no hit
+  are excluded when either is set), `?q=` (substring needle over
+  path + methods), `?sort=created_at|last_hit_at|hits_total`,
+  `?dir=asc|desc`, `?offset=`, `?limit=`. Response now
+  `{ routes, total, next_offset }`.
+- **Groups endpoint:** `?owner_id=` (same admin rule),
+  `?name_prefix=`, `?q=`, `?since=` / `?until=` (against
+  `last_activity_at`), `?implicit=true|false`,
+  `?sort=created_at|name|last_activity_at`, `?dir=`, `?offset=`,
+  `?limit=`. Response now `{ groups, total, next_offset }`.
+- **Journal endpoint:** keeps cursor pagination (`?before=`,
+  `?limit=`) and adds `?route=`, `?method=`, `?path_pattern=`
+  (glob over `matched_pattern`), `?status=` (`2xx`/`3xx`/`4xx`/`5xx`
+  or exact code), `?since=` / `?until=` (against `created_at`).
+  Filter is applied **after** the cursor page is fetched, so
+  `next_before` always reflects the oldest *raw* entry on the page
+  — the caller can keep walking even when filters reject everything.
+- **Unmatched endpoint:** cursor + `?method=`, `?path_pattern=`
+  (glob over request path), `?since=` / `?until=`. Admin-only.
+- **Shared `JournalFilter`:** extended with `since` / `until`;
+  `matches_handled` / `matches_unmatched` made `pub` so api.rs can
+  reuse them. Path-pattern matching switched from exact-match to
+  `glob_match`; the unmatched path-pattern now matches against the
+  request path rather than implicitly hiding unmatched events.
+  This also affects the SSE tail endpoint — the rules are now the
+  same everywhere.
+- **Pagination defaults:** routes/groups → offset/limit with
+  `DEFAULT_LIST_LIMIT = 50`, `MAX_LIST_LIMIT = 200`. `limit=0`
+  → 400 with `parameter=limit`.
+- **Error shape:** validation failures from filter parsing return
+  `code: validation_failed`, with `diagnostics: ["parameter=<name>"]`
+  so clients can pinpoint the bad field without scraping the
+  message. The single exception is `owner_id` from a non-admin →
+  `code: forbidden`, status 403.
+- **wm-core models:** new `ListGroupsParams`, `ListRoutesParams`,
+  `ListJournalParams`, `ListUnmatchedParams` (each with
+  `to_query_string()` doing minimal percent-encoding) and matching
+  `Client::list_*_with(params)` methods. `Client::list_unmatched`
+  and `UnmatchedRecord` are new to wm-core. The existing
+  `list_journal(group, before, limit)` and no-arg `list_groups` /
+  `list_routes` stay as forwarders to the params-taking variants
+  for backward compat. `ListGroupsResponse` / `ListRoutesResponse`
+  gained `total` + `next_offset` with `#[serde(default)]` so a
+  pre-slice-18 host that doesn't emit them still decodes.
+- **CLI / MCP wiring:** *not in this slice* — lands as slice 19.
+  For now `wm` only consumes the unfiltered no-arg path.
+- **Tests:** unit tests in `api_filters` cover glob, since-parsing,
+  sort-dir, method validation, parameter routing. Tier-2 tests in
+  `api_routes.rs` exercise group/method filtering, glob, offset
+  pagination, owner_id admin-only with parameter diagnostic,
+  bad-sort diagnostic, name_prefix + sort-asc on groups, and
+  method/status filtering on the journal + path_pattern on
+  unmatched.
+
 ## Activity tracking (slice 17)
 
 Per-record bookkeeping bumped on every matched dispatch. Drives the
