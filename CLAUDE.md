@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–21 landed. The WIT contract is live at
+**Status:** slices 1–22 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -125,7 +125,22 @@ form already honoured `next`. `just run-web` boots the host with
 sensible dev creds (`admin/devpassword`) — visit
 `http://localhost:8080/__ui/` to dogfood. The 13 remaining
 screens are the rest of the UI track (slices 22–26); OAuth lands
-in slice 27. By design (per `mcp-surface.md`) user management is
+in slice 27. Slice 22 added the Groups + Routes list pages
+(`/__ui/groups`, `/__ui/routes`) on top of the slice-18
+filter/sort/paginate surface. The REST handlers `list_routes` and
+`list_groups` were refactored into thin wrappers over new
+`pub(crate)` helpers `list_routes_core` / `list_groups_core` so
+the UI handlers share the exact filter and ownership-scoping
+path. UI affordances on top of the API: a `owner_scope=mine|
+everyone` toggle (admin-only, defaulting to "everyone") in place
+of raw `owner_id`, sort-toggle column headers that flip asc/desc
+on the active column, 25-per-page pagination with prev/next
+links, and a 400 placeholder page on a bad filter parameter.
+Templates `groups_list.html` and `routes_list.html` extend the
+slice-21 layout shell; CSS adds `.filter-form`, `.filter-field`,
+`.btn--ghost`, `.btn--disabled`, `.pagination`. Owner column
+resolves user ULIDs to usernames via a single batched lookup per
+page. By design (per `mcp-surface.md`) user management is
 **not** in MCP — admins handle it via CLI/UI.
 
 ## Where the design lives

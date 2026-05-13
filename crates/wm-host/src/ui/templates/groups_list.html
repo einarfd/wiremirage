@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-header">
+  <h1>Groups</h1>
+  <p class="text-muted">
+    {%- if user.is_admin and filters.owner_scope == "everyone" -%}
+    All groups on this host.
+    {%- elif user.is_admin -%}
+    Groups you own. Admins can switch to all owners with the filter below.
+    {%- else -%}
+    Groups you own.
+    {%- endif -%}
+  </p>
+</section>
+
+<section class="card">
+  <form method="get" action="/__ui/groups" class="filter-form">
+    <label class="filter-field">
+      <span class="filter-field__label">Name contains</span>
+      <input type="text" name="q" value="{{ filters.q }}" placeholder="e.g. stripe">
+    </label>
+    {% if user.is_admin %}
+    <label class="filter-field">
+      <span class="filter-field__label">Owner</span>
+      <select name="owner_scope">
+        <option value="mine"{% if filters.owner_scope == "mine" %} selected{% endif %}>Just mine</option>
+        <option value="everyone"{% if filters.owner_scope == "everyone" %} selected{% endif %}>Everyone</option>
+      </select>
+    </label>
+    {% endif %}
+    <label class="filter-field">
+      <span class="filter-field__label">Include implicit</span>
+      <select name="implicit">
+        <option value=""{% if filters.implicit == "" %} selected{% endif %}>Both</option>
+        <option value="false"{% if filters.implicit == "false" %} selected{% endif %}>Explicit only</option>
+        <option value="true"{% if filters.implicit == "true" %} selected{% endif %}>Implicit only</option>
+      </select>
+    </label>
+    <button type="submit" class="btn btn--primary">Apply</button>
+    {% if filters.any_active %}<a href="/__ui/groups" class="btn btn--ghost">Reset</a>{% endif %}
+  </form>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>{{ total }} group{% if total != 1 %}s{% endif %}</h2>
+    <span class="text-muted">Showing {{ showing }} of {{ total }}</span>
+  </header>
+  {% if groups | length == 0 %}
+  <p class="empty-state">No groups match this filter. {% if filters.any_active %}Try <a href="/__ui/groups">resetting</a>.{% endif %}</p>
+  {% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col"><a href="{{ sort_links.name }}">Name{% if filters.sort == "name" %} {{ filters.dir_arrow }}{% endif %}</a></th>
+        <th scope="col">Owner</th>
+        <th scope="col">Routes</th>
+        <th scope="col">TTL (s)</th>
+        <th scope="col"><a href="{{ sort_links.created_at }}">Created{% if filters.sort == "created_at" %} {{ filters.dir_arrow }}{% endif %}</a></th>
+        <th scope="col"><a href="{{ sort_links.last_activity_at }}">Last activity{% if filters.sort == "last_activity_at" %} {{ filters.dir_arrow }}{% endif %}</a></th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for g in groups %}
+      <tr>
+        <td><a href="/__ui/groups/{{ g.name }}">{{ g.name }}</a>{% if g.implicit %} <span class="badge">implicit</span>{% endif %}</td>
+        <td class="text-muted">{{ g.owner_name }}</td>
+        <td>{{ g.route_count }}</td>
+        <td>{{ g.ttl_seconds }}</td>
+        <td class="text-muted">{{ g.created_at }}</td>
+        <td class="text-muted">{% if g.last_activity_at %}{{ g.last_activity_at }}{% else %}never{% endif %}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+{% if pagination.prev_url or pagination.next_url %}
+<nav class="pagination" aria-label="Pagination">
+  {% if pagination.prev_url %}<a class="btn btn--ghost" href="{{ pagination.prev_url }}">← Previous</a>{% else %}<span class="btn btn--ghost btn--disabled">← Previous</span>{% endif %}
+  <span class="text-muted">Page {{ pagination.page }} of {{ pagination.page_count }}</span>
+  {% if pagination.next_url %}<a class="btn btn--ghost" href="{{ pagination.next_url }}">Next →</a>{% else %}<span class="btn btn--ghost btn--disabled">Next →</span>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

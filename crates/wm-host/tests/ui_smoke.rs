@@ -247,8 +247,11 @@ async fn placeholder_pages_render_with_api_hint() {
     // minijinja auto-escapes `/` to `&#x2f;` in element bodies. The
     // browser un-escapes it for display; we match on substrings that
     // survive the escape (alphanumerics + underscores).
+    //
+    // `/__ui/groups` and `/__ui/routes` became real pages in slice 22,
+    // so they're not in this list anymore — the slice-22 tests cover
+    // them. What's left are the screens still under construction.
     for (path, expected_substrings) in [
-        ("/__ui/groups", ["GET", "__api", "groups"]),
         ("/__ui/groups/foo", ["GET", "__api", "groups"]),
         ("/__ui/routes/foo/3", ["GET", "__api", "routes"]),
         ("/__ui/me/tokens", ["GET", "__api", "tokens"]),

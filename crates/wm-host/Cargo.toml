@@ -54,6 +54,10 @@ subtle = "2.6"
 # with a small dependency footprint. Templates are embedded via
 # `include_str!` at compile time so deployment stays single-binary.
 minijinja = { version = "2", default-features = false, features = ["builtins", "multi_template", "serde"] }
+# Web UI (slice 22) — query-string building for pagination + sort links.
+# A handful of `urlencoding::encode` calls; the crate is ~50 LOC of safe
+# Rust and pulls no other deps.
+urlencoding = "2"
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via

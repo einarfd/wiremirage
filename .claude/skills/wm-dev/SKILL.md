@@ -423,6 +423,73 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI list pages (slice 22)
+
+Second slice of the UI track. Replaces the slice-21 stubs at
+`/__ui/groups` and `/__ui/routes` with real list pages on top of
+the slice-18 filter/sort/paginate surface.
+
+- **Shared core extracted in `api.rs`:** `list_routes_core` /
+  `list_groups_core` (both `pub(crate)`) hold the
+  filter→sort→paginate path. The REST handlers and the new UI
+  handlers both call them — no logic duplication. Each returns a
+  `PagedRoutes` / `PagedGroups` struct (`Vec<Route|Group>` + total
+  + next_offset). The `RoutesListQuery` / `GroupsListQuery`
+  structs gained `pub(crate)` on every field so the UI can build
+  one from a different input shape and read the active sort for
+  arrow rendering.
+- **`AppState` extended with no new fields** — the UI handlers
+  reach through `state.routes()` / `state.auth()` just like the
+  REST handlers do. Owner names resolve via
+  `state.auth().get_user_by_id(...)`, batched per page in
+  `resolve_owner_names`.
+- **UI query shape vs. API query shape:** UI input uses
+  `owner_scope=mine|everyone` (admin-only on the form); non-admins
+  never get the field rendered and the field on the URL is ignored.
+  The handler maps `owner_scope` → `owner_id` before calling the
+  core fn, which already enforces "non-admin may not pass
+  `owner_id`". An attacker handing the URL `?owner_id=…` directly
+  hits a serde struct without that field — quietly ignored.
+- **Sort toggles:** column headers are links to the same page with
+  `?sort=X&dir=Y` filled in. Clicking the active column flips the
+  direction; clicking a different column resets to that column's
+  default direction (`name` defaults asc, time/count columns
+  default desc). Arrow indicators (`↑`/`↓`) ride on the active
+  column.
+- **Pagination:** `UI_PAGE_LIMIT = 25`. The host's `parse_pagination`
+  rejects `limit > 200`, so the constant lives in UI code rather
+  than being toggleable per request. Prev/next links rebuild the
+  URL with the current filters preserved (via
+  `serialize_for_paging`) and the new `offset=`.
+- **Bad-filter error path:** `ui_error_400` renders the same
+  placeholder template with `page_title: "Bad filter"` and the
+  `ApiError.message()` as the hint, and sets the status to 400.
+  Adds `pub(crate) fn message(&self) -> &str` on `ApiError` so the
+  UI doesn't need to format-debug its way to the human-readable
+  copy.
+- **New CSS classes:** `filter-form` (flex-wrap row), `filter-field`
+  (column with `--label` span + input), `btn--ghost` (subtler
+  border), `btn--disabled` (greyed-out, pointer-events: none),
+  `pagination` (space-between layout).
+- **Templates:** `groups_list.html` + `routes_list.html`, both
+  extending `base.html`. Filter form is a plain `<form
+  method="get">` — the browser handles serialization, so no
+  JavaScript and no HTMX involvement yet.
+- **Defaults:** admins land on "everyone" (the page is the catalogue
+  view, the home page already covers "just yours"); non-admins are
+  silently pinned to themselves. Default sorts: groups by
+  `last_activity_at desc`, routes by `last_hit_at desc`.
+- **Tests:** `tests/ui_list_pages.rs` — 10 tier-2 tests covering
+  render, owner scoping (both directions), filter echo, sort
+  toggle, pagination, 400 path, and the "raw owner_id sneaks in"
+  case.
+- **New dep:** `urlencoding = "2"` for query-string building.
+  ~50 LOC of safe Rust with no other deps; cheaper than pulling
+  `percent-encoding` directly with our own encode-set.
+- **Not in this slice:** detail pages (Group/Route), creation
+  forms, HTMX. CSRF stays unwired until the first authed UI form
+  (likely the create-route slice).
+
 ## Web UI foundation (slice 21)
 
 First slice of the UI track. Ships the templating + asset pipeline,

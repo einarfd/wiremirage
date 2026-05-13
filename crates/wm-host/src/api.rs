@@ -186,33 +186,33 @@ struct ListRoutesResponse {
     next_offset: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct RoutesListQuery {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub(crate) struct RoutesListQuery {
     /// Group name or ULID. Filters to routes in that group only.
-    group: Option<String>,
+    pub(crate) group: Option<String>,
     /// Restrict to routes owned by `owner_id`. Admin-only — non-admin
     /// callers may not impersonate-list. Non-admin callers always see
     /// their own routes only and may not pass this parameter.
-    owner_id: Option<String>,
+    pub(crate) owner_id: Option<String>,
     /// HTTP method filter (uppercase, e.g. `GET`, or `ANY`).
-    method: Option<String>,
+    pub(crate) method: Option<String>,
     /// `*`-glob over the route's defined `path` (e.g. `/v1/*`).
-    path_pattern: Option<String>,
+    pub(crate) path_pattern: Option<String>,
     /// Lower bound on `last_hit_at`. Duration suffix (`5m`, `1h`,
     /// `2d`, `30s`) or RFC 3339 timestamp. Routes that have never
     /// been hit are excluded.
-    since: Option<String>,
+    pub(crate) since: Option<String>,
     /// Upper bound on `last_hit_at`.
-    until: Option<String>,
+    pub(crate) until: Option<String>,
     /// Free-text needle. Substring-matched (case-insensitive) against
     /// the route's path and methods.
-    q: Option<String>,
+    pub(crate) q: Option<String>,
     /// Sort column: `created_at` (default), `last_hit_at`, `hits_total`.
-    sort: Option<String>,
+    pub(crate) sort: Option<String>,
     /// Sort direction: `asc` or `desc`. Default `desc`.
-    dir: Option<String>,
-    offset: Option<u64>,
-    limit: Option<u64>,
+    pub(crate) dir: Option<String>,
+    pub(crate) offset: Option<u64>,
+    pub(crate) limit: Option<u64>,
 }
 
 /// Default + max for `?limit=` on the list endpoints. Kept here
@@ -243,6 +243,10 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     fn validation(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -576,6 +580,33 @@ async fn list_routes(
     auth: AuthContext,
     Query(q): Query<RoutesListQuery>,
 ) -> Result<Json<ListRoutesResponse>, ApiError> {
+    let paged = list_routes_core(&state, &auth, &q)?;
+    let routes = paged.routes.iter().map(RouteResponse::from).collect();
+    Ok(Json(ListRoutesResponse {
+        routes,
+        total: paged.total,
+        next_offset: paged.next_offset,
+    }))
+}
+
+/// One paginated page of routes plus the totals the caller needs to
+/// render "K of N" + a next-page link. Used by both the REST handler
+/// above and the `/__ui/routes` page handler.
+pub(crate) struct PagedRoutes {
+    pub routes: Vec<Route>,
+    pub total: u64,
+    pub next_offset: Option<u64>,
+}
+
+/// Shared filter / sort / paginate path for route listings. Holds the
+/// non-admin owner-scoping rule (refuse `owner_id`, always restrict
+/// to self) so the UI can't accidentally let a non-admin see other
+/// users' routes by handing it a different query string.
+pub(crate) fn list_routes_core(
+    state: &AppState,
+    auth: &AuthContext,
+    q: &RoutesListQuery,
+) -> Result<PagedRoutes, ApiError> {
     let now = chrono::Utc::now();
     let (offset, limit) = parse_pagination(q.offset, q.limit)?;
     let dir = SortDir::parse(q.dir.as_deref(), SortDir::Desc)?;
@@ -592,8 +623,6 @@ async fn list_routes(
         .map(|s| parse_since(s, now))
         .transpose()?;
 
-    // Non-admin scoping: refuse owner_id, always restrict to self.
-    // Admin: owner_id is optional; absent means "all owners".
     let owner_filter: Option<String> = if auth.is_admin {
         q.owner_id.clone()
     } else {
@@ -603,8 +632,6 @@ async fn list_routes(
         Some(auth.user_id.clone())
     };
 
-    // Start from a snapshot — small data set; in-memory filter/sort
-    // is cheap and avoids racing the RouteTable's cache.
     let snapshot = state.routes().snapshot();
     let mut filtered: Vec<Route> = snapshot
         .iter()
@@ -642,15 +669,11 @@ async fn list_routes(
     } else {
         None
     };
-    let page = filtered[start..end]
-        .iter()
-        .map(RouteResponse::from)
-        .collect();
-    Ok(Json(ListRoutesResponse {
-        routes: page,
+    Ok(PagedRoutes {
+        routes: filtered[start..end].to_vec(),
         total,
         next_offset,
-    }))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1563,27 +1586,27 @@ struct ListGroupsResponse {
     next_offset: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct GroupsListQuery {
+#[derive(Debug, Deserialize, Default, Clone)]
+pub(crate) struct GroupsListQuery {
     /// Restrict to groups owned by `owner_id`. Admin-only; non-admin
     /// callers always see only their own groups.
-    owner_id: Option<String>,
+    pub(crate) owner_id: Option<String>,
     /// Prefix match on group name (exact-case).
-    name_prefix: Option<String>,
+    pub(crate) name_prefix: Option<String>,
     /// Free-text needle. Substring-matched (case-insensitive) against
     /// the group's name.
-    q: Option<String>,
+    pub(crate) q: Option<String>,
     /// Lower bound on `last_activity_at`.
-    since: Option<String>,
-    until: Option<String>,
+    pub(crate) since: Option<String>,
+    pub(crate) until: Option<String>,
     /// `true` → only implicit groups; `false` → only explicit. Omit
     /// for both.
-    implicit: Option<bool>,
+    pub(crate) implicit: Option<bool>,
     /// Sort column: `created_at` (default), `name`, `last_activity_at`.
-    sort: Option<String>,
-    dir: Option<String>,
-    offset: Option<u64>,
-    limit: Option<u64>,
+    pub(crate) sort: Option<String>,
+    pub(crate) dir: Option<String>,
+    pub(crate) offset: Option<u64>,
+    pub(crate) limit: Option<u64>,
 }
 
 /// Fetch a group by reference (name or ULID), and require the caller
@@ -1624,6 +1647,31 @@ async fn list_groups(
     auth: AuthContext,
     Query(q): Query<GroupsListQuery>,
 ) -> Result<Json<ListGroupsResponse>, ApiError> {
+    let paged = list_groups_core(&state, &auth, &q)?;
+    let groups = paged.groups.iter().map(GroupResponse::from).collect();
+    Ok(Json(ListGroupsResponse {
+        groups,
+        total: paged.total,
+        next_offset: paged.next_offset,
+    }))
+}
+
+/// One paginated page of groups plus the totals callers need for
+/// pagination chrome. Used by `list_groups` (REST) and the
+/// `/__ui/groups` page handler.
+pub(crate) struct PagedGroups {
+    pub groups: Vec<Group>,
+    pub total: u64,
+    pub next_offset: Option<u64>,
+}
+
+/// Shared filter / sort / paginate path for group listings — see
+/// `list_routes_core` for the equivalent route version.
+pub(crate) fn list_groups_core(
+    state: &AppState,
+    auth: &AuthContext,
+    q: &GroupsListQuery,
+) -> Result<PagedGroups, ApiError> {
     let now = chrono::Utc::now();
     let (offset, limit) = parse_pagination(q.offset, q.limit)?;
     let dir = SortDir::parse(q.dir.as_deref(), SortDir::Desc)?;
@@ -1639,8 +1687,6 @@ async fn list_groups(
         .map(|s| parse_since(s, now))
         .transpose()?;
 
-    // Same owner-scoping rule as list_routes: non-admins may not name
-    // someone else and always see their own groups.
     let owner_filter: Option<String> = if auth.is_admin {
         q.owner_id.clone()
     } else {
@@ -1685,15 +1731,11 @@ async fn list_groups(
     } else {
         None
     };
-    let page = filtered[start..end]
-        .iter()
-        .map(GroupResponse::from)
-        .collect();
-    Ok(Json(ListGroupsResponse {
-        groups: page,
+    Ok(PagedGroups {
+        groups: filtered[start..end].to_vec(),
         total,
         next_offset,
-    }))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -256,6 +256,20 @@ p { margin: 0 0 var(--space-3); }
 }
 .btn--primary:hover { background: var(--accent); filter: brightness(1.05); }
 
+.btn--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.btn--ghost:hover { background: var(--surface-2); color: var(--text); }
+
+.btn--disabled,
+.btn--ghost.btn--disabled {
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
 .link {
   color: var(--accent);
   font-size: var(--text-sm);
@@ -334,4 +348,47 @@ p { margin: 0 0 var(--space-3); }
   color: var(--text-muted);
   font-size: var(--text-xs);
   text-align: center;
+}
+
+/* -- Filter forms (list pages) ----------------------------------- */
+
+.filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  align-items: flex-end;
+}
+
+.filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 9rem;
+}
+.filter-field__label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.filter-field input,
+.filter-field select {
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+}
+.filter-field input:focus,
+.filter-field select:focus { outline: none; box-shadow: var(--focus); border-color: var(--accent); }
+
+/* -- Pagination ---------------------------------------------------- */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
 }
