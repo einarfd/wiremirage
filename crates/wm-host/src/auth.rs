@@ -60,13 +60,26 @@ pub struct Token {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Caller identity resolved from a successful bearer-token check.
+/// Which credential satisfied the auth check. Lets downstream
+/// handlers branch on token-vs-session if needed (e.g. forbid
+/// session-only callers from a programmatic-only endpoint). Today
+/// all `/__api/*` handlers treat both the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    Token,
+    Session,
+}
+
+/// Caller identity resolved from a successful credential check.
+/// Carries the credential's id (token or session) opaquely so audit
+/// logs can correlate without exposing plaintext.
 #[derive(Debug, Clone)]
 pub struct AuthContext {
     pub user_id: String,
     pub user_name: String,
     pub is_admin: bool,
-    pub token_id: String,
+    pub credential_kind: CredentialKind,
+    pub credential_id: String,
 }
 
 #[derive(Clone)]
@@ -144,6 +157,39 @@ impl Auth {
     /// operations that would leave the system with zero admins.
     pub fn count_admins(&self) -> Result<usize, AuthError> {
         Ok(self.list_users()?.iter().filter(|u| u.is_admin).count())
+    }
+
+    /// Upsert a user backed by a local-auth (env-var) identity.
+    /// First call creates the user; subsequent calls sync `is_admin`
+    /// from the env-var role (per ADR-0018: "Admin role lives in the
+    /// env var"). The username is the user record's `name` and also
+    /// the `subject` on the implicit `local:` identity index.
+    pub fn upsert_local_user(&self, username: &str, is_admin: bool) -> Result<User, AuthError> {
+        let mut bucket = self.bucket()?;
+        if let Some(mut user) = self.read_user_by_name(&mut bucket, username)? {
+            if user.is_admin != is_admin {
+                bucket.hash_set(
+                    &format!("user:{}", user.id),
+                    "is_admin",
+                    if is_admin { b"1" } else { b"0" }.to_vec(),
+                )?;
+                user.is_admin = is_admin;
+            }
+            // Refresh the identity index even if the record exists —
+            // protects against the (unusual) case where the entry was
+            // wiped manually but the user record survived.
+            bucket.set(
+                &format!("user:by-identity:local:{username}"),
+                user.id.as_bytes().to_vec(),
+            )?;
+            return Ok(user);
+        }
+        let user = self.write_new_user(&mut bucket, username, is_admin)?;
+        bucket.set(
+            &format!("user:by-identity:local:{username}"),
+            user.id.as_bytes().to_vec(),
+        )?;
+        Ok(user)
     }
 
     /// Toggle a user's admin flag. Idempotent — setting to the current
@@ -423,7 +469,8 @@ impl Auth {
             user_id: user.id,
             user_name: user.name,
             is_admin: user.is_admin,
-            token_id: token.id,
+            credential_kind: CredentialKind::Token,
+            credential_id: token.id,
         }))
     }
 }

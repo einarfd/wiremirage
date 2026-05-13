@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–19 landed. The WIT contract is live at
+**Status:** slices 1–20 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -102,7 +102,17 @@ view, with `wm unmatched show <n>` for individual records. MCP
 tools `list_groups`, `list_routes`, `list_recent_unmatched` gain
 the same arg fields; non-admin still pinned to self. The route /
 group sort comparators are promoted to `pub(crate)` in `api.rs`
-so both surfaces share them. By design (per `mcp-surface.md`)
+so both surfaces share them. Slice 20 added local auth + browser
+sessions per ADR-0018: `WM_LOCAL_AUTH=alice:hunter2:admin,bob:pw`
+declares users (argon2id-hashed at startup, never persisted),
+`POST /__auth/login/password` mints a `wm_session` cookie signed
+by `SESSION_SECRET` (HMAC-SHA256, ≥32 bytes), and the auth
+extractor accepts the cookie as a fallback to bearer tokens.
+Sessions live at `session:{token}` in Valkey with 24h sliding TTL;
+logout deletes the record and clears the cookie. Per-IP login
+throttle (5 fails / 60s → 60s lockout) lives in-process. ADR-0018
+is the scope statement — testing + trusted-network deployments
+only, not for public exposure. By design (per `mcp-surface.md`)
 user management is **not** in MCP — admins handle it via
 CLI/UI.
 

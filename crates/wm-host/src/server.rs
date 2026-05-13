@@ -41,6 +41,18 @@ pub struct AppState {
     /// been configured with `WM_COMPILER_URL`; source-based POSTs to
     /// `/__api/routes` are rejected with `compile_failed` in that case.
     compiler: Option<crate::compiler::CompilerClient>,
+    /// Local-auth credential map (slice 20). Empty when
+    /// `WM_LOCAL_AUTH` isn't configured; login attempts just always
+    /// fail in that case.
+    local_auth: Arc<crate::local_auth::LocalAuth>,
+    /// Session store (slice 20). `None` when `SESSION_SECRET` isn't
+    /// configured — login endpoints respond 503 in that case so the
+    /// operator gets a clear signal rather than silent "wrong
+    /// password" rejections.
+    sessions: Option<crate::session::SessionStore>,
+    /// In-process per-IP throttle for the password login endpoint.
+    /// Lives behind an `Arc` so cloning `AppState` shares the counters.
+    login_throttle: Arc<crate::login_throttle::LoginThrottle>,
 }
 
 impl AppState {
@@ -56,11 +68,24 @@ impl AppState {
             auth,
             journal,
             compiler: None,
+            local_auth: Arc::new(crate::local_auth::LocalAuth::empty()),
+            sessions: None,
+            login_throttle: Arc::new(crate::login_throttle::LoginThrottle::new()),
         }
     }
 
     pub fn with_compiler(mut self, compiler: crate::compiler::CompilerClient) -> Self {
         self.compiler = Some(compiler);
+        self
+    }
+
+    pub fn with_local_auth(mut self, local_auth: crate::local_auth::LocalAuth) -> Self {
+        self.local_auth = Arc::new(local_auth);
+        self
+    }
+
+    pub fn with_sessions(mut self, sessions: crate::session::SessionStore) -> Self {
+        self.sessions = Some(sessions);
         self
     }
 
@@ -83,6 +108,18 @@ impl AppState {
     pub fn compiler(&self) -> Option<&crate::compiler::CompilerClient> {
         self.compiler.as_ref()
     }
+
+    pub fn local_auth(&self) -> &crate::local_auth::LocalAuth {
+        &self.local_auth
+    }
+
+    pub fn sessions(&self) -> Option<&crate::session::SessionStore> {
+        self.sessions.as_ref()
+    }
+
+    pub fn login_throttle(&self) -> &crate::login_throttle::LoginThrottle {
+        &self.login_throttle
+    }
 }
 
 /// Build the axum router. The REST API mounts at `/__api/*`; mock-traffic
@@ -93,6 +130,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     let mcp = crate::mcp::router(state.clone());
     crate::api::router()
+        .merge(crate::auth_api::router())
         .route("/__health", get(health))
         .route("/__ready", get(ready))
         .fallback(any(dispatch))

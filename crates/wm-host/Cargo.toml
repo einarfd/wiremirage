@@ -44,6 +44,12 @@ hex.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 tower = "0.5"
+# Local auth (slice 20): argon2id for password hashing, hmac+sha2 for
+# signed session cookies. argon2id is OWASP's recommendation; the
+# `argon2` crate is pure Rust and audit-friendly.
+argon2 = "0.5"
+hmac = "0.12"
+subtle = "2.6"
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via

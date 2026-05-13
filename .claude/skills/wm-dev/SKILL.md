@@ -423,6 +423,81 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Local auth + browser sessions (slice 20)
+
+Implements ADR-0018 (local username/password accounts via env var)
+plus the shared session-cookie machinery the web UI and OAuth (when
+it lands) will also use. Both pieces ship together — local auth's
+whole purpose is to mint a session, and a session without a login
+method to mint it isn't useful.
+
+- **`crates/wm-host/src/local_auth.rs`** — parses
+  `WM_LOCAL_AUTH=alice:hunter2:admin,bob:pw,...` into a
+  `LocalAuth { username → { argon2id_hash, role } }` map. Fail-fast
+  on duplicate names, empty fields, or an unknown role. `verify()`
+  returns `Invalid` for both wrong-password and unknown-user — we
+  don't distinguish, by design. argon2id chosen over bcrypt per
+  OWASP guidance; ADR-0018's hashing-note section records the
+  reasoning. PHC-encoded so we can bump cost factors later without
+  breaking existing hashes.
+- **`crates/wm-host/src/session.rs`** — `SessionStore` keyed by a
+  signed HMAC-SHA256 cookie. Cookie wire format:
+  `{32-byte-random-b64}.{HMAC-b64}`; rotating `SESSION_SECRET`
+  invalidates every existing cookie. `Session` records persist at
+  `session:{token}` with the fields from auth-and-authz.md
+  (user_id, provider, created_at, last_seen_at, expires_at,
+  ip_first_seen, user_agent). Sliding 24h TTL; both an in-record
+  `expires_at` and a Valkey TTL on the key. `touch()` verifies the
+  HMAC *and* the expiry before bumping the timestamps — initial
+  implementation skipped the signature check on touch, the
+  tampered-cookie test caught it.
+- **`crates/wm-host/src/login_throttle.rs`** — per-IP throttle
+  (5 fails / 60s window → 60s lockout). In-process; resets on
+  successful login. Sliding window: a stale window auto-resets on
+  next failure. Keyed by IP from `X-Forwarded-For` first, falling
+  back to `127.0.0.1` (we don't wire `ConnectInfo` into the
+  server — would mean touching every test harness). For the threat
+  model the fallback collision is fine.
+- **`crates/wm-host/src/auth_api.rs`** — routes under `/__auth/*`:
+  `GET /__auth/login` (HTML form; switches to a "no methods
+  configured" body when local auth isn't set), `POST
+  /__auth/login/password` (form-encoded; vague `401 login failed`
+  on bad creds, `429` when throttled, `303 See Other` + Set-Cookie
+  on success), `POST /__auth/logout` (204 + Max-Age=0 cookie
+  clear; idempotent). Login validates the `next` redirect target
+  is a host-relative path so a crafted login URL can't open-
+  redirect the browser.
+- **`AuthContext` extractor extended** — tries `Authorization:
+  Bearer wmt_...` first, falls back to a `wm_session` cookie when
+  no bearer token is present, returns 401 when both miss. A new
+  `CredentialKind` enum field (`Token` | `Session`) on
+  `AuthContext` lets future handlers branch on credential type;
+  the existing `token_id` field was renamed to `credential_id`.
+- **`AppState` extended** — gained `local_auth`, `sessions`
+  (`Option`), and `login_throttle` fields with matching
+  `with_local_auth`, `with_sessions` builders and read accessors.
+- **`Auth::upsert_local_user`** — first-login flow. Creates a user
+  if missing, or updates the existing `is_admin` flag to match the
+  env-var role (per ADR-0018: "Admin role lives in the env var").
+  Writes `user:by-identity:local:{username}` as the lookup index.
+- **`main.rs` wiring** — `configure_local_auth` reads
+  `WM_LOCAL_AUTH` + `SESSION_SECRET` after `AppState::new`. Both
+  optional individually; setting `WM_LOCAL_AUTH` without
+  `SESSION_SECRET` is fatal at startup (login can't mint cookies
+  without a signing key). A loud warning logs whenever local auth
+  is configured — testing/private use only.
+- **Dependencies added:** `argon2 = "0.5"` (PHC-encoded
+  hashing), `hmac = "0.12"`, `subtle = "2.6"` (constant-time
+  signature compare).
+- **Tests:** unit tests in each module (14 + 8 + 7) plus 11 tier-2
+  HTTP tests in `tests/local_auth_e2e.rs` covering: cookie issued
+  on valid login, vague 401 on bad credentials / unknown user,
+  lockout after 5 fails, cookie authenticates an API endpoint,
+  logout invalidates, tampered-signature rejected, bearer-token
+  path still works alongside sessions, login-page disabled when
+  no methods configured, env-var role syncs `is_admin` on each
+  login.
+
 ## CLI + MCP list flags (slice 19)
 
 Wraps slice 18 in the user-facing surfaces: the `wm` CLI list

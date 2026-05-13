@@ -354,10 +354,13 @@ impl IntoResponse for ApiError {
     }
 }
 
-// Bearer-token extractor. Pulls `Authorization: Bearer wmt_...` from the
-// request, looks up the token via Auth, and returns 401 on missing /
-// invalid / expired. Used by every handler under `/__api/*` that needs
-// caller identity.
+// Auth extractor. Tries `Authorization: Bearer wmt_...` first, falls
+// back to a `wm_session` cookie when no bearer token is present.
+// Returns 401 when both are missing/invalid.
+//
+// Two paths share one return type: either path produces an
+// `AuthContext` with `credential_kind` set so handlers can branch
+// when they need to.
 impl FromRequestParts<AppState> for AuthContext {
     type Rejection = ApiError;
 
@@ -365,23 +368,67 @@ impl FromRequestParts<AppState> for AuthContext {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let Some(header_value) = parts.headers.get(header::AUTHORIZATION) else {
-            return Err(ApiError::unauthorized("missing Authorization header"));
-        };
-        let raw = header_value
-            .to_str()
-            .map_err(|_| ApiError::unauthorized("Authorization header is not valid ASCII"))?;
-        let token = raw
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| ApiError::unauthorized("expected `Bearer wmt_...` scheme"))?
-            .trim();
-        let ctx = state
-            .auth()
-            .authenticate(token)
-            .map_err(|e| ApiError::internal(format!("auth lookup: {e}")))?
-            .ok_or_else(|| ApiError::unauthorized("invalid or expired token"))?;
-        Ok(ctx)
+        if let Some(header_value) = parts.headers.get(header::AUTHORIZATION) {
+            let raw = header_value
+                .to_str()
+                .map_err(|_| ApiError::unauthorized("Authorization header is not valid ASCII"))?;
+            let token = raw
+                .strip_prefix("Bearer ")
+                .ok_or_else(|| ApiError::unauthorized("expected `Bearer wmt_...` scheme"))?
+                .trim();
+            return state
+                .auth()
+                .authenticate(token)
+                .map_err(|e| ApiError::internal(format!("auth lookup: {e}")))?
+                .ok_or_else(|| ApiError::unauthorized("invalid or expired token"));
+        }
+        // No bearer token — try the session cookie. Skip cleanly when
+        // no session store is configured (operator hasn't set
+        // SESSION_SECRET) — that surfaces as the same 401 as no auth.
+        if let Some(sessions) = state.sessions()
+            && let Some(cookie) = extract_session_cookie(parts)
+        {
+            let session = sessions
+                .touch(&cookie)
+                .map_err(|_| ApiError::unauthorized("invalid or expired session"))?;
+            let user = state
+                .auth()
+                .get_user_by_id(&session.user_id)
+                .map_err(|_| ApiError::unauthorized("session refers to a deleted user"))?;
+            return Ok(AuthContext {
+                user_id: user.id,
+                user_name: user.name,
+                is_admin: user.is_admin,
+                credential_kind: crate::auth::CredentialKind::Session,
+                credential_id: session.id,
+            });
+        }
+        Err(ApiError::unauthorized(
+            "missing Authorization header or session cookie",
+        ))
     }
+}
+
+/// Pull the `wm_session` cookie value from the `Cookie` header.
+/// Returns `None` when the header is missing, isn't valid UTF-8, or
+/// doesn't contain a `wm_session=...` pair. Multiple `Cookie`
+/// headers (which axum exposes via `get_all`) are walked in order;
+/// the first hit wins.
+fn extract_session_cookie(parts: &Parts) -> Option<String> {
+    for header_value in parts.headers.get_all(header::COOKIE).iter() {
+        let Ok(raw) = header_value.to_str() else {
+            continue;
+        };
+        // `Cookie: a=1; b=2; wm_session=token.sig` — pairs are
+        // semicolon-separated, each pair `key=value`.
+        for pair in raw.split(';') {
+            let pair = pair.trim();
+            if let Some(value) = pair.strip_prefix(&format!("{}=", crate::session::COOKIE_NAME)) {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 impl From<AuthError> for ApiError {

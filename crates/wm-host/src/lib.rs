@@ -7,6 +7,7 @@
 pub mod api;
 pub mod api_filters;
 pub mod auth;
+pub mod auth_api;
 pub mod bindings;
 pub mod compiler;
 pub mod dry_run;
@@ -14,13 +15,16 @@ pub mod host_state;
 pub mod journal;
 pub mod journal_filter;
 pub mod lifecycle;
+pub mod local_auth;
 pub mod log;
+pub mod login_throttle;
 pub mod mcp;
 pub mod pattern;
 pub mod registry;
 pub mod route_table;
 pub mod runtime;
 pub mod server;
+pub mod session;
 pub mod store;
 pub mod telemetry;
 

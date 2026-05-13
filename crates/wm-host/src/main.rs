@@ -6,8 +6,10 @@ use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
 use wm_host::journal::Journal;
 use wm_host::lifecycle::Sweeper;
+use wm_host::local_auth::LocalAuth;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
+use wm_host::session::SessionStore;
 use wm_host::telemetry;
 use wm_host::{AppState, Runtime, Storage, router};
 
@@ -25,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let runtime = Arc::new(Runtime::new(storage.clone())?);
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone())?;
-    let journal = Journal::new(storage);
+    let journal = Journal::new(storage.clone());
 
     let mut state = AppState::new(runtime, routes, auth, journal);
     if let Some(compiler) = CompilerClient::from_env() {
@@ -36,6 +38,13 @@ async fn main() -> anyhow::Result<()> {
             "WM_COMPILER_URL is not set; only `language: \"wasm\"` requests will be accepted by /__api/routes"
         );
     }
+
+    // Local auth (slice 20). Parse WM_LOCAL_AUTH and wire SESSION_SECRET.
+    // Both are independent — operators can configure either, neither,
+    // or both. When `WM_LOCAL_AUTH` is set, `SESSION_SECRET` becomes
+    // required so the login flow can mint cookies; we refuse to start
+    // in that case if it's missing rather than silently 503ing later.
+    state = configure_local_auth(state, storage)?;
     let app = router(state.clone());
 
     // Spawn the lifecycle sweeper. It walks the route table on its
@@ -83,6 +92,47 @@ async fn shutdown_signal() {
         _ = ctrl_c => tracing::info!("received Ctrl-C, shutting down"),
         _ = terminate => tracing::info!("received SIGTERM, shutting down"),
     }
+}
+
+/// Parse `WM_LOCAL_AUTH` + `SESSION_SECRET` and attach the resulting
+/// local-auth map and session store to `state`. Fail-fast on bad
+/// input — a misconfigured login surface should surface at boot,
+/// not on the first failed login.
+fn configure_local_auth(mut state: AppState, storage: Storage) -> anyhow::Result<AppState> {
+    let raw_local = env::var("WM_LOCAL_AUTH").unwrap_or_default();
+    let local_auth = LocalAuth::parse(&raw_local).map_err(|e| anyhow!("WM_LOCAL_AUTH: {e}"))?;
+    let local_configured = !local_auth.is_empty();
+    state = state.with_local_auth(local_auth);
+
+    match env::var("SESSION_SECRET") {
+        Ok(secret) if !secret.is_empty() => {
+            let sessions = SessionStore::new(storage, secret.as_bytes())
+                .map_err(|e| anyhow!("SESSION_SECRET: {e}"))?;
+            tracing::info!("session store configured (TTL={}s)", sessions.ttl_seconds());
+            state = state.with_sessions(sessions);
+        }
+        _ => {
+            if local_configured {
+                return Err(anyhow!(
+                    "WM_LOCAL_AUTH is set but SESSION_SECRET is missing. \
+                     Local login can't mint cookies without a signing key — \
+                     set SESSION_SECRET to at least 32 bytes of secret material."
+                ));
+            }
+            tracing::info!(
+                "SESSION_SECRET unset and no browser-login methods configured; \
+                 `/__api/*` will only accept bearer tokens"
+            );
+        }
+    }
+
+    if local_configured {
+        tracing::warn!(
+            "WM_LOCAL_AUTH is configured. This auth mode is for testing and \
+             trusted-network deployments only — see ADR-0018."
+        );
+    }
+    Ok(state)
 }
 
 /// Honour `WM_BOOTSTRAP_TOKEN` on first startup: create an admin user
