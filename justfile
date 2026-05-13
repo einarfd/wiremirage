@@ -40,6 +40,18 @@ build:
 run-host:
     cargo run -p wm-host
 
+# Run wm-host with local auth + sessions configured for browser
+# dogfood. After it starts, open http://localhost:8080/__ui/ in a
+# browser, log in as `admin` / `devpassword`, and click around. The
+# `WM_LOCAL_AUTH` setting is for local dev only — never use these
+# credentials on a publicly-reachable host (see ADR-0018).
+run-web:
+    WM_STORAGE=memory \
+      WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+      WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
+      SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
+      cargo run -p wm-host
+
 run-cli *ARGS:
     cargo run -p wm-cli -- {{ARGS}}
 

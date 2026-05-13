@@ -27,6 +27,7 @@ pub mod server;
 pub mod session;
 pub mod store;
 pub mod telemetry;
+pub mod ui;
 
 /// Handler bindings version this build of the host accepts. Compilers
 /// (sidecar) and pre-compiled-component uploads must declare this exact

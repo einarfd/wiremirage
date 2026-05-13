@@ -423,6 +423,76 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI foundation (slice 21)
+
+First slice of the UI track. Ships the templating + asset pipeline,
+implements the design-tokens CSS, replaces the slice-20 inline
+login page with a templated one, and adds a real home page plus
+stubs for every other `/__ui/*` route — so navigation works
+end-to-end before the detail pages land.
+
+- **Templating:** `minijinja` 2.x with features
+  `builtins`, `multi_template`, `serde`. Templates are embedded via
+  `include_str!` at compile time in `ui::UiTemplates::new()`; one
+  `tmpl!` macro line per file keeps the call site short. minijinja
+  auto-escapes HTML — including `/` to `&#x2f;` in attribute
+  values — which is correct but means tests that grep for raw
+  paths in rendered HTML need to match unescaped substrings.
+- **`crates/wm-host/src/ui/`:**
+  - `mod.rs` — sub-router, handler functions, `UiTemplates`
+    wrapper, `UserBadge` helper, `render` / `ui_error_500` /
+    `stub` / `forbidden_page` glue. `ui::router(state)` returns a
+    fully-stateful `Router` (state passed in so the auth-redirect
+    middleware can hold a clone — same shape as
+    `mcp::router(state)`).
+  - `auth_redirect.rs` — middleware on `/__ui/*` (except
+    `/__ui/static/*`). Reads the `wm_session` cookie via
+    `session.touch()`; on failure issues `302` (axum's
+    `Redirect::to`, actually 303 by default) to
+    `/__auth/login?next=<original_path>` with the path
+    percent-encoded.
+  - `static_assets.rs` — `/__ui/static/{*path}` serves CSS/JS
+    from `include_bytes!`. One file today (`wm.css`); HTMX lands
+    alongside the slice that needs it. `Cache-Control: no-store`
+    until we have content-hashed filenames.
+  - `csrf.rs` — token mint helper. **Not wired up in this slice**
+    — the only authed UI form is logout, which is a guarded
+    no-arg POST; first authed form-with-data lands in slice 25.
+    Module exists so the slice that needs it has somewhere to
+    grow.
+  - `templates/` — `base.html` (layout + nav), `login.html`
+    (renders OAuth-buttons-shaped slot too), `home.html`,
+    `placeholder.html`. Each page extends `base.html`.
+  - `static/wm.css` — full implementation of `web-ui-design.md`'s
+    "Visual design" section: tokens (light + dark via
+    `prefers-color-scheme`), 14px-base type scale, 4px spacing
+    grid, card / data-table / btn / badge / status-2xx..5xx
+    classes, plus the auth-card layout for the login page.
+- **`AppState` extended** with `ui_templates: UiTemplates` plus a
+  read accessor. The Environment is built once at startup.
+- **`server::router`** now `.merge(ui)` after `.merge(mcp)`.
+- **`auth_api::login_page`** swapped from two `r#"..."#` const
+  pages to a single `login.html` render with `local_enabled`,
+  `next`, `error` in the context. Honours `?next=` on GET so the
+  hidden form input round-trips through the redirect flow.
+- **`just run-web`** convenience target: in-memory storage,
+  `WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword'`, fixed
+  `SESSION_SECRET`, then `cargo run -p wm-host`. Visit
+  `http://localhost:8080/__ui/` to log in.
+- **Stubs:** `placeholder.html` is shared by every "coming in a
+  later slice" route. The stub handler names the equivalent API
+  path so the user can drop to `wm`/`curl` until the real page
+  ships. Admin-only stubs (`unmatched`, `settings`,
+  `admin/health`) return 403 for non-admin via the same template.
+- **Tests:** `tests/ui_smoke.rs` — 10 HTTP tests covering the
+  full browser-driven flow: unauth → redirect, login page
+  renders, `next` round-trip, post-login home, admin badge, CSS
+  served, placeholder copy + API hint, admin-only 403, logout
+  loop.
+- **Not in this slice:** HTMX (lands alongside the live-journal
+  slice), CSRF middleware (lands alongside the first authed UI
+  form), OAuth provider buttons (slice 27).
+
 ## Local auth + browser sessions (slice 20)
 
 Implements ADR-0018 (local username/password accounts via env var)

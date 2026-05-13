@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-header">
+  <h1>{{ page_title }}</h1>
+</section>
+
+<section class="card">
+  <p>This page is coming in a future slice.</p>
+  <p class="text-muted">
+    For now, you can reach the same data via the API or the
+    <code>wm</code> CLI:
+  </p>
+  <pre class="code-block"><code>{{ api_hint }}</code></pre>
+</section>
+{% endblock %}

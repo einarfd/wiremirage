@@ -50,6 +50,10 @@ tower = "0.5"
 argon2 = "0.5"
 hmac = "0.12"
 subtle = "2.6"
+# Web UI templates (slice 21). minijinja gives us Jinja-like syntax
+# with a small dependency footprint. Templates are embedded via
+# `include_str!` at compile time so deployment stays single-binary.
+minijinja = { version = "2", default-features = false, features = ["builtins", "multi_template", "serde"] }
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via

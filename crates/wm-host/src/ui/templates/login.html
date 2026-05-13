@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — WireMirage</title>
+<link rel="stylesheet" href="/__ui/static/wm.css">
+</head>
+<body class="auth-body">
+<main class="auth-card">
+<h1 class="auth-title">Sign in to WireMirage</h1>
+
+{% if local_enabled %}
+<form method="post" action="/__auth/login/password" class="auth-form">
+  {%- if next %}
+  <input type="hidden" name="next" value="{{ next }}">
+  {%- endif %}
+  <label class="auth-field">
+    <span class="auth-field__label">Username</span>
+    <input name="username" autocomplete="username" required autofocus>
+  </label>
+  <label class="auth-field">
+    <span class="auth-field__label">Password</span>
+    <input name="password" type="password" autocomplete="current-password" required>
+  </label>
+  {%- if error %}
+  <p class="auth-error" role="alert">{{ error }}</p>
+  {%- endif %}
+  <button type="submit" class="btn btn--primary">Sign in</button>
+</form>
+<p class="auth-hint">Local-account login. Configured users only.</p>
+{%- else %}
+<p class="auth-error">
+  No login methods configured. Set <code>WM_LOCAL_AUTH</code> and
+  <code>SESSION_SECRET</code> to enable local password login.
+</p>
+{%- endif %}
+
+{# OAuth provider buttons land in slice 27. The login template
+   already accommodates them — they'll render above the password
+   form per web-ui-design.md's Login screen. #}
+</main>
+</body>
+</html>

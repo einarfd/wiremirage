@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page_title }} — WireMirage</title>
+<link rel="stylesheet" href="/__ui/static/wm.css">
+{%- block head %}{% endblock %}
+</head>
+<body>
+<header class="app-header">
+  <div class="app-header__inner">
+    <a class="app-brand" href="/__ui/">WireMirage</a>
+    <nav class="app-nav" aria-label="Primary">
+      <a href="/__ui/">Home</a>
+      <a href="/__ui/groups">Groups</a>
+      <a href="/__ui/routes">Routes</a>
+      <a href="/__ui/journal/live">Live</a>
+      <a href="/__ui/unmatched">Unmatched</a>
+      <a href="/__ui/me/tokens">Tokens</a>
+    </nav>
+    {% if user %}
+    <div class="app-user">
+      <span class="app-user__name">{{ user.name }}</span>
+      {%- if user.is_admin %}<span class="badge badge--admin">admin</span>{% endif %}
+      <form method="post" action="/__auth/logout" class="logout-form">
+        <button type="submit" class="link-button">Log out</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+</header>
+
+<main class="app-main">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

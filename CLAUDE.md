@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–20 landed. The WIT contract is live at
+**Status:** slices 1–21 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -112,9 +112,21 @@ Sessions live at `session:{token}` in Valkey with 24h sliding TTL;
 logout deletes the record and clears the cookie. Per-IP login
 throttle (5 fails / 60s → 60s lockout) lives in-process. ADR-0018
 is the scope statement — testing + trusted-network deployments
-only, not for public exposure. By design (per `mcp-surface.md`)
-user management is **not** in MCP — admins handle it via
-CLI/UI.
+only, not for public exposure. Slice 21 kicked off the web UI:
+templates via `minijinja` (compile-time-embedded via
+`include_str!`), a CSS stylesheet implementing the design tokens
+from `web-ui-design.md` (light + dark mode), a base layout shell
+with primary nav, a login-page rewrite from inline HTML to the
+template, a real home page (`/__ui/`) showing the user's groups,
+and stub pages for every remaining `/__ui/*` route so navigation
+works end-to-end. Auth-redirect middleware on `/__ui/*` sends
+unauthenticated browsers to `/__auth/login?next=...`; the password
+form already honoured `next`. `just run-web` boots the host with
+sensible dev creds (`admin/devpassword`) — visit
+`http://localhost:8080/__ui/` to dogfood. The 13 remaining
+screens are the rest of the UI track (slices 22–26); OAuth lands
+in slice 27. By design (per `mcp-surface.md`) user management is
+**not** in MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 

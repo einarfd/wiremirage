@@ -16,10 +16,11 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use axum::Form;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use minijinja::context;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -33,16 +34,41 @@ pub fn router() -> Router<AppState> {
         .route("/__auth/logout", post(logout))
 }
 
-async fn login_page(State(state): State<AppState>) -> Response {
+#[derive(Debug, Deserialize)]
+struct LoginPageQuery {
+    /// Post-login redirect target carried through from the original
+    /// `/__ui/*` navigation. Validated as host-relative when the
+    /// form posts (see `password_login`).
+    next: Option<String>,
+}
+
+async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuery>) -> Response {
     // The form only renders when local auth is wired up; with the
     // surface bare today, showing it unconditionally would be a UX
     // dead-end (`POST /__auth/login/password` would 503).
-    let body = if state.local_auth().is_empty() {
-        DISABLED_PAGE.to_string()
-    } else {
-        ENABLED_PAGE.to_string()
-    };
-    Html(body).into_response()
+    let local_enabled = !state.local_auth().is_empty();
+    let next = q
+        .next
+        .filter(|n| n.starts_with('/') && !n.starts_with("//"));
+    let rendered = state.ui_templates().render(
+        "login.html",
+        context! {
+            local_enabled => local_enabled,
+            next => next,
+            error => Option::<String>::None,
+        },
+    );
+    match rendered {
+        Ok(body) => Html(body).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "login template render failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "login template render failed",
+            )
+                .into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,43 +244,3 @@ fn format_set_cookie(value: &str, max_age: u64) -> String {
     // proxy through a reverse proxy that rewrites the header.
     format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}",)
 }
-
-const ENABLED_PAGE: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>WireMirage — Sign in</title>
-<style>
-body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1rem; }
-label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; }
-input { width: 100%; padding: 0.5rem; box-sizing: border-box; font-size: 1rem; }
-button { margin-top: 1rem; padding: 0.5rem 1rem; font-size: 1rem; }
-small { color: #666; }
-</style>
-</head>
-<body>
-<h1>Sign in</h1>
-<form method="post" action="/__auth/login/password">
-<label for="username">Username</label>
-<input id="username" name="username" autocomplete="username" required>
-<label for="password">Password</label>
-<input id="password" name="password" type="password" autocomplete="current-password" required>
-<button type="submit">Sign in</button>
-</form>
-<p><small>Local-account login. Configured users only.</small></p>
-</body>
-</html>
-"#;
-
-const DISABLED_PAGE: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>WireMirage — Sign in</title>
-</head>
-<body>
-<h1>No login methods configured</h1>
-<p>This WireMirage host has no login methods enabled. Set <code>WM_LOCAL_AUTH</code> (and <code>SESSION_SECRET</code>) to enable local password login, or configure an OAuth provider.</p>
-</body>
-</html>
-"#;

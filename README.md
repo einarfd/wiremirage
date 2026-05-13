@@ -37,7 +37,10 @@ For browser login on testing or private deployments, set
 `WM_LOCAL_AUTH=alice:hunter2:admin,bob:pw` + `SESSION_SECRET`; the
 `/__auth/login/password` endpoint then mints an `wm_session` cookie
 that authenticates `/__api/*` alongside the bearer-token path
-(slice 20, per ADR-0018 — not for public exposure).
+(slice 20, per ADR-0018 — not for public exposure). The web UI
+landed in slice 21 — run `just run-web` and open
+`http://localhost:8080/__ui/` in a browser. Today the home page +
+login + navigation are real; detail pages land in slices 22–26.
 Every dispatched mock request and every unmatched request is journaled
 in Valkey (default 1h TTL); fetch via `GET /__api/journal/{group}` and
 `GET /__api/unmatched` (admin-only). Groups are first-class lifecycle

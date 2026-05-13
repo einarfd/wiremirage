@@ -53,6 +53,9 @@ pub struct AppState {
     /// In-process per-IP throttle for the password login endpoint.
     /// Lives behind an `Arc` so cloning `AppState` shares the counters.
     login_throttle: Arc<crate::login_throttle::LoginThrottle>,
+    /// minijinja environment + helpers for the web UI (slice 21).
+    /// Built once at startup; cheap to clone (inner Arc).
+    ui_templates: crate::ui::UiTemplates,
 }
 
 impl AppState {
@@ -71,6 +74,7 @@ impl AppState {
             local_auth: Arc::new(crate::local_auth::LocalAuth::empty()),
             sessions: None,
             login_throttle: Arc::new(crate::login_throttle::LoginThrottle::new()),
+            ui_templates: crate::ui::UiTemplates::new(),
         }
     }
 
@@ -120,6 +124,10 @@ impl AppState {
     pub fn login_throttle(&self) -> &crate::login_throttle::LoginThrottle {
         &self.login_throttle
     }
+
+    pub fn ui_templates(&self) -> &crate::ui::UiTemplates {
+        &self.ui_templates
+    }
 }
 
 /// Build the axum router. The REST API mounts at `/__api/*`; mock-traffic
@@ -129,6 +137,7 @@ impl AppState {
 /// auth layer.
 pub fn router(state: AppState) -> Router {
     let mcp = crate::mcp::router(state.clone());
+    let ui = crate::ui::router(state.clone());
     crate::api::router()
         .merge(crate::auth_api::router())
         .route("/__health", get(health))
@@ -136,6 +145,7 @@ pub fn router(state: AppState) -> Router {
         .fallback(any(dispatch))
         .with_state(state)
         .merge(mcp)
+        .merge(ui)
 }
 
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
