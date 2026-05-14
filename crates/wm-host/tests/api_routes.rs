@@ -433,6 +433,60 @@ async fn activity_fields_bump_on_dispatch() {
     );
 }
 
+#[tokio::test]
+async fn list_routes_reflects_dispatch_hits() {
+    // Regression: the list endpoint used to read from the RouteTable's
+    // cached snapshot, which refreshes on create/delete/update/cascade
+    // but not on dispatch hits. After traffic, list_routes was
+    // returning hits_total: 0 / last_hit_at: None forever while the
+    // show endpoint (reading the registry directly) had the right
+    // values. The slice-22 list pages exposed the gap: routes with
+    // dozens of hits rendered as 'never hit'. Fix reads from the
+    // registry directly in list_routes_core.
+    let h = Harness::start().await;
+    h.create_route_body(json!({
+        "methods": ["GET"],
+        "path": "/v1/list-hits",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+
+    // Drive a handful of dispatches.
+    for _ in 0..4 {
+        h.client
+            .get(h.url("/v1/list-hits"))
+            .send()
+            .await
+            .expect("dispatch");
+    }
+
+    // The route on the LIST endpoint must reflect the hits — that's
+    // the path the regression touched. The single-route SHOW endpoint
+    // was always correct.
+    let body: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes"))
+        .send()
+        .await
+        .expect("list")
+        .json()
+        .await
+        .expect("json");
+    let row = body["routes"]
+        .as_array()
+        .expect("routes array")
+        .iter()
+        .find(|r| r["path"] == "/v1/list-hits")
+        .expect("our route is in the list");
+    assert_eq!(row["hits_total"], 4, "list endpoint must show fresh hits");
+    assert!(
+        row["last_hit_at"].is_string(),
+        "list endpoint must show fresh last_hit_at, got {row}"
+    );
+}
+
 // -- Validation / errors -------------------------------------------------------
 
 #[tokio::test]

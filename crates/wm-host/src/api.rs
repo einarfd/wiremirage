@@ -632,9 +632,15 @@ pub(crate) fn list_routes_core(
         Some(auth.user_id.clone())
     };
 
-    let snapshot = state.routes().snapshot();
-    let mut filtered: Vec<Route> = snapshot
-        .iter()
+    // Read from the registry (source of truth) rather than the
+    // RouteTable's cached snapshot. The snapshot only refreshes on
+    // create/delete/update/cascade — `record_route_hit` updates the
+    // registry directly, so listing off the snapshot reports stale
+    // `hits_total: 0` / `last_hit_at: None` indefinitely. Fast path
+    // dispatch still uses the snapshot; listings are not hot.
+    let all = state.routes().registry().list_routes()?;
+    let mut filtered: Vec<Route> = all
+        .into_iter()
         .filter(|r| match owner_filter.as_deref() {
             Some(owner) => r.owner_id == owner,
             None => true,
@@ -656,7 +662,6 @@ pub(crate) fn list_routes_core(
             Some(needle) => route_matches_q(r, needle),
             None => true,
         })
-        .cloned()
         .collect();
 
     sort_routes(&mut filtered, sort_key, dir);
