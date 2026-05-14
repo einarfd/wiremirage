@@ -56,6 +56,13 @@ pub struct AppState {
     /// minijinja environment + helpers for the web UI (slice 21).
     /// Built once at startup; cheap to clone (inner Arc).
     ui_templates: crate::ui::UiTemplates,
+    /// Shutdown signal cloned into long-lived handlers (the SSE tail
+    /// is the only one today). When the main loop receives Ctrl-C /
+    /// SIGTERM it flips the watch to `true`; handlers race against
+    /// `changed()` to end the response cleanly so graceful-shutdown
+    /// isn't held open by an idle EventSource on a browser tab.
+    /// `None` in tests that don't bother wiring it up.
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl AppState {
@@ -75,7 +82,20 @@ impl AppState {
             sessions: None,
             login_throttle: Arc::new(crate::login_throttle::LoginThrottle::new()),
             ui_templates: crate::ui::UiTemplates::new(),
+            shutdown: None,
         }
+    }
+
+    pub fn with_shutdown(mut self, rx: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.shutdown = Some(rx);
+        self
+    }
+
+    /// Borrow the shutdown receiver if one was attached. SSE / other
+    /// long-lived handlers use `clone()` on the result so they get an
+    /// independent waiter that doesn't race against any other handler.
+    pub fn shutdown(&self) -> Option<&tokio::sync::watch::Receiver<bool>> {
+        self.shutdown.as_ref()
     }
 
     pub fn with_compiler(mut self, compiler: crate::compiler::CompilerClient) -> Self {

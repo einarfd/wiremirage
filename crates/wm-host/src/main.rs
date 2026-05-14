@@ -45,6 +45,13 @@ async fn main() -> anyhow::Result<()> {
     // required so the login flow can mint cookies; we refuse to start
     // in that case if it's missing rather than silently 503ing later.
     state = configure_local_auth(state, storage)?;
+
+    // Shutdown signal that long-lived handlers (the SSE journal tail,
+    // primarily) race against so a browser tab pointed at the live
+    // view doesn't pin the host open during graceful shutdown.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    state = state.with_shutdown(shutdown_rx);
+
     let app = router(state.clone());
 
     // Spawn the lifecycle sweeper. It walks the route table on its
@@ -60,7 +67,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %local, "wm-host listening");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Tell streaming handlers to wrap up *before* axum's
+            // graceful-shutdown waits for in-flight requests to
+            // drain — otherwise the SSE tail keeps every browser
+            // EventSource alive indefinitely and the host hangs.
+            let _ = shutdown_tx.send(true);
+        })
         .await?;
 
     // Flush in-flight spans before the process exits. The Drop impl

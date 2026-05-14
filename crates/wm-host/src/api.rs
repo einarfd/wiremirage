@@ -1980,6 +1980,22 @@ async fn tail_journal(
             }
         }
     });
+
+    // End the stream when the host's shutdown signal fires so axum's
+    // graceful-shutdown can drain — otherwise an idle browser tab on
+    // /__ui/journal/live pins this response open forever and the
+    // process won't exit on Ctrl-C. In test paths where no shutdown
+    // receiver is wired, `pending()` keeps the original behaviour.
+    let stop = match state.shutdown() {
+        Some(rx) => {
+            let mut rx = rx.clone();
+            futures::future::FutureExt::boxed(async move {
+                let _ = rx.changed().await;
+            })
+        }
+        None => futures::future::FutureExt::boxed(std::future::pending::<()>()),
+    };
+    let stream = stream.take_until(stop);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
