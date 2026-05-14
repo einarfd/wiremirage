@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/unmatched">Unmatched</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">#{{ entry.number }}</span>
+</nav>
+
+<section class="page-header">
+  <h1><code>{{ entry.method }} {{ entry.path }}</code></h1>
+  <p class="text-muted">
+    Unmatched · <time datetime="{{ entry.created_at_iso }}">{{ entry.created_at_iso }}</time>
+    {% if entry.trace_id %}· trace <code>{{ entry.trace_id }}</code>{% endif %}
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header"><h2>Summary</h2></header>
+  <dl class="meta-grid">
+    <dt>Entry ID</dt>
+    <dd><code>{{ entry.id }}</code></dd>
+    <dt>Trace ID</dt>
+    <dd>{% if entry.trace_id %}<code>{{ entry.trace_id }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</dd>
+  </dl>
+  <p>
+    <a class="btn btn--primary" href="/__ui/routes/new?method={{ entry.method_q }}&amp;path={{ entry.path_q }}">Create route from this request</a>
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header"><h2>Request</h2></header>
+  <dl class="meta-grid">
+    <dt>Method</dt><dd>{{ entry.method }}</dd>
+    <dt>Path</dt><dd><code>{{ entry.path }}</code></dd>
+  </dl>
+  <h3>Headers</h3>
+  {% if entry.request_headers | length == 0 %}
+  <p class="text-muted">No request headers recorded.</p>
+  {% else %}
+  <table class="data-table">
+    <thead><tr><th scope="col">Name</th><th scope="col">Value</th></tr></thead>
+    <tbody>
+    {%- for kv in entry.request_headers %}
+      <tr><td><code>{{ kv[0] }}</code></td><td><code>{{ kv[1] }}</code></td></tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <h3>Body</h3>
+  {% if entry.request_body_text %}
+  <pre class="code-block"><code>{{ entry.request_body_text }}</code></pre>
+  {% if entry.request_body_truncated %}<p class="text-muted">Body truncated at the journal's storage limit. Original size: {{ entry.request_body_original_size }} bytes.</p>{% endif %}
+  {% else %}
+  <p class="text-muted">Empty body ({{ entry.request_body_original_size }} bytes).</p>
+  {% endif %}
+</section>
+{% endblock %}

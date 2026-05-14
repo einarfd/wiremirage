@@ -423,6 +423,63 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI unmatched pages (slice 28)
+
+Eighth UI slice. Promotes the `/__ui/unmatched` stub into the
+admin-only unmatched-request view and adds a per-entry detail
+page at `/__ui/unmatched/{number}`.
+
+- **List page** (`GET /__ui/unmatched`):
+  - Filter form: `method` (dropdown of canonical HTTP verbs +
+    "Any") and `path_pattern` (free-form text, glob-matched
+    against the request path).
+  - Cursor pagination via `?before=N` — the page reads up to
+    `limit+1` newest entries (or 200 when filters are active so
+    narrow filters still tend to fill a page), filters
+    in-process, and emits an "Older →" link carrying
+    `before=<lowest-number-on-page>` when more remain. There's
+    no "newer" link — the list is naturally tail-heavy and a
+    user wanting the freshest entries clicks the page header.
+  - 25 rows per page.
+  - Each row: timestamp (`HH:MM:SS` + ISO `datetime` attr),
+    `METHOD path`, entry number, "View request" link to the
+    detail page, "Create route from request" link to
+    `/__ui/routes/new?method=…&path=…` (target still stubbed).
+- **Detail page** (`GET /__ui/unmatched/{number}`):
+  request envelope only — no response (unmatched requests
+  never reached a handler). Summary card with entry ID + trace
+  ID, request card with headers table and body block (UTF-8
+  with truncation note, or `(binary, N bytes)`). The
+  "Create route from this request" button is the same deep-
+  link as the list rows.
+- **Filter agreement**: composes a `JournalFilter` with just
+  `method` + `path_pattern` and runs
+  `matches_unmatched(record)`, matching the REST
+  `/__api/unmatched` surface exactly. Validation uses
+  `api_filters::validate_method`; an invalid method (lowercase,
+  bad chars) renders the standard 400 placeholder.
+- **Authorization**: admin-only on both pages (host-wide
+  view). Non-admin sees the same `forbidden_page` placeholder
+  used elsewhere.
+- **Tests:** `tests/ui_unmatched_pages.rs` — 10 tier-2 tests:
+  empty state, list-after-traffic, method filter narrows,
+  path-pattern glob narrows, bad method → 400, "Older →"
+  cursor link appears past one page, 403 non-admin on the
+  index, detail body renders (request body included), detail
+  404 unknown, 403 non-admin on detail.
+- **HTML escaping note:** minijinja escapes `/` to `&#x2f;`
+  inside text content (it's not in the default-allowed
+  charset). Tests that look at rendered paths must accept the
+  escape form or split on the trailing component
+  (`missing-thing`).
+- **Not in this slice:** "Did you mean…" near-miss
+  suggestions (the dispatcher writes `near_misses: vec![]`
+  today — would need a Levenshtein-distance lookup at
+  journal-write or read time), and the actual
+  `/__ui/routes/new` form the deep-links point at — that's a
+  later slice. The `ui_smoke.rs` placeholder-routes loop was
+  trimmed to just `/__ui/settings` to reflect the new state.
+
 ## Web UI state pages (slice 27)
 
 Seventh UI slice. Promotes the `/__ui/routes/{group}/{n}/state`

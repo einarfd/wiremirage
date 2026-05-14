@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–27 landed. The WIT contract is live at
+**Status:** slices 1–28 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -222,8 +222,21 @@ state" `.btn--ghost` on the matching detail page's
 exercises empty state, list-after-dispatch (driving the
 counter_handler fixture), clear-state redirect + wipe, 403
 non-owner, 404 unknown, plus the group-clear-also-wipes-route-
-state semantics. By design (per `mcp-surface.md`) user
-management is **not** in MCP — admins handle it via CLI/UI.
+state semantics. Slice 28 promoted the `/__ui/unmatched` stub
+into the admin-only unmatched view: a list page with
+method + path-pattern filters and cursor pagination over
+`?before=`, plus `/__ui/unmatched/{number}` for the request
+envelope (headers + body). Reuses
+`JournalFilter::matches_unmatched` for filtering so the UI
+agrees with `/__api/unmatched` semantics. Per-row links go to
+`/__ui/unmatched/{n}` for the detail and to
+`/__ui/routes/new?method=…&path=…` for create-from-request
+(target still stubbed). Tier-2: `tests/ui_unmatched_pages.rs`
+covers empty / lists / method-filter / path-glob-filter / bad
+method 400 / pagination cursor / detail body / detail 404 /
+non-admin 403 on both pages. By design (per `mcp-surface.md`)
+user management is **not** in MCP — admins handle it via
+CLI/UI.
 
 ## Where the design lives
 

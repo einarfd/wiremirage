@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-header">
+  <h1>Unmatched requests</h1>
+  <p class="text-muted">
+    Requests that hit the host but didn't match any registered route. Kept
+    for 1 hour per <code>journal-model.md</code>. Admin-only.
+  </p>
+</section>
+
+<section class="card">
+  <form method="get" action="/__ui/unmatched" class="filter-form">
+    <label class="filter-field">
+      <span class="filter-field__label">Method</span>
+      <select name="method">
+        <option value=""{% if filters.method == "" %} selected{% endif %}>Any</option>
+        {%- for m in methods %}
+        <option value="{{ m }}"{% if filters.method == m %} selected{% endif %}>{{ m }}</option>
+        {%- endfor %}
+      </select>
+    </label>
+    <label class="filter-field">
+      <span class="filter-field__label">Path pattern</span>
+      <input type="text" name="path_pattern" value="{{ filters.path_pattern }}" placeholder="/v1/*">
+    </label>
+    <button type="submit" class="btn btn--primary">Apply</button>
+    {% if filters.any_active %}<a href="/__ui/unmatched" class="btn btn--ghost">Reset</a>{% endif %}
+  </form>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>{{ showing }} request{% if showing != 1 %}s{% endif %}</h2>
+    <span class="text-muted">Newest first. {% if filters.any_active %}Filtered.{% endif %}</span>
+  </header>
+  {% if entries | length == 0 %}
+  <p class="empty-state">
+    {%- if filters.any_active -%}
+    No unmatched requests match this filter. Try <a href="/__ui/unmatched">resetting</a>.
+    {%- else -%}
+    No unmatched requests in the last hour. Either every call hit a route, or nothing's been called yet.
+    {%- endif -%}
+  </p>
+  {% else %}
+  <ul class="action-list unmatched-list">
+  {%- for e in entries %}
+    <li class="stack">
+      <header class="inline">
+        <code class="text-muted"><time datetime="{{ e.created_at_iso }}">{{ e.created_at_short }}</time></code>
+        <strong>{{ e.method }} <code>{{ e.path }}</code></strong>
+        <span class="text-muted">#{{ e.number }}</span>
+      </header>
+      <div class="inline">
+        <a class="link" href="/__ui/unmatched/{{ e.number }}">View request</a>
+        <span class="text-muted">·</span>
+        <a class="link" href="/__ui/routes/new?method={{ e.method_q }}&amp;path={{ e.path_q }}">Create route from request</a>
+      </div>
+    </li>
+  {%- endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+{% if pagination.next_url %}
+<nav class="pagination" aria-label="Pagination">
+  <a class="btn btn--ghost" href="{{ pagination.next_url }}">Older →</a>
+</nav>
+{% endif %}
+{% endblock %}

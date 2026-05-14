@@ -279,19 +279,12 @@ async fn placeholder_pages_render_with_api_hint() {
     // survive the escape (alphanumerics + underscores).
     //
     // Each successive UI slice converts more of these stubs to real
-    // pages and removes them from this list. After slice 25's tokens
-    // page landed, every screen previously in this loop has become
-    // real; the remaining stubs (settings, admin/health, unmatched,
-    // group/route state, routes/new, journal entry) are admin-only or
-    // covered by their own per-slice tests. If a future slice adds
-    // back a placeholder route, add a check here for it.
-    // Remaining placeholder routes after slice 25. All admin-only —
-    // the admin test user above can see them; non-admin gets the
-    // separate 403 test in admin_only_stubs_are_forbidden_for_non_admin.
-    let placeholders: &[(&str, &[&str])] = &[
-        ("/__ui/unmatched", &["GET", "__api", "unmatched"]),
-        ("/__ui/settings", &["GET", "__api", "users"]),
-    ];
+    // pages and removes them from this list. After slice 28's unmatched
+    // page landed, only `/__ui/settings` (and the not-yet-implemented
+    // `/__ui/admin/health` and `/__ui/routes/new`) remain placeholders.
+    // If a future slice adds back a placeholder route, add a check
+    // here for it.
+    let placeholders: &[(&str, &[&str])] = &[("/__ui/settings", &["GET", "__api", "users"])];
     for &(path, expected_substrings) in placeholders.iter() {
         let resp = client
             .get(url(&h, path))

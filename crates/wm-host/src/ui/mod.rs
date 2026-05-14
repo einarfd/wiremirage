@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::api::{GroupsListQuery, RoutesListQuery, list_groups_core, list_routes_core};
+use crate::api_filters::validate_method;
 use crate::auth::AuthContext;
+use crate::journal::UnmatchedCursor;
+use crate::journal_filter::JournalFilter;
 use crate::registry::{Group, Route};
 
 pub mod auth_redirect;
@@ -66,6 +69,8 @@ impl UiTemplates {
         tmpl!("tokens.html", "templates/tokens.html");
         tmpl!("group_state.html", "templates/group_state.html");
         tmpl!("route_state.html", "templates/route_state.html");
+        tmpl!("unmatched_list.html", "templates/unmatched_list.html");
+        tmpl!("unmatched_detail.html", "templates/unmatched_detail.html");
         tmpl!("not_found.html", "templates/not_found.html");
         tmpl!("placeholder.html", "templates/placeholder.html");
         Self { env: Arc::new(env) }
@@ -121,7 +126,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/__ui/journal/live", get(live_journal_page))
         .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
-        .route("/__ui/unmatched", get(stub_unmatched))
+        .route("/__ui/unmatched", get(unmatched_index_page))
+        .route("/__ui/unmatched/{number}", get(unmatched_detail_page))
         .route("/__ui/me/tokens", get(tokens_page).post(create_token_form))
         .route(
             "/__ui/me/tokens/{name}/revoke",
@@ -1969,6 +1975,204 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
     resp
 }
 
+// -- Unmatched pages (slice 28) ---------------------------------------------
+//
+// The unmatched-request log surfaced at /__ui/unmatched, plus a
+// per-entry detail page at /__ui/unmatched/{number}. Both admin-only,
+// mirroring the REST surface at /__api/unmatched. Reuses the
+// `JournalFilter::matches_unmatched` matcher for method + path_pattern
+// filtering so the UI agrees with the REST shape.
+
+#[derive(Deserialize)]
+struct UiUnmatchedQuery {
+    method: Option<String>,
+    path_pattern: Option<String>,
+    before: Option<u64>,
+}
+
+const UI_UNMATCHED_PAGE_LIMIT: usize = 25;
+
+async fn unmatched_index_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(raw_q): Query<UiUnmatchedQuery>,
+) -> Response {
+    if !auth.is_admin {
+        return forbidden_page(&state, &auth);
+    }
+    let method = match nonempty(raw_q.method.as_deref()) {
+        Some(m) => match validate_method(&m) {
+            Ok(v) => Some(v),
+            Err(e) => return ui_error_400(&state, &auth, format!("invalid method: {e}")),
+        },
+        None => None,
+    };
+    let path_pattern = nonempty(raw_q.path_pattern.as_deref());
+
+    // Pull a generous raw window so filters still tend to have a page
+    // worth of results even when they narrow aggressively. Fetch
+    // limit+1 to know if there's an older page after this one.
+    let any_filter = method.is_some() || path_pattern.is_some();
+    let raw_limit = if any_filter {
+        200
+    } else {
+        UI_UNMATCHED_PAGE_LIMIT + 1
+    };
+    let cursor = UnmatchedCursor {
+        before: raw_q.before,
+        limit: raw_limit,
+    };
+    let raw = match state.journal().list_unmatched(cursor) {
+        Ok(r) => r,
+        Err(e) => return ui_error_500(&state, &auth, format!("list unmatched: {e}")),
+    };
+
+    let filter = JournalFilter {
+        method: method.clone(),
+        path_pattern: path_pattern.clone(),
+        ..JournalFilter::default()
+    };
+    let filtered: Vec<_> = raw
+        .into_iter()
+        .filter(|r| filter.matches_unmatched(r))
+        .collect();
+    let has_more = filtered.len() > UI_UNMATCHED_PAGE_LIMIT;
+    let page: Vec<_> = filtered.into_iter().take(UI_UNMATCHED_PAGE_LIMIT).collect();
+
+    let next_url = if has_more {
+        page.last().map(|e| {
+            let mut parts: Vec<(String, String)> = Vec::new();
+            if let Some(m) = &method {
+                parts.push(("method".into(), m.clone()));
+            }
+            if let Some(p) = &path_pattern {
+                parts.push(("path_pattern".into(), p.clone()));
+            }
+            parts.push(("before".into(), e.number.to_string()));
+            format!("/__ui/unmatched?{}", encode_query(&parts))
+        })
+    } else {
+        None
+    };
+
+    let rows: Vec<UnmatchedRow> = page.iter().map(UnmatchedRow::from_record).collect();
+    let showing = rows.len() as u64;
+
+    render(
+        &state,
+        "unmatched_list.html",
+        context! {
+            page_title => "Unmatched requests",
+            user => UserBadge::from(&auth),
+            entries => rows,
+            showing => showing,
+            methods => ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            filters => UnmatchedFilterState {
+                method: method.unwrap_or_default(),
+                path_pattern: path_pattern.unwrap_or_default(),
+                any_active: any_filter,
+            },
+            pagination => UnmatchedPagination { next_url },
+        },
+    )
+}
+
+async fn unmatched_detail_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(number): Path<u64>,
+) -> Response {
+    if !auth.is_admin {
+        return forbidden_page(&state, &auth);
+    }
+    let record = match state.journal().get_unmatched(number) {
+        Ok(r) => r,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Unmatched #{number}")),
+    };
+    let view = UnmatchedDetailView::from_record(&record);
+    render(
+        &state,
+        "unmatched_detail.html",
+        context! {
+            page_title => format!("Unmatched #{}", number),
+            user => UserBadge::from(&auth),
+            entry => view,
+        },
+    )
+}
+
+#[derive(Serialize)]
+struct UnmatchedRow {
+    number: u64,
+    method: String,
+    path: String,
+    created_at_iso: String,
+    created_at_short: String,
+    method_q: String,
+    path_q: String,
+}
+
+impl UnmatchedRow {
+    fn from_record(r: &crate::journal::UnmatchedRecord) -> Self {
+        Self {
+            number: r.number,
+            method: r.request.method.clone(),
+            path: r.request.path.clone(),
+            created_at_iso: r.created_at.to_rfc3339(),
+            created_at_short: r.created_at.format("%H:%M:%S").to_string(),
+            method_q: urlencoding::encode(&r.request.method).into_owned(),
+            path_q: urlencoding::encode(&r.request.path).into_owned(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UnmatchedFilterState {
+    method: String,
+    path_pattern: String,
+    any_active: bool,
+}
+
+#[derive(Serialize)]
+struct UnmatchedPagination {
+    next_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct UnmatchedDetailView {
+    id: String,
+    number: u64,
+    method: String,
+    path: String,
+    created_at_iso: String,
+    trace_id: Option<String>,
+    request_headers: Vec<(String, String)>,
+    request_body_text: Option<String>,
+    request_body_truncated: bool,
+    request_body_original_size: usize,
+    method_q: String,
+    path_q: String,
+}
+
+impl UnmatchedDetailView {
+    fn from_record(r: &crate::journal::UnmatchedRecord) -> Self {
+        Self {
+            id: r.id.clone(),
+            number: r.number,
+            method: r.request.method.clone(),
+            path: r.request.path.clone(),
+            created_at_iso: r.created_at.to_rfc3339(),
+            trace_id: r.trace_id.clone(),
+            request_headers: r.request.headers.clone(),
+            request_body_text: body_as_text(&r.request.body),
+            request_body_truncated: r.request.body_truncated,
+            request_body_original_size: r.request.original_body_size,
+            method_q: urlencoding::encode(&r.request.method).into_owned(),
+            path_q: urlencoding::encode(&r.request.path).into_owned(),
+        }
+    }
+}
+
 // -- Stubs ------------------------------------------------------------------
 //
 // Each stub names what'll eventually live at this URL, plus the
@@ -1978,13 +2182,6 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
 
 async fn stub_routes_new(State(state): State<AppState>, auth: AuthContext) -> Response {
     stub(&state, &auth, "New route", "POST /__api/routes")
-}
-
-async fn stub_unmatched(State(state): State<AppState>, auth: AuthContext) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
-    stub(&state, &auth, "Unmatched", "GET /__api/unmatched")
 }
 
 async fn stub_settings(State(state): State<AppState>, auth: AuthContext) -> Response {
