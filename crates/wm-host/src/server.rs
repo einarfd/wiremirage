@@ -195,6 +195,36 @@ pub fn is_reserved_path(path: &str) -> bool {
     RESERVED_EXACT.contains(&path) || RESERVED_PREFIXES.iter().any(|&p| path.starts_with(p))
 }
 
+/// True iff the request carries a `wm_session` cookie that resolves to
+/// a live session. Used by the bare-`/` redirect to pick between
+/// `/__ui/` (signed in) and `/__auth/login` (not). Reuses the same
+/// cookie name and verification as `ui::auth_redirect::require_session`
+/// — slightly duplicated cookie parsing, but the alternative (extract
+/// a shared helper) is a tiny refactor for a tiny win.
+fn has_valid_session(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(sessions) = state.sessions() else {
+        return false;
+    };
+    let Some(cookie) = pick_session_cookie(headers) else {
+        return false;
+    };
+    sessions.touch(&cookie).is_ok()
+}
+
+fn pick_session_cookie(headers: &HeaderMap) -> Option<String> {
+    let name = crate::session::COOKIE_NAME;
+    for value in headers.get_all(header::COOKIE).iter() {
+        let Ok(raw) = value.to_str() else { continue };
+        for pair in raw.split(';') {
+            let pair = pair.trim();
+            if let Some(v) = pair.strip_prefix(&format!("{name}=")) {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     match dispatch_inner(state, req).await {
         Ok(resp) => resp,
@@ -261,6 +291,27 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let matched = match state.routes.find_match(method.as_str(), path) {
         Some(m) => m,
         None => {
+            // Per route-model.md, bare `GET /` with no user route
+            // claiming it bounces to the UI (if the caller has a
+            // session) or the login page (if not). Skipped if a user
+            // route explicitly registered `GET /` — `find_match`
+            // would have returned `Some` and shadowed this branch.
+            //
+            // The redirect deliberately doesn't write to the
+            // unmatched journal: a human pointing a browser at the
+            // bare hostname isn't a "missing mock" signal.
+            if method == http::Method::GET && path == "/" {
+                let target = if has_valid_session(&state, &header_map) {
+                    "/__ui/"
+                } else {
+                    "/__auth/login"
+                };
+                span.record("outcome", "root_redirect");
+                let mut resp = axum::response::Redirect::to(target).into_response();
+                inject_response_trace_id(&trace_id, resp.headers_mut());
+                return Ok(resp);
+            }
+
             span.record("outcome", "unmatched_404");
             // Journal the unmatched request. Best-effort: a journal
             // failure is logged but doesn't change what the SUT sees.

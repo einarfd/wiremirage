@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/groups/{{ route.group_name }}">{{ route.group_name }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">#{{ route.number }} {{ route.methods }} {{ route.path }}</span>
+</nav>
+
+<section class="page-header">
+  <h1><code>{{ route.methods }} {{ route.path }}</code></h1>
+  <p class="text-muted">
+    in <a href="/__ui/groups/{{ route.group_name }}">{{ route.group_name }}</a> ·
+    {% if route.hits_total > 0 -%}
+    <strong>{{ route.hits_total }} hit{% if route.hits_total != 1 %}s{% endif %}</strong>, last {{ route.last_hit_at }}
+    {%- else -%}
+    no traffic yet
+    {%- endif %}
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Metadata</h2>
+  </header>
+  <dl class="meta-grid">
+    <dt>Methods</dt>
+    <dd>{{ route.methods }}</dd>
+    <dt>Path</dt>
+    <dd><code>{{ route.path }}</code></dd>
+    <dt>Language</dt>
+    <dd>{{ route.language }}</dd>
+    <dt>Bindings</dt>
+    <dd><code>{{ route.bindings_version }}</code></dd>
+    <dt>Component size</dt>
+    <dd>{{ route.component_size_human }}</dd>
+    <dt>Owner</dt>
+    <dd>{{ route.owner_name }}</dd>
+    <dt>Route ID</dt>
+    <dd><code>{{ route.id }}</code></dd>
+    <dt>Created</dt>
+    <dd><time datetime="{{ route.created_at }}">{{ route.created_at }}</time></dd>
+  </dl>
+  <p class="text-muted">
+    The handler is stored as a compiled wasm component; source viewing arrives with the CodeMirror slice.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Recent journal entries</h2>
+    <a class="link" href="/__ui/journal/live?group={{ route.group_name }}">View full journal &rarr;</a>
+  </header>
+  {% if journal | length == 0 %}
+  <p class="empty-state">No journal entries for this route yet.</p>
+  {% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">Time</th>
+        <th scope="col">#</th>
+        <th scope="col">Status</th>
+        <th scope="col">Duration</th>
+        <th scope="col">Trace</th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for j in journal %}
+      <tr>
+        <td><a href="/__ui/journal/{{ route.group_name }}/{{ j.number }}"><time datetime="{{ j.created_at }}">{{ j.created_at }}</time></a></td>
+        <td class="text-muted">{{ j.number }}</td>
+        <td><span class="status status-{{ j.status_class }}">{{ j.status }}</span></td>
+        <td>{{ j.duration_ms }} ms</td>
+        <td class="text-muted">{% if j.trace_id %}<code>{{ j.trace_id_short }}</code>{% else %}—{% endif %}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Manage from CLI</h2>
+  </header>
+  <p class="text-muted">Mutating actions (edit, delete, dry-run) land in a later slice. For now:</p>
+  <ul class="action-list">
+    <li><code>wm routes test {{ route.group_name }} {{ route.number }} --method {{ route.first_method }} --path '{{ route.path }}'</code> — dry-run the handler</li>
+    <li><code>wm routes state {{ route.group_name }} {{ route.number }}</code> — inspect per-route kv state</li>
+    <li><code>wm routes delete {{ route.group_name }} {{ route.number }}</code> — delete this route</li>
+  </ul>
+</section>
+{% endblock %}

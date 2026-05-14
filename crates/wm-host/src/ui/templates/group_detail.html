@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">{{ group.name }}</span>
+</nav>
+
+<section class="page-header">
+  <h1>{{ group.name }}</h1>
+  <p class="text-muted">
+    {%- if group.implicit -%}
+    Implicit single-route group.
+    {%- else -%}
+    {{ route_count }} route{% if route_count != 1 %}s{% endif %} ·
+    {% if group.sliding_ttl %}sliding{% else %}fixed{% endif %} TTL
+    {%- endif -%}
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Metadata</h2>
+  </header>
+  <dl class="meta-grid">
+    <dt>Owner</dt>
+    <dd>{{ group.owner_name }}</dd>
+    <dt>TTL</dt>
+    <dd>{{ group.ttl_seconds }} s{% if group.sliding_ttl %} <span class="text-muted">· sliding</span>{% endif %}</dd>
+    <dt>Last activity</dt>
+    <dd>{% if group.last_activity_at %}<time datetime="{{ group.last_activity_at }}">{{ group.last_activity_at }}</time>{% else %}<span class="text-muted">never</span>{% endif %}</dd>
+    <dt>Created</dt>
+    <dd><time datetime="{{ group.created_at }}">{{ group.created_at }}</time></dd>
+    <dt>Group ID</dt>
+    <dd><code>{{ group.id }}</code></dd>
+  </dl>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Routes <span class="text-muted">({{ route_count }})</span></h2>
+  </header>
+  {% if routes | length == 0 %}
+  <p class="empty-state">No routes in this group yet. Create one with <code>wm routes add --group {{ group.name }} --method GET --path /foo --source-file handler.ts</code>.</p>
+  {% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">#</th>
+        <th scope="col">Method</th>
+        <th scope="col">Path</th>
+        <th scope="col">Hits</th>
+        <th scope="col">Last hit</th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for r in routes %}
+      <tr>
+        <td class="text-muted">{{ r.number }}</td>
+        <td>{{ r.methods }}</td>
+        <td><a href="/__ui/routes/{{ group.name }}/{{ r.number }}"><code>{{ r.path }}</code></a></td>
+        <td>{{ r.hits_total }}</td>
+        <td class="text-muted">{% if r.last_hit_at %}{{ r.last_hit_at }}{% else %}never{% endif %}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Manage from CLI</h2>
+  </header>
+  <p class="text-muted">Mutating actions (refresh TTL, edit, delete) land in a later slice. For now:</p>
+  <ul class="action-list">
+    <li><code>wm groups refresh {{ group.name }}</code> — bump the TTL to its configured value</li>
+    <li><code>wm groups update {{ group.name }} --ttl-seconds N</code> — edit TTL</li>
+    <li><code>wm groups delete {{ group.name }}</code> — cascade-delete the group and all its routes</li>
+    <li><code>wm journal tail --group {{ group.name }}</code> — watch this group's traffic live</li>
+  </ul>
+</section>
+{% endblock %}

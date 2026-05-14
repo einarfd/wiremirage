@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–22 landed. The WIT contract is live at
+**Status:** slices 1–23 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -140,8 +140,22 @@ Templates `groups_list.html` and `routes_list.html` extend the
 slice-21 layout shell; CSS adds `.filter-form`, `.filter-field`,
 `.btn--ghost`, `.btn--disabled`, `.pagination`. Owner column
 resolves user ULIDs to usernames via a single batched lookup per
-page. By design (per `mcp-surface.md`) user management is
-**not** in MCP — admins handle it via CLI/UI.
+page. Slice 23 added the Group + Route detail pages
+(`/__ui/groups/{group}`, `/__ui/routes/{group}/{n}`) — both are
+read-only reflections of the underlying records, with breadcrumb
+nav back to the list pages, an owner-or-admin authorization gate
+(403 for non-owners, 404 for unknown), and a "Manage from CLI"
+panel listing the equivalent `wm` commands until the CSRF-enabled
+authed-action slice lands. Route detail surfaces a short tail of
+recent journal entries (≤10) filtered to this route. Slice 23
+also implemented the bare-`/` redirect from route-model.md: an
+unmatched `GET /` bounces to `/__ui/` (with a valid `wm_session`
+cookie) or `/__auth/login` (without), wired into `dispatch_inner`
+so a user-registered `GET /` route still shadows it. The redirect
+does NOT write to the unmatched journal — a human pointing a
+browser at the host isn't a "missing mock" signal. By design
+(per `mcp-surface.md`) user management is **not** in MCP — admins
+handle it via CLI/UI.
 
 ## Where the design lives
 

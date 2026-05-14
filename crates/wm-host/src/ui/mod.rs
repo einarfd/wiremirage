@@ -58,7 +58,9 @@ impl UiTemplates {
         tmpl!("login.html", "templates/login.html");
         tmpl!("home.html", "templates/home.html");
         tmpl!("groups_list.html", "templates/groups_list.html");
+        tmpl!("group_detail.html", "templates/group_detail.html");
         tmpl!("routes_list.html", "templates/routes_list.html");
+        tmpl!("route_detail.html", "templates/route_detail.html");
         tmpl!("placeholder.html", "templates/placeholder.html");
         Self { env: Arc::new(env) }
     }
@@ -83,11 +85,11 @@ pub fn router(state: AppState) -> Router {
     let authed: Router<AppState> = Router::new()
         .route("/__ui/", get(home))
         .route("/__ui/groups", get(groups_list_page))
-        .route("/__ui/groups/{group}", get(stub_group_detail))
+        .route("/__ui/groups/{group}", get(group_detail_page))
         .route("/__ui/groups/{group}/state", get(stub_group_state))
         .route("/__ui/routes", get(routes_list_page))
         .route("/__ui/routes/new", get(stub_routes_new))
-        .route("/__ui/routes/{group}/{number}", get(stub_route_detail))
+        .route("/__ui/routes/{group}/{number}", get(route_detail_page))
         .route("/__ui/routes/{group}/{number}/state", get(stub_route_state))
         .route("/__ui/journal/live", get(stub_journal_live))
         .route("/__ui/journal/{group}/{number}", get(stub_journal_entry))
@@ -695,25 +697,259 @@ impl UserBadge {
     }
 }
 
+// -- /__ui/groups/{group} ---------------------------------------------------
+//
+// Detail page for a single group. Renders metadata, the group's
+// routes (link-through to per-route detail), and a "Manage from CLI"
+// help block. Authed actions (refresh / edit / delete) wait for a
+// later slice that brings CSRF middleware online.
+
+async fn group_detail_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Response {
+    let group = match state.routes().registry().read_group_by_ref(&group_ref) {
+        Ok(g) => g,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Group {group_ref}")),
+    };
+    if !auth.is_admin && group.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+
+    let all_routes = state.routes().registry().list_routes().unwrap_or_default();
+    let mut routes_in_group: Vec<&Route> = all_routes
+        .iter()
+        .filter(|r| r.group_id == group.id)
+        .collect();
+    routes_in_group.sort_by_key(|r| r.number);
+
+    let owner_names = resolve_owner_names(&state, std::iter::once(group.owner_id.as_str()));
+    let routes_view: Vec<GroupDetailRouteRow> = routes_in_group
+        .iter()
+        .map(|r| GroupDetailRouteRow {
+            number: r.number,
+            methods: r.methods.join(", "),
+            path: r.path.clone(),
+            hits_total: r.hits_total,
+            last_hit_at: r.last_hit_at.map(|t| t.to_rfc3339()),
+        })
+        .collect();
+    let group_view = GroupDetailGroup {
+        id: group.id.clone(),
+        name: group.name.clone(),
+        implicit: group.implicit,
+        owner_name: owner_names
+            .get(&group.owner_id)
+            .cloned()
+            .unwrap_or_else(|| short_id(&group.owner_id)),
+        ttl_seconds: group.ttl_seconds,
+        sliding_ttl: group.sliding_ttl,
+        last_activity_at: group.last_activity_at.map(|t| t.to_rfc3339()),
+        created_at: group.created_at.to_rfc3339(),
+    };
+
+    render(
+        &state,
+        "group_detail.html",
+        context! {
+            page_title => group.name,
+            user => UserBadge::from(&auth),
+            group => group_view,
+            routes => routes_view,
+            route_count => routes_in_group.len(),
+        },
+    )
+}
+
+#[derive(Serialize)]
+struct GroupDetailGroup {
+    id: String,
+    name: String,
+    implicit: bool,
+    owner_name: String,
+    ttl_seconds: u64,
+    sliding_ttl: bool,
+    last_activity_at: Option<String>,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct GroupDetailRouteRow {
+    number: u32,
+    methods: String,
+    path: String,
+    hits_total: u64,
+    last_hit_at: Option<String>,
+}
+
+// -- /__ui/routes/{group}/{number} ------------------------------------------
+//
+// Detail page for a single route. Metadata + a short tail of recent
+// journal entries for this route (read from the group's journal,
+// filtered by route_id). Source viewing waits for the CodeMirror
+// slice; authed actions wait for CSRF.
+
+async fn route_detail_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+) -> Response {
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
+        }
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+
+    let owner_names = resolve_owner_names(&state, std::iter::once(route.owner_id.as_str()));
+    let owner_name = owner_names
+        .get(&route.owner_id)
+        .cloned()
+        .unwrap_or_else(|| short_id(&route.owner_id));
+
+    // Recent journal entries for this route. We pull a page off the
+    // group's journal and keep only those that targeted this route_id.
+    // 10 is enough for the "recent activity" panel; the full view
+    // lands with the journal page later.
+    let mut journal_view: Vec<RouteDetailJournalRow> = Vec::new();
+    if let Ok(entries) = state.journal().list_for_group(
+        &route.group_id,
+        crate::journal::ListCursor {
+            before: None,
+            limit: 50,
+        },
+    ) {
+        for entry in entries
+            .into_iter()
+            .filter(|e| e.route_id == route.id)
+            .take(10)
+        {
+            journal_view.push(RouteDetailJournalRow {
+                number: entry.number,
+                status: entry.response.status,
+                status_class: status_class(entry.response.status),
+                duration_ms: entry.duration_ms,
+                created_at: entry.created_at.to_rfc3339(),
+                trace_id: entry.trace_id.clone(),
+                trace_id_short: entry
+                    .trace_id
+                    .as_ref()
+                    .map(|t| t.chars().take(8).collect::<String>())
+                    .unwrap_or_default(),
+            });
+        }
+    }
+
+    let route_view = RouteDetailRoute {
+        id: route.id.clone(),
+        group_name: route.group_name.clone(),
+        number: route.number,
+        methods: route.methods.join(", "),
+        first_method: route
+            .methods
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "GET".into()),
+        path: route.path.clone(),
+        language: route.language.clone(),
+        bindings_version: route.bindings_version.clone(),
+        component_size_human: human_size(route.compiled_wasm.len()),
+        owner_name,
+        hits_total: route.hits_total,
+        last_hit_at: route.last_hit_at.map(|t| t.to_rfc3339()),
+        created_at: route.created_at.to_rfc3339(),
+    };
+
+    render(
+        &state,
+        "route_detail.html",
+        context! {
+            page_title => format!("{} {}", route.methods.join(", "), route.path),
+            user => UserBadge::from(&auth),
+            route => route_view,
+            journal => journal_view,
+        },
+    )
+}
+
+#[derive(Serialize)]
+struct RouteDetailRoute {
+    id: String,
+    group_name: String,
+    number: u32,
+    methods: String,
+    first_method: String,
+    path: String,
+    language: String,
+    bindings_version: String,
+    component_size_human: String,
+    owner_name: String,
+    hits_total: u64,
+    last_hit_at: Option<String>,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct RouteDetailJournalRow {
+    number: u32,
+    status: u16,
+    status_class: &'static str,
+    duration_ms: u64,
+    created_at: String,
+    trace_id: Option<String>,
+    trace_id_short: String,
+}
+
+fn status_class(status: u16) -> &'static str {
+    match status / 100 {
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => "other",
+    }
+}
+
+fn human_size(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        return format!("{bytes} B");
+    }
+    if b < KIB * KIB {
+        return format!("{:.1} KiB", b / KIB);
+    }
+    format!("{:.1} MiB", b / (KIB * KIB))
+}
+
+fn ui_not_found(state: &AppState, auth: &AuthContext, what: &str) -> Response {
+    let mut resp = render(
+        state,
+        "placeholder.html",
+        context! {
+            page_title => "Not found",
+            api_hint => format!("{what} doesn't exist (or you can't see it)."),
+            user => UserBadge::from(auth),
+        },
+    );
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp
+}
+
 // -- Stubs ------------------------------------------------------------------
 //
 // Each stub names what'll eventually live at this URL, plus the
 // equivalent API path so the user can poke at the data via the CLI
 // or curl until the real page lands. Stubs share a single template
 // to keep the code DRY.
-
-async fn stub_group_detail(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Path(group): Path<String>,
-) -> Response {
-    stub(
-        &state,
-        &auth,
-        &format!("Group: {group}"),
-        &format!("GET /__api/groups/{group}"),
-    )
-}
 
 async fn stub_group_state(
     State(state): State<AppState>,
@@ -732,19 +968,6 @@ async fn stub_group_state(
 
 async fn stub_routes_new(State(state): State<AppState>, auth: AuthContext) -> Response {
     stub(&state, &auth, "New route", "POST /__api/routes")
-}
-
-async fn stub_route_detail(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Path((group, number)): Path<(String, u32)>,
-) -> Response {
-    stub(
-        &state,
-        &auth,
-        &format!("Route: {group}/{number}"),
-        &format!("GET /__api/routes/{group}/{number}"),
-    )
 }
 
 async fn stub_route_state(

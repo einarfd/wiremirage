@@ -423,6 +423,68 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI detail pages + `/` redirect (slice 23)
+
+Third UI slice. Replaces the slice-21 stubs at
+`/__ui/groups/{group}` and `/__ui/routes/{group}/{n}` with real
+detail pages, and implements the bare-`/` redirect from
+`route-model.md`.
+
+- **Group detail (`/__ui/groups/{group}`):** breadcrumb back to
+  the listing, metadata grid (TTL, sliding flag, last activity,
+  created, group ID), routes-in-group table with link-through to
+  per-route detail, and a "Manage from CLI" panel listing
+  `wm groups refresh / update / delete` plus `wm journal tail`.
+  Source of truth: `registry.read_group_by_ref` + `registry.list_routes`
+  filtered in-process.
+- **Route detail (`/__ui/routes/{group}/{n}`):** breadcrumb,
+  metadata (methods, path, language, bindings, component size,
+  owner, route ID, created), recent journal entries
+  (`journal.list_for_group` → filtered by `route_id`, capped at 10),
+  and a "Manage from CLI" panel listing `wm routes test / state /
+  delete`. Source viewing waits for the CodeMirror slice — the
+  page surfaces "component size: N KiB" and stops short of
+  showing handler source (the registry stores compiled wasm, not
+  TS source, so source rendering needs registry changes too).
+- **Authorization model:**
+  - Unknown group / route → **404** via `ui_not_found` (placeholder
+    template with `Not found` heading and `status=404`).
+  - Non-admin viewing someone else's group / route → **403** via
+    `forbidden_page` (same template, admin-role-required hint).
+  - Admin can view anything. Same rule as the REST surface
+    (`ensure_group_owner_or_admin`).
+- **`GET /` redirect:** in `server::dispatch_inner`, when no user
+  route matches and method+path are exactly `GET /`, the host
+  returns `Redirect::to("/__ui/")` if a valid session cookie is
+  attached or `/__auth/login` otherwise. A user-registered `GET /`
+  route shadows the redirect because `find_match` returns `Some`
+  before the fallback executes. The redirect deliberately does
+  NOT write to the unmatched journal — a browser pointed at the
+  bare hostname isn't a missing-mock signal.
+- **Session check in dispatch:** the `has_valid_session` helper +
+  `pick_session_cookie` in `server.rs` duplicate the cookie-parse
+  logic from `ui::auth_redirect` and `auth_api`. Three call sites
+  of ~10 LoC each — within the "three is fine" threshold from
+  CLAUDE.md; extracting a shared helper waits until a fourth
+  consumer wants it.
+- **CSS additions:** `.breadcrumb` / `.breadcrumb__sep`,
+  `.meta-grid` (auto + 1fr two-column DL), `.status` pill. Status
+  colour classes (`status-2xx` etc) were already in place from
+  earlier slices.
+- **Templates:** `group_detail.html`, `route_detail.html`. Both
+  extend `base.html`. Authed-action affordances appear as plain
+  text in the CLI hint section — no disabled-button mockery, no
+  half-implemented forms.
+- **Tests:** `tests/ui_detail_pages.rs` — 11 tier-2 tests covering
+  metadata render, 404 / 403 paths, admin-can-view-any, the
+  detail page's recent-journal block reflecting traffic, both
+  `/` redirect destinations, and the user-`GET /`-shadows-redirect
+  guarantee.
+- **Not in this slice:** authed actions (refresh / edit / delete /
+  dry-run buttons — need CSRF), source viewer (needs source
+  storage on registry + CodeMirror), HTMX-driven live updates
+  (separate slice).
+
 ## Web UI list pages (slice 22)
 
 Second slice of the UI track. Replaces the slice-21 stubs at

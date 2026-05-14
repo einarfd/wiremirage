@@ -248,14 +248,11 @@ async fn placeholder_pages_render_with_api_hint() {
     // browser un-escapes it for display; we match on substrings that
     // survive the escape (alphanumerics + underscores).
     //
-    // `/__ui/groups` and `/__ui/routes` became real pages in slice 22,
-    // so they're not in this list anymore — the slice-22 tests cover
-    // them. What's left are the screens still under construction.
-    for (path, expected_substrings) in [
-        ("/__ui/groups/foo", ["GET", "__api", "groups"]),
-        ("/__ui/routes/foo/3", ["GET", "__api", "routes"]),
-        ("/__ui/me/tokens", ["GET", "__api", "tokens"]),
-    ] {
+    // Each successive UI slice converts more of these stubs to real
+    // pages and removes them from this list. slice 22: /__ui/groups
+    // + /__ui/routes. slice 23: /__ui/groups/{group} +
+    // /__ui/routes/{group}/{n} (the ui_detail_pages tests cover them).
+    for (path, expected_substrings) in [("/__ui/me/tokens", ["GET", "__api", "tokens"])] {
         let resp = client
             .get(url(&h, path))
             .header("cookie", &cookie)
