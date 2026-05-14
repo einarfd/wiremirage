@@ -423,6 +423,50 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI state pages (slice 27)
+
+Seventh UI slice. Promotes the `/__ui/routes/{group}/{n}/state`
+and `/__ui/groups/{group}/state` stubs into real pages — a
+read-only window onto the route's private `kv:` namespace and
+the group's shared `gkv:` namespace, with a "Clear state"
+button for either.
+
+- **Route state page** (`GET /__ui/routes/{group}/{n}/state`):
+  pulls entries via `Registry::list_route_state(group_id,
+  route_id)`. POST to the same URL clears (calls
+  `Registry::clear_route_state`) and 303-redirects back.
+- **Group state page** (`GET /__ui/groups/{group}/state`):
+  new `Registry::list_group_state(group_id)` mirrors
+  `list_route_state` but reads from `Storage::group_bucket`
+  (the `gkv:{group_id}:` namespace). POST clears via
+  `Registry::clear_group_state`, which wipes **both** `kv:`
+  and `gkv:` prefixes for the group — same semantics as
+  `cascade_delete_group` minus the registry-record deletion.
+- **Authorization**: standard owner-or-admin via
+  `resolve_owned_group`. Non-owner → 403, unknown group/route
+  → 404. CSRF on every POST.
+- **Entry rendering**: `StateEntryView::from(&RouteStateEntry)`
+  decodes `Bytes` as UTF-8 when valid (shown as `<code>` with
+  byte-size annotation), otherwise reports `binary, N bytes`.
+  Lists / sets / hashes show their length only. Pluralisation
+  via minijinja `{% if %}` against `data.total` /
+  `e.length`.
+- **Navigation**: an "Inspect state" `.btn--ghost` lives in
+  each detail page's `.action-row` next to the destructive
+  actions. Breadcrumbs from the state page go: Groups → group
+  → (route → )State.
+- **Tests:** `tests/ui_state_pages.rs` — 9 tier-2 tests:
+  empty state on both pages, list-after-dispatch (drives
+  the `counter_handler` fixture and checks the entries
+  table renders), clear-state form (redirects + leaves
+  "No state yet"), 403 non-owner, 404 unknown, plus a
+  group-clear-also-wipes-route-state check that verifies
+  the shared deletion semantics.
+- **Not in this slice:** value editing, key-by-key deletion,
+  per-entry inspect-bigger-blob drilldown — kv is meant to
+  be inspected, not edited, from the UI. Wiping is the only
+  mutation.
+
 ## UI 404 page (slice 26 polish)
 
 A typo under `/__ui/*` used to fall through to the dispatcher's

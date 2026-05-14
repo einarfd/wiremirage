@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/groups/{{ group_name }}">{{ group_name }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/routes/{{ group_name }}/{{ route_number }}">#{{ route_number }} {{ route_methods }} {{ route_path }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">State</span>
+</nav>
+
+<section class="page-header">
+  <h1>Route state — <code>{{ route_methods }} {{ route_path }}</code></h1>
+  <p class="text-muted">
+    Private kv (the <code>kv:</code> namespace) for this route. Group-shared
+    state lives on the <a href="/__ui/groups/{{ group_name }}/state">group state page</a>.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>{{ data.total }} entr{% if data.total == 1 %}y{% else %}ies{% endif %}</h2>
+    {% if data.total > 0 %}
+    <form method="post" action="/__ui/routes/{{ group_name }}/{{ route_number }}/state" class="inline-form"
+          onsubmit="return confirm('Wipe the kv state for this route? The route itself stays alive.');">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn--danger">Clear state</button>
+    </form>
+    {% endif %}
+  </header>
+  {% if data.total == 0 %}
+  <p class="empty-state">No state yet. Handlers can write via <code>ctx.kv.set(...)</code>; entries appear here.</p>
+  {% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">Key</th>
+        <th scope="col">Kind</th>
+        <th scope="col">Value / length</th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for e in data.entries %}
+      <tr>
+        <td><code>{{ e.key }}</code></td>
+        <td class="text-muted">{{ e.kind }}</td>
+        <td>
+          {%- if e.value_text -%}
+            <code>{{ e.value_text }}</code>
+            <span class="text-muted">({{ e.value_size }} B)</span>
+          {%- elif e.value_size is not none -%}
+            <span class="text-muted">binary, {{ e.value_size }} bytes</span>
+          {%- elif e.length is not none -%}
+            <span class="text-muted">{{ e.length }} item{% if e.length != 1 %}s{% endif %}</span>
+          {%- else -%}
+            <span class="text-muted">—</span>
+          {%- endif %}
+        </td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

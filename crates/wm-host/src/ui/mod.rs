@@ -64,6 +64,8 @@ impl UiTemplates {
         tmpl!("live_journal.html", "templates/live_journal.html");
         tmpl!("journal_entry.html", "templates/journal_entry.html");
         tmpl!("tokens.html", "templates/tokens.html");
+        tmpl!("group_state.html", "templates/group_state.html");
+        tmpl!("route_state.html", "templates/route_state.html");
         tmpl!("not_found.html", "templates/not_found.html");
         tmpl!("placeholder.html", "templates/placeholder.html");
         Self { env: Arc::new(env) }
@@ -102,7 +104,10 @@ pub fn router(state: AppState) -> Router {
             "/__ui/groups/{group}/delete",
             axum::routing::post(group_delete_form),
         )
-        .route("/__ui/groups/{group}/state", get(stub_group_state))
+        .route(
+            "/__ui/groups/{group}/state",
+            get(group_state_page).post(group_state_clear_form),
+        )
         .route("/__ui/routes", get(routes_list_page))
         .route("/__ui/routes/new", get(stub_routes_new))
         .route("/__ui/routes/{group}/{number}", get(route_detail_page))
@@ -110,7 +115,10 @@ pub fn router(state: AppState) -> Router {
             "/__ui/routes/{group}/{number}/delete",
             axum::routing::post(route_delete_form),
         )
-        .route("/__ui/routes/{group}/{number}/state", get(stub_route_state))
+        .route(
+            "/__ui/routes/{group}/{number}/state",
+            get(route_state_page).post(route_state_clear_form),
+        )
         .route("/__ui/journal/live", get(live_journal_page))
         .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
         .route("/__ui/unmatched", get(stub_unmatched))
@@ -1558,6 +1566,184 @@ fn body_as_text(bytes: &[u8]) -> Option<String> {
     }
 }
 
+// -- State pages (slice 27) -------------------------------------------------
+//
+// Read-only inspection of the per-route and per-group kv namespaces
+// + a clear-state action. Reuses the registry's existing list helpers
+// (`list_route_state`, plus the new `list_group_state` added for the
+// gkv: namespace). Owner-or-admin gated. Clear-state goes through
+// CSRF since it mutates.
+
+async fn group_state_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    let entries = match state.routes().registry().list_group_state(&group.id) {
+        Ok(e) => e,
+        Err(e) => return ui_error_500(&state, &auth, format!("list group state: {e}")),
+    };
+    let view = StatePageData::from_entries(&entries);
+    render(
+        &state,
+        "group_state.html",
+        context! {
+            page_title => format!("Group state: {}", group.name),
+            user => UserBadge::from(&auth),
+            group_name => group.name,
+            data => view,
+        },
+    )
+}
+
+async fn group_state_clear_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    if let Err(e) = state.routes().registry().clear_group_state(&group.id) {
+        return ui_error_500(&state, &auth, format!("clear: {e}"));
+    }
+    axum::response::Redirect::to(&format!("/__ui/groups/{}/state", group.name)).into_response()
+}
+
+async fn route_state_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+) -> Response {
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
+        }
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+    let entries = match state
+        .routes()
+        .registry()
+        .list_route_state(&group_ref, number)
+    {
+        Ok(e) => e,
+        Err(e) => return ui_error_500(&state, &auth, format!("list route state: {e}")),
+    };
+    let view = StatePageData::from_entries(&entries);
+    render(
+        &state,
+        "route_state.html",
+        context! {
+            page_title => format!("Route state: {}/{}", route.group_name, number),
+            user => UserBadge::from(&auth),
+            group_name => route.group_name,
+            route_number => route.number,
+            route_methods => route.methods.join(", "),
+            route_path => route.path,
+            data => view,
+        },
+    )
+}
+
+async fn route_state_clear_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
+        }
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+    if let Err(e) = state
+        .routes()
+        .registry()
+        .clear_route_state(&group_ref, number)
+    {
+        return ui_error_500(&state, &auth, format!("clear: {e}"));
+    }
+    axum::response::Redirect::to(&format!(
+        "/__ui/routes/{}/{}/state",
+        route.group_name, number
+    ))
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct StatePageData {
+    entries: Vec<StateEntryView>,
+    total: usize,
+}
+
+impl StatePageData {
+    fn from_entries(entries: &[crate::registry::RouteStateEntry]) -> Self {
+        Self {
+            entries: entries.iter().map(StateEntryView::from).collect(),
+            total: entries.len(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct StateEntryView {
+    key: String,
+    kind: String,
+    /// Decoded bytes value as text when it parses cleanly as UTF-8;
+    /// the raw byte count otherwise. Inline display only — large
+    /// values are still bounded by the kv store's own limits.
+    value_text: Option<String>,
+    value_size: Option<usize>,
+    length: Option<u64>,
+}
+
+impl From<&crate::registry::RouteStateEntry> for StateEntryView {
+    fn from(e: &crate::registry::RouteStateEntry) -> Self {
+        let (value_text, value_size) = match &e.value {
+            Some(bytes) => {
+                let size = bytes.len();
+                let text = std::str::from_utf8(bytes)
+                    .ok()
+                    .filter(|s| {
+                        !s.chars()
+                            .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
+                    })
+                    .map(|s| s.to_string());
+                (text, Some(size))
+            }
+            None => (None, None),
+        };
+        Self {
+            key: e.key.clone(),
+            kind: e.kind.clone(),
+            value_text,
+            value_size,
+            length: e.length,
+        }
+    }
+}
+
 // -- Route action handlers (slice 26) ---------------------------------------
 
 async fn route_delete_form(
@@ -1790,36 +1976,8 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
 // or curl until the real page lands. Stubs share a single template
 // to keep the code DRY.
 
-async fn stub_group_state(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Path(group): Path<String>,
-) -> Response {
-    stub(
-        &state,
-        &auth,
-        &format!("State: {group}"),
-        // No REST endpoint for group-wide state listing yet; the
-        // user can drop to per-route state.
-        "DELETE /__api/groups/{group}/state to wipe",
-    )
-}
-
 async fn stub_routes_new(State(state): State<AppState>, auth: AuthContext) -> Response {
     stub(&state, &auth, "New route", "POST /__api/routes")
-}
-
-async fn stub_route_state(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Path((group, number)): Path<(String, u32)>,
-) -> Response {
-    stub(
-        &state,
-        &auth,
-        &format!("Route state: {group}/{number}"),
-        &format!("GET /__api/routes/{group}/{number}/state"),
-    )
 }
 
 async fn stub_unmatched(State(state): State<AppState>, auth: AuthContext) -> Response {

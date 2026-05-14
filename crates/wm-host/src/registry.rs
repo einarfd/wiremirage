@@ -473,6 +473,55 @@ impl Registry {
         Ok(routes_deleted)
     }
 
+    /// List the group-shared kv entries (the `gkv:` namespace).
+    /// Returns each key alongside its storage-level kind, mirroring
+    /// `list_route_state` — bytes values inline, list/hash/set values
+    /// summarised by length so the caller can render a compact
+    /// overview. Used by the `/__ui/groups/{group}/state` page.
+    pub fn list_group_state(&self, group_id: &str) -> Result<Vec<RouteStateEntry>, RegistryError> {
+        let mut bucket = self.storage.group_bucket(group_id)?;
+        let keys = bucket.list_keys(None)?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let kind = bucket.kind(&key)?.unwrap_or("bytes");
+            let entry = match kind {
+                "bytes" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "bytes".into(),
+                    value: bucket.get(&key)?,
+                    length: None,
+                },
+                "list" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "list".into(),
+                    value: None,
+                    length: Some(bucket.list_length(&key)?),
+                },
+                "hash" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "hash".into(),
+                    value: None,
+                    length: Some(bucket.hash_keys(&key)?.len() as u64),
+                },
+                "set" => RouteStateEntry {
+                    key: key.clone(),
+                    kind: "set".into(),
+                    value: None,
+                    length: Some(bucket.set_members(&key)?.len() as u64),
+                },
+                other => RouteStateEntry {
+                    key: key.clone(),
+                    kind: other.into(),
+                    value: None,
+                    length: None,
+                },
+            };
+            out.push(entry);
+        }
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(out)
+    }
+
     /// Clear all per-route and per-group kv state for the group, but
     /// leave the routes themselves alive. Used by the
     /// `DELETE /__api/groups/{group}/state` endpoint.

@@ -86,6 +86,7 @@
     <h2>Manage</h2>
   </header>
   <div class="action-row">
+    <a class="btn btn--ghost" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/state">Inspect state</a>
     <form method="post" action="/__ui/routes/{{ route.group_name }}/{{ route.number }}/delete" class="inline-form"
           onsubmit="return confirm('Delete {{ route.methods }} {{ route.path }}? This can\'t be undone.');">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">

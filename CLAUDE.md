@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–26 landed. The WIT contract is live at
+**Status:** slices 1–27 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -204,8 +204,26 @@ CLI" panels became real `.action-row` button blocks with a
 edit-TTL disclosure. New CSS: `.btn--danger`, `.action-row`,
 `.edit-disclosure`, `.filter-checkbox`. Route source editing,
 the "+ Add route" button, and the dry-run modal are still
-deferred. By design (per `mcp-surface.md`) user management is
-**not** in MCP — admins handle it via CLI/UI.
+deferred. Slice 27 added the state inspection pages:
+`/__ui/routes/{group}/{n}/state` lists a route's private
+`kv:` namespace (key, kind, value or size) and `/__ui/groups/
+{group}/state` lists the group's shared `gkv:` namespace; both
+POST to the same URL to clear (the group page wipes both `kv:`
+and `gkv:` for the group, matching `cascade_delete_group`'s
+state-side semantics). New registry helper `list_group_state`
+mirrors `list_route_state` but reads from `storage.group_bucket`.
+Owner-or-admin-gated; non-owner → 403, unknown → 404. UI
+shows kind-aware previews: bytes render as UTF-8 text when
+clean (with byte-size annotation), otherwise as `binary, N
+bytes`; lists/sets/hashes show their length. Templates
+`route_state.html` and `group_state.html` plus an "Inspect
+state" `.btn--ghost` on the matching detail page's
+`.action-row`. Tier-2 coverage: `tests/ui_state_pages.rs`
+exercises empty state, list-after-dispatch (driving the
+counter_handler fixture), clear-state redirect + wipe, 403
+non-owner, 404 unknown, plus the group-clear-also-wipes-route-
+state semantics. By design (per `mcp-surface.md`) user
+management is **not** in MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 
