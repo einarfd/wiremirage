@@ -99,18 +99,18 @@ pub fn router() -> Router<AppState> {
 // -- Request / response shapes ------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct CreateRouteBody {
-    group: Option<String>,
-    methods: Vec<String>,
-    path: String,
-    language: String,
-    bindings_version: Option<String>,
+pub(crate) struct CreateRouteBody {
+    pub(crate) group: Option<String>,
+    pub(crate) methods: Vec<String>,
+    pub(crate) path: String,
+    pub(crate) language: String,
+    pub(crate) bindings_version: Option<String>,
     /// Base64-encoded `.component.wasm` bytes. Required when
     /// `language == "wasm"`.
-    compiled_wasm: Option<String>,
+    pub(crate) compiled_wasm: Option<String>,
     /// Source code for the source-based path. Forwarded to the compiler
     /// sidecar; returns `compile_failed` if no sidecar is configured.
-    source: Option<String>,
+    pub(crate) source: Option<String>,
 }
 
 /// Partial-update payload for `PATCH /__api/routes/{group}/{n}`. Every
@@ -245,6 +245,14 @@ pub struct ApiError {
 impl ApiError {
     pub(crate) fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(crate) fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
     }
 
     fn validation(msg: impl Into<String>) -> Self {
@@ -480,6 +488,27 @@ async fn create_route(
     auth: AuthContext,
     Json(body): Json<CreateRouteBody>,
 ) -> Result<Response, ApiError> {
+    let route = create_route_core(&state, &auth, body).await?;
+    let location = format!(
+        "/__api/routes/{}",
+        render_slug(&route.group_name, route.number)
+    );
+    let mut resp = (StatusCode::CREATED, Json(RouteResponse::from(&route))).into_response();
+    resp.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::try_from(location).expect("ascii location"),
+    );
+    Ok(resp)
+}
+
+/// Shared validate + compile + register pipeline behind both
+/// `POST /__api/routes` and the UI's `POST /__ui/routes/new`. Lives
+/// in `api.rs` so the validation rules stay in one place.
+pub(crate) async fn create_route_core(
+    state: &AppState,
+    auth: &AuthContext,
+    body: CreateRouteBody,
+) -> Result<crate::registry::Route, ApiError> {
     if is_reserved_path(&body.path) {
         return Err(ApiError::validation(format!(
             "path {:?} starts with a reserved prefix and cannot be claimed",
@@ -562,17 +591,7 @@ async fn create_route(
     })?;
 
     state.routes().refresh_after_create(route.clone());
-
-    let location = format!(
-        "/__api/routes/{}",
-        render_slug(&route.group_name, route.number)
-    );
-    let mut resp = (StatusCode::CREATED, Json(RouteResponse::from(&route))).into_response();
-    resp.headers_mut().insert(
-        header::LOCATION,
-        HeaderValue::try_from(location).expect("ascii location"),
-    );
-    Ok(resp)
+    Ok(route)
 }
 
 async fn list_routes(

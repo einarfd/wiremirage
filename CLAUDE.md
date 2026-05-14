@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–28 landed. The WIT contract is live at
+**Status:** slices 1–29 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -234,9 +234,26 @@ agrees with `/__api/unmatched` semantics. Per-row links go to
 (target still stubbed). Tier-2: `tests/ui_unmatched_pages.rs`
 covers empty / lists / method-filter / path-glob-filter / bad
 method 400 / pagination cursor / detail body / detail 404 /
-non-admin 403 on both pages. By design (per `mcp-surface.md`)
-user management is **not** in MCP — admins handle it via
-CLI/UI.
+non-admin 403 on both pages. Slice 29 added the
+`/__ui/routes/new` route-creation form. GET renders the form
+(method/path/group/language/source) and honours
+`?method=&path=&group=` prefill, so the unmatched-page deep
+link from slice 28 now lands somewhere real. POST shares the
+create pipeline with `POST /__api/routes` via a new
+`api::create_route_core` helper extracted from the REST
+handler — same validation, same compile-failure surface, same
+component-validation step. The UI form is source-only
+(TypeScript / JavaScript); pre-compiled wasm uploads stay on
+the REST surface where a bytes body makes sense. On success
+the user is 303'd to `/__ui/routes/{group}/{number}`; on
+failure the form re-renders with `error.title` / `message` /
+`diagnostics` from the `ApiError` and returns 400 with the
+submitted values preserved. CSRF on the POST. Tier-2:
+`tests/ui_route_new.rs` covers GET defaults / GET prefill /
+POST happy path against a mock compiler / reserved-path
+rejection / no-compiler-configured / missing-CSRF 403. By
+design (per `mcp-surface.md`) user management is **not** in
+MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 

@@ -423,6 +423,57 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI route creation form (slice 29)
+
+Ninth UI slice. Replaces the `/__ui/routes/new` stub with a
+working source-based create-route flow, sharing the validate-
+compile-register pipeline with `POST /__api/routes`.
+
+- **GET** renders the form (method dropdown, path input,
+  group dropdown of the caller's owned groups + an "(new
+  implicit group)" option that maps to `group: None`, language
+  dropdown, source textarea). Honours `?method=&path=&group=`
+  prefill — the unmatched page's "Create route from request"
+  deep-link now lands on a populated form.
+- **POST** is form-encoded (`_csrf`, `method`, `path`, `group`,
+  `language`, `source`). The handler builds a
+  `CreateRouteBody` and calls the new
+  `pub(crate) api::create_route_core(state, auth, body)`
+  helper extracted from the REST `create_route` handler. On
+  success: 303 to `/__ui/routes/{group}/{number}`. On error:
+  re-render the form with `error.title` / `message` /
+  `diagnostics` from the `ApiError`, status 400, submitted
+  values preserved.
+- **Shared core**: `create_route_core` does the whole
+  pipeline — reserved-path check, source/wasm exclusivity
+  check, language branch (compile via sidecar for source,
+  base64-decode + bindings-version check for `wasm`),
+  `Component::from_binary` validation, registry insert,
+  `RouteTable::refresh_after_create`. Two new accessors on
+  `ApiError` (`code()`, `diagnostics()`) let the UI map
+  REST error codes to UI error titles.
+- **Form scope**: source-only — `typescript` or `javascript`
+  (both supported by the sidecar). Pre-compiled wasm uploads
+  remain a REST-only path; a textarea is the wrong UI for
+  bytes-with-base64.
+- **Implicit groups**: an empty group field maps to
+  `group: None`, which the registry handles by creating an
+  implicit single-route group. Implicit groups are filtered
+  out of the dropdown — only named groups show up.
+- **CSRF**: middleware handles it; `_csrf` is read off
+  `tokio::task_local!` like every other authed POST.
+- **Tests:** `tests/ui_route_new.rs` — 6 tier-2 tests: GET
+  defaults / GET prefill / POST happy path against a mock
+  compiler returning the echo fixture (verifies redirect +
+  mock traffic actually hits the new route) / reserved-path
+  → 400 inline error / no-compiler-configured →
+  `compile_failed` surfaced / missing-CSRF → 403. The mock-
+  compiler harness mirrors `tests/api_routes.rs`.
+- **Not in this slice:** CodeMirror (still a `<textarea>`),
+  syntax-highlighted compile errors with line numbers, file
+  upload for wasm, the "+ Add route" button on group detail
+  (would just link to this form pre-filled with `group=`).
+
 ## Web UI unmatched pages (slice 28)
 
 Eighth UI slice. Promotes the `/__ui/unmatched` stub into the

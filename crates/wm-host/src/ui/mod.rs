@@ -63,6 +63,7 @@ impl UiTemplates {
         tmpl!("groups_list.html", "templates/groups_list.html");
         tmpl!("group_detail.html", "templates/group_detail.html");
         tmpl!("routes_list.html", "templates/routes_list.html");
+        tmpl!("route_new.html", "templates/route_new.html");
         tmpl!("route_detail.html", "templates/route_detail.html");
         tmpl!("live_journal.html", "templates/live_journal.html");
         tmpl!("journal_entry.html", "templates/journal_entry.html");
@@ -114,7 +115,10 @@ pub fn router(state: AppState) -> Router {
             get(group_state_page).post(group_state_clear_form),
         )
         .route("/__ui/routes", get(routes_list_page))
-        .route("/__ui/routes/new", get(stub_routes_new))
+        .route(
+            "/__ui/routes/new",
+            get(route_new_form).post(route_new_submit),
+        )
         .route("/__ui/routes/{group}/{number}", get(route_detail_page))
         .route(
             "/__ui/routes/{group}/{number}/delete",
@@ -2173,16 +2177,183 @@ impl UnmatchedDetailView {
     }
 }
 
+// -- Route creation form (slice 29) -----------------------------------------
+//
+// A minimal browser-driven create-route flow. Shares the create
+// pipeline with `POST /__api/routes` via `api::create_route_core` so
+// validation + compile semantics stay identical. UI form is
+// source-only (TypeScript / JavaScript) — pre-compiled wasm uploads
+// stay on the REST surface where a file-bytes body makes sense.
+
+#[derive(Deserialize)]
+struct UiRouteNewQuery {
+    method: Option<String>,
+    path: Option<String>,
+    group: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UiRouteNewForm {
+    _csrf: String,
+    method: String,
+    path: String,
+    #[serde(default)]
+    group: String,
+    language: String,
+    source: String,
+}
+
+#[derive(Serialize, Default, Clone)]
+struct RouteNewFormState {
+    method: String,
+    path: String,
+    group: String,
+    language: String,
+    source: String,
+}
+
+const DEFAULT_TS_HANDLER_SOURCE: &str = "export default async function handle(req, ctx) {\n  return {\n    status: 200,\n    headers: [[\"content-type\", \"application/json\"]],\n    body: new TextEncoder().encode(\"{}\"),\n  };\n}\n";
+
+async fn route_new_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<UiRouteNewQuery>,
+) -> Response {
+    let form = RouteNewFormState {
+        method: nonempty(q.method.as_deref()).unwrap_or_else(|| "POST".into()),
+        path: nonempty(q.path.as_deref()).unwrap_or_default(),
+        group: nonempty(q.group.as_deref()).unwrap_or_default(),
+        language: "typescript".into(),
+        source: DEFAULT_TS_HANDLER_SOURCE.into(),
+    };
+    render_route_new(&state, &auth, form, None)
+}
+
+async fn route_new_submit(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::Form(form): axum::Form<UiRouteNewForm>,
+) -> Response {
+    let _ = form._csrf; // already validated by csrf_middleware
+
+    let form_state = RouteNewFormState {
+        method: form.method.clone(),
+        path: form.path.clone(),
+        group: form.group.clone(),
+        language: form.language.clone(),
+        source: form.source.clone(),
+    };
+
+    let group = nonempty(Some(form.group.as_str()));
+    if form.path.trim().is_empty() {
+        return render_route_new(
+            &state,
+            &auth,
+            form_state,
+            Some(RouteNewError {
+                title: "Path required".into(),
+                message: "Pick a path like /v1/charges.".into(),
+                diagnostics: Vec::new(),
+            }),
+        );
+    }
+
+    let body = crate::api::CreateRouteBody {
+        group,
+        methods: vec![form.method.clone()],
+        path: form.path.clone(),
+        language: form.language.clone(),
+        bindings_version: None,
+        compiled_wasm: None,
+        source: Some(form.source.clone()),
+    };
+
+    match crate::api::create_route_core(&state, &auth, body).await {
+        Ok(route) => {
+            let location = format!("/__ui/routes/{}/{}", route.group_name, route.number);
+            let mut resp = Response::default();
+            *resp.status_mut() = StatusCode::SEE_OTHER;
+            resp.headers_mut().insert(
+                axum::http::header::LOCATION,
+                axum::http::HeaderValue::try_from(location).expect("ascii location"),
+            );
+            resp
+        }
+        Err(api_err) => {
+            let title = match api_err.code() {
+                "compile_failed" => "Compile failed".into(),
+                "conflict" => "Conflicts with an existing route".into(),
+                "not_found" => "Unknown group".into(),
+                _ => "Couldn't create route".into(),
+            };
+            render_route_new(
+                &state,
+                &auth,
+                form_state,
+                Some(RouteNewError {
+                    title,
+                    message: api_err.message().to_string(),
+                    diagnostics: api_err.diagnostics().to_vec(),
+                }),
+            )
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RouteNewError {
+    title: String,
+    message: String,
+    diagnostics: Vec<String>,
+}
+
+fn render_route_new(
+    state: &AppState,
+    auth: &AuthContext,
+    form: RouteNewFormState,
+    error: Option<RouteNewError>,
+) -> Response {
+    let registry = state.routes().registry();
+    let available_groups: Vec<String> = if auth.is_admin {
+        registry.list_groups().unwrap_or_default()
+    } else {
+        registry
+            .list_groups_by_owner(&auth.user_id)
+            .unwrap_or_default()
+    }
+    .into_iter()
+    // Implicit single-route groups are auto-generated; offering them
+    // in the dropdown is noisy. Users get the "(new implicit group)"
+    // option for that.
+    .filter(|g| !g.implicit)
+    .map(|g| g.name)
+    .collect();
+
+    let had_error = error.is_some();
+    let mut resp = render(
+        state,
+        "route_new.html",
+        context! {
+            page_title => "Create route",
+            user => UserBadge::from(auth),
+            methods => ["POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY"],
+            available_groups => available_groups,
+            form => form,
+            error => error,
+        },
+    );
+    if had_error {
+        *resp.status_mut() = StatusCode::BAD_REQUEST;
+    }
+    resp
+}
+
 // -- Stubs ------------------------------------------------------------------
 //
 // Each stub names what'll eventually live at this URL, plus the
 // equivalent API path so the user can poke at the data via the CLI
 // or curl until the real page lands. Stubs share a single template
 // to keep the code DRY.
-
-async fn stub_routes_new(State(state): State<AppState>, auth: AuthContext) -> Response {
-    stub(&state, &auth, "New route", "POST /__api/routes")
-}
 
 async fn stub_settings(State(state): State<AppState>, auth: AuthContext) -> Response {
     if !auth.is_admin {
