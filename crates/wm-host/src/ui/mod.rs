@@ -64,6 +64,7 @@ impl UiTemplates {
         tmpl!("live_journal.html", "templates/live_journal.html");
         tmpl!("journal_entry.html", "templates/journal_entry.html");
         tmpl!("tokens.html", "templates/tokens.html");
+        tmpl!("not_found.html", "templates/not_found.html");
         tmpl!("placeholder.html", "templates/placeholder.html");
         Self { env: Arc::new(env) }
     }
@@ -1885,6 +1886,30 @@ fn forbidden_page(state: &AppState, auth: &AuthContext) -> Response {
 /// syntax (`..ctx_value`) to merge the page context with the CSRF
 /// field — the macro's special-case for spread handles tuple-struct
 /// inputs natively.
+/// Render the branded UI 404 page for a path under `/__ui/*` that
+/// didn't match a real route. Called from `dispatch_inner`'s
+/// reserved-path branch so a human pointing a browser at a typo
+/// lands on the app shell rather than a JSON error blob. The
+/// `requested_path` value is HTML-escaped by minijinja's auto-escape
+/// so a crafted URL can't smuggle script tags into the page.
+pub(crate) fn render_not_found(state: &AppState, requested_path: &str) -> Response {
+    let mut resp = render(
+        state,
+        "not_found.html",
+        context! {
+            page_title => "Page not found",
+            requested_path => requested_path,
+            // No `user` in scope here — dispatch runs without an
+            // AuthContext extractor — so the base layout's user area
+            // stays empty (the template guards on `{% if user %}`).
+            // That's fine for a 404 page.
+            user => Option::<UserBadge>::None,
+        },
+    );
+    *resp.status_mut() = StatusCode::NOT_FOUND;
+    resp
+}
+
 pub(crate) fn render<S: Serialize>(state: &AppState, template: &str, ctx: S) -> Response {
     let csrf_token = csrf::CURRENT_CSRF
         .try_with(|t| t.clone())

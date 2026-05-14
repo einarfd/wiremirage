@@ -423,6 +423,36 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## UI 404 page (slice 26 polish)
+
+A typo under `/__ui/*` used to fall through to the dispatcher's
+generic `not_found_response`, returning JSON `{"error":{"code":
+"not_found", ...}}` — fine for `/__api/*` consumers but ugly for
+a human in a browser. Now `dispatch_inner`'s reserved-path
+branch detects the `/__ui/` prefix specifically and calls
+`ui::render_not_found(&state, path)` to render a branded
+`not_found.html` extending `base.html`.
+
+The other 404 paths stay as-is — they're the design:
+- `/__api/*` typos: JSON, machine-readable, no journal write.
+- `/__auth/*` typos: JSON, same shape.
+- Mock-traffic 404s: JSON + write to the unmatched journal so
+  operators see what their SUT was hitting that they hadn't
+  mocked yet.
+
+The UI 404 handler doesn't check auth — a 404 reveals nothing
+sensitive, and gating it behind the login flow just adds a
+confusing redirect. The base layout's `{% if user %}` guard on
+the user area handles the no-user case cleanly. minijinja's
+auto-escape neutralises any HTML smuggled in the requested
+path.
+
+5 tier-2 tests in `tests/ui_not_found.rs` lock in: UI typo →
+HTML 404 with the app shell, `/__api/typo` → JSON 404,
+`/__auth/typo` → JSON 404, mock-traffic typo → JSON 404,
+and a smoke check that `<script>` in the URL doesn't survive
+into the rendered body.
+
 ## Web UI action buttons (slice 26)
 
 Sixth UI slice. Replaces the "Manage from CLI" panels on the

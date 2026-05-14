@@ -301,9 +301,20 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // request under a reserved prefix is a typo, not mock traffic — and
     // intentionally NOT journaled (typos shouldn't pollute the
     // unmatched log; if operators want them, they're in stderr/OTel).
+    //
+    // For `/__ui/*` typos specifically, render a branded HTML 404
+    // page so a human pointing a browser at a wrong URL lands on the
+    // app shell instead of a JSON error blob. Everything else under a
+    // reserved prefix (`/__api/typo`, `/__auth/typo`) stays JSON —
+    // those surfaces are consumed by scripts and agents that want a
+    // parseable error.
     if is_reserved_path(path) {
         span.record("outcome", "reserved_path_404");
-        let mut resp = not_found_response("reserved path");
+        let mut resp = if path.starts_with("/__ui/") {
+            crate::ui::render_not_found(&state, path)
+        } else {
+            not_found_response("reserved path")
+        };
         inject_response_trace_id(&trace_id, resp.headers_mut());
         return Ok(resp);
     }
