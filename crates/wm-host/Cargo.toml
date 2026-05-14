@@ -53,7 +53,7 @@ subtle = "2.6"
 # Web UI templates (slice 21). minijinja gives us Jinja-like syntax
 # with a small dependency footprint. Templates are embedded via
 # `include_str!` at compile time so deployment stays single-binary.
-minijinja = { version = "2", default-features = false, features = ["builtins", "multi_template", "serde"] }
+minijinja = { version = "2", default-features = false, features = ["builtins", "multi_template", "serde", "json"] }
 # Web UI (slice 22) — query-string building for pagination + sort links.
 # A handful of `urlencoding::encode` calls; the crate is ~50 LOC of safe
 # Rust and pulls no other deps.

@@ -423,6 +423,60 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI live journal + journal entry (slice 24)
+
+Fourth UI slice. Replaces the slice-21 stubs at
+`/__ui/journal/live` and `/__ui/journal/{group}/{n}` with real
+pages backed by the slice-11 SSE tail and journal record store.
+
+- **Live journal (`/__ui/journal/live`):**
+  - Pre-renders ~25 most-recent entries server-side when scoped
+    to a group (via `journal.list_for_group` + in-process method/
+    status/path_pattern filter — mirrors the SSE filter shape).
+  - Opens an `EventSource` against `GET /__api/journal/tail` and
+    prepends a row for each `event: handled`. Plain JavaScript
+    (~50 LoC inline in the template) — HTMX comes in when there's
+    a screen that wants HTML-fragment swaps from the server.
+  - Filter form (group, method, path pattern, status) is a plain
+    `<form method="get">`. The selected filters travel into the
+    SSE URL via `build_sse_url` so the page and the tail are
+    always in sync.
+  - Authorization: with `?group=`, owner-or-admin (same rule as
+    `tail_journal`); without, admin-only (host-wide tail).
+    Non-admin without `?group=` lands on a picker-only view that
+    doesn't open an SSE connection. Unknown group → 404,
+    non-owner with `?group=` → 403.
+  - Auto-cap: client keeps at most 200 rows in the DOM to bound
+    memory if the page is left running. Reconnect on SSE error
+    is handled by the browser's EventSource automatic retry.
+- **Journal entry (`/__ui/journal/{group}/{n}`):**
+  - Reads `journal.get(group_id, number)`. Owner-or-admin gate.
+  - Renders request envelope (method, path, query, headers,
+    body), response envelope (status, headers, body), handler
+    logs, timing, trace ID. Text bodies decode as UTF-8 if
+    clean; control bytes flip them to `(binary, N bytes)`.
+    Body-truncation warnings show the original size when the
+    journal trimmed it.
+  - Breadcrumb back to the live journal preserves the group
+    filter; explicit link to the matched route's detail page.
+- **`tojson` filter:** minijinja gains the `json` feature so
+  templates can embed the SSE URL in inline JS via `{{ url |
+  tojson }}` (string properly quoted + JS-escaped). Cheap; pulls
+  serde_json which is already in the workspace.
+- **CSS:** no new classes — `.status status-2xx..5xx`,
+  `.meta-grid`, `.code-block` were all already in place.
+- **Tests:** `tests/ui_journal_pages.rs` — 10 tier-2 tests
+  covering page render with/without group, SSE URL preservation
+  through filter changes, picker-only flow for non-admin without
+  group, 403/404 paths, the journal entry detail with full
+  envelope, and admin-can-view-any.
+- **Not in this slice:** group-detail right-column SSE pane (a
+  small follow-up now that the EventSource pattern is in place;
+  same machinery scoped to a group via `?group=`), HTMX (waits
+  for the first server-fragment-swap use case), source viewer
+  on the journal entry (would need handler-side rich-text
+  formatting; deferred).
+
 ## Web UI detail pages + `/` redirect (slice 23)
 
 Third UI slice. Replaces the slice-21 stubs at

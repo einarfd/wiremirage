@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-header">
+  <h1>Live journal</h1>
+  <p class="text-muted">
+    {%- if scope == "host" -%}
+    Tailing every handled request on this host.
+    {%- elif scope == "group" -%}
+    Tailing handled requests in <a href="/__ui/groups/{{ group }}">{{ group }}</a>.
+    {%- else -%}
+    Pick a group below to start tailing.
+    {%- endif -%}
+  </p>
+</section>
+
+<section class="card">
+  <form method="get" action="/__ui/journal/live" class="filter-form">
+    <label class="filter-field">
+      <span class="filter-field__label">Group</span>
+      <select name="group">
+        {% if user.is_admin %}<option value=""{% if not group %} selected{% endif %}>All (host-wide)</option>{% endif %}
+        {%- for g in available_groups %}
+        <option value="{{ g }}"{% if g == group %} selected{% endif %}>{{ g }}</option>
+        {%- endfor %}
+      </select>
+    </label>
+    <label class="filter-field">
+      <span class="filter-field__label">Method</span>
+      <select name="method">
+        <option value=""{% if not method %} selected{% endif %}>Any</option>
+        {%- for m in methods %}
+        <option value="{{ m }}"{% if m == method %} selected{% endif %}>{{ m }}</option>
+        {%- endfor %}
+      </select>
+    </label>
+    <label class="filter-field">
+      <span class="filter-field__label">Path pattern</span>
+      <input type="text" name="path_pattern" value="{{ path_pattern }}" placeholder="/v1/*">
+    </label>
+    <label class="filter-field">
+      <span class="filter-field__label">Status</span>
+      <input type="text" name="status" value="{{ status }}" placeholder="200, 5xx, …">
+    </label>
+    <button type="submit" class="btn btn--primary">Apply</button>
+    {% if any_filter_active %}<a href="/__ui/journal/live?group={{ group }}" class="btn btn--ghost">Reset filters</a>{% endif %}
+  </form>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Recent activity</h2>
+    <span id="live-status" class="text-muted">{% if can_tail %}connecting…{% else %}idle{% endif %}</span>
+  </header>
+  {% if not can_tail %}
+  <p class="empty-state">Pick a group above to start tailing.</p>
+  {% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">Time</th>
+        <th scope="col">Group</th>
+        <th scope="col">Method</th>
+        <th scope="col">Path</th>
+        <th scope="col">Status</th>
+        <th scope="col">Duration</th>
+        <th scope="col">Trace</th>
+      </tr>
+    </thead>
+    <tbody id="live-rows">
+    {%- for j in initial_entries %}
+      <tr>
+        <td><a href="/__ui/journal/{{ j.group_name }}/{{ j.number }}"><time datetime="{{ j.created_at }}">{{ j.created_at_human }}</time></a></td>
+        <td><a href="/__ui/groups/{{ j.group_name }}">{{ j.group_name }}</a></td>
+        <td>{{ j.method }}</td>
+        <td><code>{{ j.path }}</code></td>
+        <td><span class="status status-{{ j.status_class }}">{{ j.status }}</span></td>
+        <td>{{ j.duration_ms }} ms</td>
+        <td class="text-muted">{% if j.trace_id_short %}<code>{{ j.trace_id_short }}</code>{% else %}—{% endif %}</td>
+      </tr>
+    {%- else %}
+      <tr id="live-empty"><td colspan="7" class="text-muted">Waiting for traffic…</td></tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+{% if can_tail %}
+<script>
+(function () {
+  // Live-journal tail: a plain EventSource against /__api/journal/tail.
+  // The browser sends the wm_session cookie automatically; slice-20
+  // auth accepts cookies as a fallback to bearer tokens.
+  //
+  // Each `event: handled` carries a JournalRecord JSON payload. We
+  // prepend a row to the table for each. The page already pre-rendered
+  // the most recent N entries server-side, so SSE just keeps it
+  // current — refresh restores from the registry if the SSE drops.
+  var url = {{ sse_url | tojson }};
+  var rows = document.getElementById("live-rows");
+  var status = document.getElementById("live-status");
+  if (!rows) return;
+
+  var es = new EventSource(url);
+  status.textContent = "live";
+
+  function statusClass(code) {
+    var bucket = Math.floor(code / 100);
+    if (bucket === 2) return "2xx";
+    if (bucket === 3) return "3xx";
+    if (bucket === 4) return "4xx";
+    if (bucket === 5) return "5xx";
+    return "other";
+  }
+
+  function fmtTime(iso) {
+    try {
+      return new Date(iso).toLocaleTimeString();
+    } catch (_) {
+      return iso;
+    }
+  }
+
+  function renderRow(entry) {
+    var row = document.createElement("tr");
+    var traceShort = entry.trace_id ? entry.trace_id.slice(0, 8) : "";
+    row.innerHTML =
+      '<td><a href="/__ui/journal/' + encodeURIComponent(entry.group_name) + '/' + entry.number + '">' +
+      '<time datetime="' + entry.created_at + '">' + fmtTime(entry.created_at) + '</time></a></td>' +
+      '<td><a href="/__ui/groups/' + encodeURIComponent(entry.group_name) + '">' + entry.group_name + '</a></td>' +
+      '<td>' + entry.request.method + '</td>' +
+      '<td><code>' + entry.request.path + '</code></td>' +
+      '<td><span class="status status-' + statusClass(entry.response.status) + '">' + entry.response.status + '</span></td>' +
+      '<td>' + entry.duration_ms + ' ms</td>' +
+      '<td class="text-muted">' + (traceShort ? '<code>' + traceShort + '</code>' : '—') + '</td>';
+    // Clear the "waiting" placeholder if present.
+    var empty = document.getElementById("live-empty");
+    if (empty) empty.remove();
+    rows.insertBefore(row, rows.firstChild);
+    // Cap the table at ~200 rows so the page doesn't grow forever.
+    while (rows.children.length > 200) {
+      rows.removeChild(rows.lastChild);
+    }
+  }
+
+  es.addEventListener("handled", function (ev) {
+    try {
+      var entry = JSON.parse(ev.data);
+      renderRow(entry);
+    } catch (e) {
+      console.error("malformed live entry", e);
+    }
+  });
+
+  es.addEventListener("error", function () {
+    status.textContent = "disconnected (will retry)";
+  });
+
+  es.addEventListener("open", function () {
+    status.textContent = "live";
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -61,6 +61,8 @@ impl UiTemplates {
         tmpl!("group_detail.html", "templates/group_detail.html");
         tmpl!("routes_list.html", "templates/routes_list.html");
         tmpl!("route_detail.html", "templates/route_detail.html");
+        tmpl!("live_journal.html", "templates/live_journal.html");
+        tmpl!("journal_entry.html", "templates/journal_entry.html");
         tmpl!("placeholder.html", "templates/placeholder.html");
         Self { env: Arc::new(env) }
     }
@@ -91,8 +93,8 @@ pub fn router(state: AppState) -> Router {
         .route("/__ui/routes/new", get(stub_routes_new))
         .route("/__ui/routes/{group}/{number}", get(route_detail_page))
         .route("/__ui/routes/{group}/{number}/state", get(stub_route_state))
-        .route("/__ui/journal/live", get(stub_journal_live))
-        .route("/__ui/journal/{group}/{number}", get(stub_journal_entry))
+        .route("/__ui/journal/live", get(live_journal_page))
+        .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
         .route("/__ui/unmatched", get(stub_unmatched))
         .route("/__ui/me/tokens", get(stub_tokens))
         .route("/__ui/settings", get(stub_settings))
@@ -944,6 +946,380 @@ fn ui_not_found(state: &AppState, auth: &AuthContext, what: &str) -> Response {
     resp
 }
 
+// -- /__ui/journal/live -----------------------------------------------------
+//
+// Streaming view backed by `GET /__api/journal/tail` (slice 11 SSE).
+// The page pre-renders the most recent N entries server-side so the
+// table is populated on first paint; a small inline EventSource script
+// then prepends rows as the SSE delivers new `handled` events. No
+// HTMX dependency yet — plain JS is enough for "listen to a stream
+// and append to a list."
+//
+// Auth: same rule as the SSE endpoint underneath. With ?group=, the
+// caller must be admin or own a route in that group (403 otherwise).
+// Without ?group=, admin-only (host-wide tail). Non-admin without
+// ?group= sees the picker but no tail.
+
+#[derive(Debug, Deserialize, Default)]
+struct UiLiveJournalQuery {
+    group: Option<String>,
+    method: Option<String>,
+    path_pattern: Option<String>,
+    status: Option<String>,
+}
+
+async fn live_journal_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<UiLiveJournalQuery>,
+) -> Response {
+    // Resolve the group of available groups for the picker. Admins
+    // see all groups by name; non-admins see only their owned groups.
+    let registry = state.routes().registry();
+    let available_groups: Vec<String> = if auth.is_admin {
+        registry
+            .list_groups()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| g.name)
+            .collect()
+    } else {
+        registry
+            .list_groups_by_owner(&auth.user_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| g.name)
+            .collect()
+    };
+
+    let group_param = nonempty(q.group.as_deref());
+
+    // Authorization for tailing this scope. Mirrors `tail_journal`:
+    //   * group set → caller must be admin or own a route in the group
+    //   * group unset → admin-only (host-wide tail)
+    let (scope, can_tail, resolved_group_id): (&str, bool, Option<String>) = match &group_param {
+        Some(name) => match registry.read_group_by_ref(name) {
+            Ok(g) => match caller_can_view_group(&state, &auth, &g.id) {
+                true => ("group", true, Some(g.id)),
+                false => return forbidden_page(&state, &auth),
+            },
+            Err(_) => return ui_not_found(&state, &auth, &format!("Group {name}")),
+        },
+        None if auth.is_admin => ("host", true, None),
+        None => ("none", false, None),
+    };
+
+    // Pre-fetch a small page of recent entries so the table isn't
+    // empty on first paint. Only meaningful when a single group is
+    // scoped — there's no host-wide listing endpoint. Filter
+    // method/path_pattern/status in-process to match what the SSE
+    // tail will then deliver.
+    let mut initial: Vec<LiveJournalRow> = Vec::new();
+    if let (Some(gid), Some(name)) = (resolved_group_id.as_deref(), group_param.as_deref())
+        && let Ok(records) = state.journal().list_for_group(
+            gid,
+            crate::journal::ListCursor {
+                before: None,
+                limit: 50,
+            },
+        )
+    {
+        initial = records
+            .into_iter()
+            .filter(|r| match q.method.as_deref() {
+                Some(m) => r.request.method.eq_ignore_ascii_case(m),
+                None => true,
+            })
+            .filter(|r| match q.status.as_deref() {
+                Some(s) => status_matches(r.response.status, s),
+                None => true,
+            })
+            .filter(|r| match q.path_pattern.as_deref() {
+                Some(p) => glob_match_simple(p, &r.request.path),
+                None => true,
+            })
+            .take(25)
+            .map(|r| LiveJournalRow::from_record(&r, name))
+            .collect();
+    }
+
+    let sse_url = build_sse_url(group_param.as_deref(), &q);
+    let any_filter_active = q.method.is_some() || q.path_pattern.is_some() || q.status.is_some();
+
+    render(
+        &state,
+        "live_journal.html",
+        context! {
+            page_title => "Live journal",
+            user => UserBadge::from(&auth),
+            scope => scope,
+            can_tail => can_tail,
+            group => group_param.unwrap_or_default(),
+            method => q.method.clone().unwrap_or_default(),
+            path_pattern => q.path_pattern.clone().unwrap_or_default(),
+            status => q.status.clone().unwrap_or_default(),
+            any_filter_active => any_filter_active,
+            available_groups => available_groups,
+            methods => ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            initial_entries => initial,
+            sse_url => sse_url,
+        },
+    )
+}
+
+fn caller_can_view_group(state: &AppState, auth: &AuthContext, group_id: &str) -> bool {
+    if auth.is_admin {
+        return true;
+    }
+    state
+        .routes()
+        .registry()
+        .list_routes_by_owner(&auth.user_id)
+        .map(|routes| routes.iter().any(|r| r.group_id == group_id))
+        .unwrap_or(false)
+}
+
+fn status_matches(actual: u16, pattern: &str) -> bool {
+    let p = pattern.trim().to_ascii_lowercase();
+    if let Ok(n) = p.parse::<u16>() {
+        return actual == n;
+    }
+    if p.len() == 3 && p.ends_with("xx") {
+        let bucket = match p.as_bytes()[0] {
+            b'1'..=b'5' => (p.as_bytes()[0] - b'0') as u16,
+            _ => return false,
+        };
+        return actual / 100 == bucket;
+    }
+    false
+}
+
+/// Tiny `*` glob used by the live-journal in-process filter. Matches
+/// the same shape `JournalFilter::matches` uses on the SSE side; we
+/// reimplement locally rather than wire the host's internal filter
+/// into the UI surface.
+fn glob_match_simple(pattern: &str, value: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or("");
+    if !value.starts_with(first) {
+        return false;
+    }
+    let mut pos = first.len();
+    let mut peek = parts.next();
+    while let Some(part) = peek {
+        peek = parts.next();
+        if peek.is_none() {
+            return value[pos..].ends_with(part);
+        }
+        match value[pos..].find(part) {
+            Some(idx) => pos += idx + part.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+fn build_sse_url(group: Option<&str>, q: &UiLiveJournalQuery) -> String {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    if let Some(g) = group {
+        parts.push(("group".into(), g.to_string()));
+    }
+    if let Some(m) = q.method.as_deref().and_then(|s| {
+        let t = s.trim();
+        (!t.is_empty()).then_some(t)
+    }) {
+        parts.push(("method".into(), m.to_string()));
+    }
+    if let Some(p) = q.path_pattern.as_deref().and_then(|s| {
+        let t = s.trim();
+        (!t.is_empty()).then_some(t)
+    }) {
+        parts.push(("path_pattern".into(), p.to_string()));
+    }
+    if let Some(s) = q.status.as_deref().and_then(|s| {
+        let t = s.trim();
+        (!t.is_empty()).then_some(t)
+    }) {
+        parts.push(("status".into(), s.to_string()));
+    }
+    if parts.is_empty() {
+        "/__api/journal/tail".into()
+    } else {
+        format!("/__api/journal/tail?{}", encode_query(&parts))
+    }
+}
+
+#[derive(Serialize)]
+struct LiveJournalRow {
+    number: u32,
+    group_name: String,
+    method: String,
+    path: String,
+    status: u16,
+    status_class: &'static str,
+    duration_ms: u64,
+    created_at: String,
+    created_at_human: String,
+    trace_id_short: String,
+}
+
+impl LiveJournalRow {
+    fn from_record(r: &crate::journal::JournalRecord, group_name: &str) -> Self {
+        Self {
+            number: r.number,
+            group_name: group_name.to_string(),
+            method: r.request.method.clone(),
+            path: r.request.path.clone(),
+            status: r.response.status,
+            status_class: status_class(r.response.status),
+            created_at: r.created_at.to_rfc3339(),
+            created_at_human: r.created_at.format("%H:%M:%S").to_string(),
+            duration_ms: r.duration_ms,
+            trace_id_short: r
+                .trace_id
+                .as_deref()
+                .map(|t| t.chars().take(8).collect::<String>())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+// -- /__ui/journal/{group}/{n} ----------------------------------------------
+//
+// Full record for one journal entry: request envelope, response
+// envelope, handler logs, timing. Read-only; deletion happens via
+// TTL on the journal record.
+
+async fn journal_entry_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+) -> Response {
+    let group = match state.routes().registry().read_group_by_ref(&group_ref) {
+        Ok(g) => g,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Group {group_ref}")),
+    };
+    if !caller_can_view_group(&state, &auth, &group.id) {
+        return forbidden_page(&state, &auth);
+    }
+    let entry = match state.journal().get(&group.id, number) {
+        Ok(e) => e,
+        Err(_) => {
+            return ui_not_found(
+                &state,
+                &auth,
+                &format!("Journal entry {group_ref}/{number}"),
+            );
+        }
+    };
+
+    let view = JournalEntryView::from_record(&entry);
+    render(
+        &state,
+        "journal_entry.html",
+        context! {
+            page_title => format!("Journal {}/{}", group_ref, number),
+            user => UserBadge::from(&auth),
+            entry => view,
+        },
+    )
+}
+
+#[derive(Serialize)]
+struct JournalEntryView {
+    id: String,
+    number: u32,
+    group_name: String,
+    route_number: u32,
+    method: String,
+    path: String,
+    status: u16,
+    status_class: &'static str,
+    duration_ms: u64,
+    created_at: String,
+    trace_id: Option<String>,
+    matched_pattern: String,
+    path_params: Vec<(String, String)>,
+    query: Vec<(String, String)>,
+    error: Option<String>,
+    dropped_response_headers: Vec<String>,
+    request_headers: Vec<(String, String)>,
+    request_body_text: Option<String>,
+    request_body_truncated: bool,
+    request_body_original_size: usize,
+    response_headers: Vec<(String, String)>,
+    response_body_text: Option<String>,
+    response_body_truncated: bool,
+    response_body_original_size: usize,
+    handler_logs: Vec<HandlerLogView>,
+}
+
+#[derive(Serialize)]
+struct HandlerLogView {
+    level: String,
+    message: String,
+    timestamp: String,
+}
+
+impl JournalEntryView {
+    fn from_record(r: &crate::journal::JournalRecord) -> Self {
+        Self {
+            id: r.id.clone(),
+            number: r.number,
+            group_name: r.group_name.clone(),
+            route_number: r.route_number,
+            method: r.request.method.clone(),
+            path: r.request.path.clone(),
+            status: r.response.status,
+            status_class: status_class(r.response.status),
+            duration_ms: r.duration_ms,
+            created_at: r.created_at.to_rfc3339(),
+            trace_id: r.trace_id.clone(),
+            matched_pattern: r.matched_pattern.clone(),
+            path_params: r.path_params.clone(),
+            query: r.query.clone(),
+            error: r.error.clone(),
+            dropped_response_headers: r.dropped_response_headers.clone(),
+            request_headers: r.request.headers.clone(),
+            request_body_text: body_as_text(&r.request.body),
+            request_body_truncated: r.request.body_truncated,
+            request_body_original_size: r.request.original_body_size,
+            response_headers: r.response.headers.clone(),
+            response_body_text: body_as_text(&r.response.body),
+            response_body_truncated: r.response.body_truncated,
+            response_body_original_size: r.response.original_body_size,
+            handler_logs: r
+                .handler_logs
+                .iter()
+                .map(|l| HandlerLogView {
+                    level: l.level.clone(),
+                    message: l.message.clone(),
+                    timestamp: l.timestamp.to_rfc3339(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Render a body as UTF-8 if it decodes cleanly; `None` if it's empty
+/// or looks binary. The journal pre-truncates large bodies for us, so
+/// this never needs to bound the output length itself.
+fn body_as_text(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s)
+            if !s
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t') =>
+        {
+            Some(s.to_string())
+        }
+        _ => Some(format!("(binary, {} bytes)", bytes.len())),
+    }
+}
+
 // -- Stubs ------------------------------------------------------------------
 //
 // Each stub names what'll eventually live at this URL, plus the
@@ -980,28 +1356,6 @@ async fn stub_route_state(
         &auth,
         &format!("Route state: {group}/{number}"),
         &format!("GET /__api/routes/{group}/{number}/state"),
-    )
-}
-
-async fn stub_journal_live(State(state): State<AppState>, auth: AuthContext) -> Response {
-    stub(
-        &state,
-        &auth,
-        "Live journal",
-        "GET /__api/journal/tail (SSE)",
-    )
-}
-
-async fn stub_journal_entry(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Path((group, number)): Path<(String, u32)>,
-) -> Response {
-    stub(
-        &state,
-        &auth,
-        &format!("Journal: {group}/{number}"),
-        &format!("GET /__api/journal/{group}/{number}"),
     )
 }
 

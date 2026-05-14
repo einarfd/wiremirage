@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/journal/live?group={{ entry.group_name }}">Live journal</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/groups/{{ entry.group_name }}">{{ entry.group_name }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">#{{ entry.number }}</span>
+</nav>
+
+<section class="page-header">
+  <h1><code>{{ entry.method }} {{ entry.path }}</code></h1>
+  <p class="text-muted">
+    <span class="status status-{{ entry.status_class }}">{{ entry.status }}</span>
+    · {{ entry.duration_ms }} ms
+    · <time datetime="{{ entry.created_at }}">{{ entry.created_at }}</time>
+    · matched route <a href="/__ui/routes/{{ entry.group_name }}/{{ entry.route_number }}">#{{ entry.route_number }}</a>
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header"><h2>Summary</h2></header>
+  <dl class="meta-grid">
+    <dt>Entry ID</dt>
+    <dd><code>{{ entry.id }}</code></dd>
+    <dt>Trace ID</dt>
+    <dd>{% if entry.trace_id %}<code>{{ entry.trace_id }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</dd>
+    <dt>Matched pattern</dt>
+    <dd><code>{{ entry.matched_pattern }}</code></dd>
+    <dt>Wall clock</dt>
+    <dd>{{ entry.duration_ms }} ms</dd>
+    {% if entry.path_params | length > 0 %}
+    <dt>Path params</dt>
+    <dd>{% for kv in entry.path_params %}<code>{{ kv[0] }}={{ kv[1] }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+    {% endif %}
+    {% if entry.query | length > 0 %}
+    <dt>Query</dt>
+    <dd>{% for kv in entry.query %}<code>{{ kv[0] }}={{ kv[1] }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+    {% endif %}
+    {% if entry.error %}
+    <dt>Error</dt>
+    <dd><code>{{ entry.error }}</code></dd>
+    {% endif %}
+    {% if entry.dropped_response_headers | length > 0 %}
+    <dt>Dropped response headers</dt>
+    <dd class="text-muted">{% for h in entry.dropped_response_headers %}<code>{{ h }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+    {% endif %}
+  </dl>
+</section>
+
+<section class="card">
+  <header class="card__header"><h2>Request</h2></header>
+  <dl class="meta-grid">
+    <dt>Method</dt><dd>{{ entry.method }}</dd>
+    <dt>Path</dt><dd><code>{{ entry.path }}</code></dd>
+  </dl>
+  <h3>Headers</h3>
+  {% if entry.request_headers | length == 0 %}
+  <p class="text-muted">No request headers recorded.</p>
+  {% else %}
+  <table class="data-table">
+    <thead><tr><th scope="col">Name</th><th scope="col">Value</th></tr></thead>
+    <tbody>
+    {%- for kv in entry.request_headers %}
+      <tr><td><code>{{ kv[0] }}</code></td><td><code>{{ kv[1] }}</code></td></tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <h3>Body</h3>
+  {% if entry.request_body_text %}
+  <pre class="code-block"><code>{{ entry.request_body_text }}</code></pre>
+  {% if entry.request_body_truncated %}<p class="text-muted">Body truncated at the journal's storage limit. Original size: {{ entry.request_body_original_size }} bytes.</p>{% endif %}
+  {% else %}
+  <p class="text-muted">Empty body ({{ entry.request_body_original_size }} bytes).</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <header class="card__header"><h2>Response</h2></header>
+  <p>Status: <span class="status status-{{ entry.status_class }}">{{ entry.status }}</span></p>
+  <h3>Headers</h3>
+  {% if entry.response_headers | length == 0 %}
+  <p class="text-muted">No response headers recorded.</p>
+  {% else %}
+  <table class="data-table">
+    <thead><tr><th scope="col">Name</th><th scope="col">Value</th></tr></thead>
+    <tbody>
+    {%- for kv in entry.response_headers %}
+      <tr><td><code>{{ kv[0] }}</code></td><td><code>{{ kv[1] }}</code></td></tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <h3>Body</h3>
+  {% if entry.response_body_text %}
+  <pre class="code-block"><code>{{ entry.response_body_text }}</code></pre>
+  {% if entry.response_body_truncated %}<p class="text-muted">Body truncated at the journal's storage limit. Original size: {{ entry.response_body_original_size }} bytes.</p>{% endif %}
+  {% else %}
+  <p class="text-muted">Empty body ({{ entry.response_body_original_size }} bytes).</p>
+  {% endif %}
+</section>
+
+{% if entry.handler_logs | length > 0 %}
+<section class="card">
+  <header class="card__header"><h2>Handler logs</h2></header>
+  <table class="data-table">
+    <thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead>
+    <tbody>
+    {%- for log in entry.handler_logs %}
+      <tr>
+        <td class="text-muted"><time datetime="{{ log.timestamp }}">{{ log.timestamp }}</time></td>
+        <td>{{ log.level }}</td>
+        <td>{{ log.message }}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

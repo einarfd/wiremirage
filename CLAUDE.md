@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–23 landed. The WIT contract is live at
+**Status:** slices 1–24 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -153,8 +153,25 @@ unmatched `GET /` bounces to `/__ui/` (with a valid `wm_session`
 cookie) or `/__auth/login` (without), wired into `dispatch_inner`
 so a user-registered `GET /` route still shadows it. The redirect
 does NOT write to the unmatched journal — a human pointing a
-browser at the host isn't a "missing mock" signal. By design
-(per `mcp-surface.md`) user management is **not** in MCP — admins
+browser at the host isn't a "missing mock" signal. Slice 24
+added the journal screens. `/__ui/journal/live` pre-fetches
+~25 most-recent entries server-side (when scoped to a group) and
+opens an `EventSource` against `GET /__api/journal/tail` — the
+slice-11 SSE endpoint — to prepend new rows as `handled` events
+arrive. Plain JS, no HTMX yet (single stream + append is not
+worth pulling in the runtime). Filter + group dropdown carry
+through to the SSE URL via `build_sse_url`. Authorization
+mirrors the SSE endpoint: with `?group=` the caller must be
+admin or own a route in that group; without it, admin-only
+(non-admin renders a group-picker with no SSE connection).
+`/__ui/journal/{group}/{n}` renders the full journal record —
+request envelope, response envelope, handler logs, timing,
+trace ID — with the same owner-or-admin gate. Binary bodies
+render as `(binary, N bytes)`; text bodies render verbatim with
+a truncated-warning if the journal had to trim them. minijinja
+gains the `json` feature for the `tojson` filter used to embed
+the SSE URL in the inline script safely. By design (per
+`mcp-surface.md`) user management is **not** in MCP — admins
 handle it via CLI/UI.
 
 ## Where the design lives
