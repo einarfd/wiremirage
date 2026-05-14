@@ -423,6 +423,72 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI tokens page + CSRF middleware (slice 25)
+
+Fifth UI slice. Replaces the `/__ui/me/tokens` stub with a real
+self-service tokens page (list / create / revoke), and lands the
+double-submit CSRF middleware that every future authed UI form
+will rely on.
+
+- **CSRF middleware (`ui::csrf::csrf_middleware`):**
+  - Safe methods (GET/HEAD/OPTIONS): if no `wm_csrf` cookie was
+    sent, mint one; either way, stash the active token in a
+    `tokio::task_local!` (`CURRENT_CSRF`) for the duration of the
+    request, and `Set-Cookie` on the way out if we minted.
+  - Mutating methods (POST/PUT/PATCH/DELETE): reject 403 if no
+    `wm_csrf` cookie was sent. Buffer the request body (cap 64
+    KiB), parse it as urlencoded, pull out `_csrf`, compare to
+    the cookie. On mismatch → 403. On match → rebuild request
+    with the same body bytes so the downstream handler can still
+    extract its own `Form<>`.
+  - Cookie attributes: `HttpOnly; SameSite=Strict; Max-Age=86400`.
+    `SameSite=Strict` is the real defense — cross-site requests
+    don't carry the cookie at all, so they fail the
+    cookie-presence check before any body comparison runs. The
+    form field is the secondary check.
+  - Applied to `/__ui/*` (in `ui::router`) and `/__auth/*` (in
+    `auth_api::router`) as a `Router::layer` of
+    `middleware::from_fn`.
+- **Token injection into templates:** `ui::render` reads the
+  task-local CSRF value and merges `csrf_token` into the
+  caller's context using minijinja's `context!{..inner}` spread
+  syntax. That's the only viable path — `context!` produces an
+  opaque tuple-struct shape that serde's `#[serde(flatten)]`
+  can't merge through (try it and you'll see "can only flatten
+  structs and maps (got a tuple struct)"). With the spread,
+  handlers stay focused on page data; `base.html`'s logout form
+  and every form template get `{{ csrf_token }}` for free.
+- **Tokens page (`/__ui/me/tokens`):**
+  - GET: lists the user's own tokens (`auth.list_tokens_for`),
+    sorted newest first. Empty state hints at the create form.
+  - POST: validates name + optional TTL hours, calls
+    `auth.create_token`, renders the same page with the
+    plaintext token shown in a "you'll only see this once" card.
+    Refreshing the page (or any subsequent GET) hides the
+    plaintext — it lives only in that one response body.
+    Validation errors render inline with a 400 status.
+  - POST `/:name/revoke`: calls `auth.revoke_token_by_name` then
+    303s back to the list. Idempotent — revoking a missing name
+    is a no-op (race with another tab).
+  - Admins managing other users' tokens still go through the CLI;
+    the page is "your own tokens only" by deliberate design.
+- **Test plumbing:** existing tier-2 tests' `login_cookie`
+  helpers had to learn the CSRF dance — GET `/__auth/login` to
+  mint the wm_csrf cookie and read the embedded `_csrf` form
+  value, then POST with both. The combined cookie string
+  `wm_csrf=X; wm_session=Y` is what subsequent requests send.
+  Helper updated across `ui_smoke`, `ui_list_pages`,
+  `ui_detail_pages`, `ui_journal_pages`, `local_auth_e2e`.
+- **New tier-2 file**: `tests/ui_tokens.rs` — 8 tests covering
+  empty state, create flow (plaintext-once), revoke flow,
+  validation errors, three CSRF rejection paths (missing form
+  field, mismatched form field, missing cookie), and ownership
+  scoping (alice doesn't see admin's tokens).
+- **Not in this slice:** route creation form, group/route state
+  pages, dry-run modal — they'll reuse the same CSRF wiring when
+  they land. Token plaintext display also waits for a clipboard
+  copy-button (a polish item).
+
 ## Web UI live journal + journal entry (slice 24)
 
 Fourth UI slice. Replaces the slice-21 stubs at

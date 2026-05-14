@@ -18,7 +18,7 @@ use axum::Form;
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use minijinja::context;
 use serde::Deserialize;
@@ -32,6 +32,10 @@ pub fn router() -> Router<AppState> {
         .route("/__auth/login", get(login_page))
         .route("/__auth/login/password", post(password_login))
         .route("/__auth/logout", post(logout))
+        // Every form-bearing endpoint in this router is `/__auth/*`,
+        // so we can blanket-CSRF the lot. The login GET mints the
+        // cookie; the POSTs (login + logout) validate it.
+        .layer(axum::middleware::from_fn(crate::ui::csrf::csrf_middleware))
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,30 +49,22 @@ struct LoginPageQuery {
 async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuery>) -> Response {
     // The form only renders when local auth is wired up; with the
     // surface bare today, showing it unconditionally would be a UX
-    // dead-end (`POST /__auth/login/password` would 503).
+    // dead-end (`POST /__auth/login/password` would 503). The CSRF
+    // middleware wraps this handler so `csrf_token` is in scope and
+    // gets injected into the template context by `ui::render`.
     let local_enabled = !state.local_auth().is_empty();
     let next = q
         .next
         .filter(|n| n.starts_with('/') && !n.starts_with("//"));
-    let rendered = state.ui_templates().render(
+    crate::ui::render(
+        &state,
         "login.html",
         context! {
             local_enabled => local_enabled,
             next => next,
             error => Option::<String>::None,
         },
-    );
-    match rendered {
-        Ok(body) => Html(body).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "login template render failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "login template render failed",
-            )
-                .into_response()
-        }
-    }
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +75,10 @@ struct PasswordLoginForm {
     /// that the value is a host-relative path (`/...`) so an open-
     /// redirect can't be smuggled through a crafted login link.
     next: Option<String>,
+    /// Validated by the CSRF middleware before this handler runs;
+    /// declared here only so `axum::Form` accepts the field.
+    #[serde(rename = "_csrf")]
+    _csrf: Option<String>,
 }
 
 async fn password_login(

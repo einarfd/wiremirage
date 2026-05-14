@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–24 landed. The WIT contract is live at
+**Status:** slices 1–25 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -168,7 +168,20 @@ group's journal directly. Pre-fetch window is generous (200
 raw entries) so narrow filters still tend to have content
 after a reload. Group detail page (slice 23) now carries the
 same live pane scoped to that group via `?group=` — same
-EventSource pattern, ~10 most-recent entries pre-rendered. Filter + group dropdown carry
+EventSource pattern, ~10 most-recent entries pre-rendered.
+Slice 25 added the self-service tokens page (`/__ui/me/tokens`,
+list / create / revoke own tokens, plaintext shown exactly once
+on create) and the CSRF middleware that protects every authed UI
+form. CSRF uses double-submit cookies: middleware on `/__ui/*`
+and `/__auth/*` mints a `wm_csrf` cookie on safe methods (stored
+HttpOnly, SameSite=Strict, 24 h) and validates `_csrf` form
+field against the cookie on POST/PUT/PATCH/DELETE. A
+`tokio::task_local!` carries the current token through the
+request scope; the `ui::render` helper merges `csrf_token` into
+every template context via `minijinja::context!`'s spread
+syntax, so handlers don't have to plumb it through. The login,
+logout, and tokens forms all embed `<input type="hidden"
+name="_csrf" value="{{ csrf_token }}">`. Filter + group dropdown carry
 through to the SSE URL via `build_sse_url`. Authorization
 mirrors the SSE endpoint: with `?group=` the caller must be
 admin or own a route in that group; without it, admin-only

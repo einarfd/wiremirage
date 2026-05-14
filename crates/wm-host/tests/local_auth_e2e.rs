@@ -76,18 +76,50 @@ async fn post_login(
     username: &str,
     password: &str,
 ) -> reqwest::Response {
+    // Slice-25 CSRF middleware: GET login page first to mint the
+    // wm_csrf cookie and read the `_csrf` form value, then POST with
+    // both. Returns the login POST response unchanged so this helper's
+    // existing call sites still work.
+    let get = client
+        .get(url(h, "/__auth/login"))
+        .send()
+        .await
+        .expect("get login");
+    let csrf_cookie = pick_csrf_set_cookie(&get).expect("csrf set-cookie");
+    let page = get.text().await.unwrap();
+    let csrf_value = extract_csrf_form_value(&page).expect("csrf form value");
+
     let body = format!(
-        "username={}&password={}",
+        "_csrf={}&username={}&password={}",
+        urlencode(&csrf_value),
         urlencode(username),
         urlencode(password)
     );
     client
         .post(url(h, "/__auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(body)
         .send()
         .await
         .expect("post login")
+}
+
+fn pick_csrf_set_cookie(resp: &reqwest::Response) -> Option<String> {
+    for v in resp.headers().get_all("set-cookie").iter() {
+        let raw = v.to_str().ok()?;
+        if let Some(rest) = raw.strip_prefix("wm_csrf=") {
+            return Some(rest.split(';').next()?.to_string());
+        }
+    }
+    None
+}
+
+fn extract_csrf_form_value(body: &str) -> Option<String> {
+    let needle = "name=\"_csrf\" value=\"";
+    let start = body.find(needle)? + needle.len();
+    let end = body[start..].find('"')?;
+    Some(body[start..start + end].to_string())
 }
 
 /// Minimal application/x-www-form-urlencoded value encoding. The
@@ -205,8 +237,25 @@ async fn logout_invalidates_the_cookie() {
     let h = start("alice:hunter2").await;
     let client = no_redirect_client();
 
-    let login_resp = post_login(&h, &client, "alice", "hunter2").await;
-    let cookie_value = extract_cookie_value(
+    // Slice-25 CSRF: GET login page first to mint the wm_csrf cookie,
+    // then POST with it. The logout below also needs the csrf cookie
+    // + form field.
+    let login_page = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let csrf_cookie = pick_csrf_set_cookie(&login_page).expect("csrf");
+    let csrf_value =
+        extract_csrf_form_value(&login_page.text().await.unwrap()).expect("csrf form value");
+
+    let login_resp = client
+        .post(url(&h, "/__auth/login/password"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
+        .body(format!(
+            "_csrf={csrf_value}&username=alice&password=hunter2"
+        ))
+        .send()
+        .await
+        .expect("login");
+    let session_cookie = extract_cookie_value(
         login_resp
             .headers()
             .get("set-cookie")
@@ -214,7 +263,7 @@ async fn logout_invalidates_the_cookie() {
             .to_str()
             .unwrap(),
     );
-    let cookie_header = format!("{COOKIE_NAME}={cookie_value}");
+    let cookie_header = format!("wm_csrf={csrf_cookie}; {COOKIE_NAME}={session_cookie}");
 
     // Confirm it authenticates first.
     let me = client
@@ -228,6 +277,8 @@ async fn logout_invalidates_the_cookie() {
     let logout = client
         .post(url(&h, "/__auth/logout"))
         .header("cookie", &cookie_header)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf_value}"))
         .send()
         .await
         .expect("logout");

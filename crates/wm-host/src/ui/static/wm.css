@@ -424,6 +424,14 @@ p { margin: 0 0 var(--space-3); }
   margin: 0;
 }
 
+.card--success {
+  border-left: 3px solid var(--status-2xx);
+}
+.card--error {
+  border-left: 3px solid var(--status-5xx);
+}
+.inline-form { display: inline; margin: 0; }
+
 /* status pill (used in journal tables on the route detail page) */
 .status {
   display: inline-block;

@@ -129,24 +129,45 @@ async fn start_with_traffic() -> Harness {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
+    // Slice-25 CSRF middleware: GET the login page first to mint the
+    // wm_csrf cookie + read the embedded `_csrf` form value, then POST
+    // with both. Returns the combined cookie string callers send back
+    // on subsequent requests.
+    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
+    let body = get.text().await.unwrap();
+    let csrf_value = extract_csrf_value(&body).expect("csrf form value");
+
     let resp = client
         .post(url(h, "/__auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(format!("username={user}&password=devpassword"))
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
+        .body(format!(
+            "_csrf={csrf_value}&username={user}&password=devpassword"
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 303, "login {user}");
-    resp.headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .trim()
-        .to_string()
+    let session_cookie = pick_set_cookie(&resp, "wm_session").expect("session cookie");
+    format!("wm_csrf={csrf_cookie}; wm_session={session_cookie}")
+}
+
+fn pick_set_cookie(resp: &reqwest::Response, name: &str) -> Option<String> {
+    for v in resp.headers().get_all("set-cookie").iter() {
+        let raw = v.to_str().ok()?;
+        if let Some(rest) = raw.strip_prefix(&format!("{name}=")) {
+            return Some(rest.split(';').next()?.to_string());
+        }
+    }
+    None
+}
+
+fn extract_csrf_value(body: &str) -> Option<String> {
+    let needle = "name=\"_csrf\" value=\"";
+    let start = body.find(needle)? + needle.len();
+    let end = body[start..].find('"')?;
+    Some(body[start..start + end].to_string())
 }
 
 // -- /__ui/journal/live -----------------------------------------------------

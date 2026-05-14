@@ -72,26 +72,56 @@ fn no_redirect_client() -> Client {
 }
 
 async fn login_and_get_cookie(h: &Harness, client: &Client) -> String {
-    let body = "username=admin&password=devpassword";
+    // Slice 25 added CSRF middleware. The login POST now requires a
+    // matching wm_csrf cookie and `_csrf` form field. Fetch the login
+    // page first to mint the cookie and read the embedded value, then
+    // POST with both. Return the combined cookie string the rest of
+    // the test will send back on subsequent requests.
+    let get = client
+        .get(url(h, "/__auth/login"))
+        .send()
+        .await
+        .expect("get login");
+    let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
+    let body = get.text().await.unwrap();
+    let csrf_value = extract_csrf_value(&body).expect("_csrf hidden input");
+
     let resp = client
         .post(url(h, "/__auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(body)
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
+        .body(format!(
+            "_csrf={csrf_value}&username=admin&password=devpassword"
+        ))
         .send()
         .await
         .expect("login post");
     assert_eq!(resp.status().as_u16(), 303, "login failed");
-    let set_cookie = resp
-        .headers()
-        .get("set-cookie")
-        .expect("set-cookie")
-        .to_str()
-        .unwrap()
-        .to_string();
-    // `wm_session=TOKEN.SIG; Path=/; ...` → keep just the
-    // `name=value` pair for sending back.
-    let first_pair = set_cookie.split(';').next().unwrap().trim();
-    first_pair.to_string()
+    let session_cookie = pick_set_cookie(&resp, "wm_session").expect("session cookie");
+    format!("wm_csrf={csrf_cookie}; wm_session={session_cookie}")
+}
+
+/// Extract a Set-Cookie value for `name` from any of the response's
+/// Set-Cookie headers. Returns just the cookie value (right of the
+/// first `=`, up to but not including the first `;`).
+fn pick_set_cookie(resp: &reqwest::Response, name: &str) -> Option<String> {
+    for v in resp.headers().get_all("set-cookie").iter() {
+        let raw = v.to_str().ok()?;
+        if let Some(rest) = raw.strip_prefix(&format!("{name}=")) {
+            return Some(rest.split(';').next()?.to_string());
+        }
+    }
+    None
+}
+
+/// Pull the `value=` of the `<input type="hidden" name="_csrf">` out
+/// of a rendered HTML page so a test can echo it back in a POST. Slow
+/// but correct for our well-formed templates; tests don't care.
+fn extract_csrf_value(body: &str) -> Option<String> {
+    let needle = "name=\"_csrf\" value=\"";
+    let start = body.find(needle)? + needle.len();
+    let end = body[start..].find('"')?;
+    Some(body[start..start + end].to_string())
 }
 
 #[tokio::test]
@@ -249,10 +279,20 @@ async fn placeholder_pages_render_with_api_hint() {
     // survive the escape (alphanumerics + underscores).
     //
     // Each successive UI slice converts more of these stubs to real
-    // pages and removes them from this list. slice 22: /__ui/groups
-    // + /__ui/routes. slice 23: /__ui/groups/{group} +
-    // /__ui/routes/{group}/{n} (the ui_detail_pages tests cover them).
-    for (path, expected_substrings) in [("/__ui/me/tokens", ["GET", "__api", "tokens"])] {
+    // pages and removes them from this list. After slice 25's tokens
+    // page landed, every screen previously in this loop has become
+    // real; the remaining stubs (settings, admin/health, unmatched,
+    // group/route state, routes/new, journal entry) are admin-only or
+    // covered by their own per-slice tests. If a future slice adds
+    // back a placeholder route, add a check here for it.
+    // Remaining placeholder routes after slice 25. All admin-only —
+    // the admin test user above can see them; non-admin gets the
+    // separate 403 test in admin_only_stubs_are_forbidden_for_non_admin.
+    let placeholders: &[(&str, &[&str])] = &[
+        ("/__ui/unmatched", &["GET", "__api", "unmatched"]),
+        ("/__ui/settings", &["GET", "__api", "users"]),
+    ];
+    for &(path, expected_substrings) in placeholders.iter() {
         let resp = client
             .get(url(&h, path))
             .header("cookie", &cookie)
@@ -265,7 +305,7 @@ async fn placeholder_pages_render_with_api_hint() {
             body.contains("coming"),
             "expected placeholder copy on {path}"
         );
-        for sub in &expected_substrings {
+        for sub in expected_substrings {
             assert!(
                 body.contains(sub),
                 "expected substring {sub:?} on {path}; body was: {body}"
@@ -279,26 +319,24 @@ async fn admin_only_stubs_are_forbidden_for_non_admin() {
     let h = start_with_users("admin:devpassword:admin,user:devpassword").await;
     let client = no_redirect_client();
 
-    // Log in as the non-admin user.
+    // Log in as the non-admin user. Slice-25 CSRF: GET login page
+    // first to mint the cookie + extract form value.
+    let get = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
+    let csrf_value = extract_csrf_value(&get.text().await.unwrap()).expect("csrf");
     let resp = client
         .post(url(&h, "/__auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
-        .body("username=user&password=devpassword")
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
+        .body(format!(
+            "_csrf={csrf_value}&username=user&password=devpassword"
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 303);
-    let cookie = resp
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .trim()
-        .to_string();
+    let session_cookie = pick_set_cookie(&resp, "wm_session").expect("session");
+    let cookie = format!("wm_csrf={csrf_cookie}; wm_session={session_cookie}");
 
     // Admin-only stubs should return 403 (rendered through the same
     // placeholder template but with `Forbidden` title).
@@ -319,7 +357,8 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
 
-    // Confirm we're in.
+    // Confirm we're in and read the CSRF token embedded in the page
+    // so we can post a valid logout request.
     let me = client
         .get(url(&h, "/__ui/"))
         .header("cookie", &cookie)
@@ -327,11 +366,15 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
         .await
         .unwrap();
     assert_eq!(me.status().as_u16(), 200);
+    let body = me.text().await.unwrap();
+    let csrf_value = extract_csrf_value(&body).expect("csrf in logout form");
 
     // Log out via the form button in the header.
     let logout = client
         .post(url(&h, "/__auth/logout"))
         .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf_value}"))
         .send()
         .await
         .unwrap();

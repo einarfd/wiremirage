@@ -63,6 +63,7 @@ impl UiTemplates {
         tmpl!("route_detail.html", "templates/route_detail.html");
         tmpl!("live_journal.html", "templates/live_journal.html");
         tmpl!("journal_entry.html", "templates/journal_entry.html");
+        tmpl!("tokens.html", "templates/tokens.html");
         tmpl!("placeholder.html", "templates/placeholder.html");
         Self { env: Arc::new(env) }
     }
@@ -96,9 +97,14 @@ pub fn router(state: AppState) -> Router {
         .route("/__ui/journal/live", get(live_journal_page))
         .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
         .route("/__ui/unmatched", get(stub_unmatched))
-        .route("/__ui/me/tokens", get(stub_tokens))
+        .route("/__ui/me/tokens", get(tokens_page).post(create_token_form))
+        .route(
+            "/__ui/me/tokens/{name}/revoke",
+            axum::routing::post(revoke_token_form),
+        )
         .route("/__ui/settings", get(stub_settings))
         .route("/__ui/admin/health", get(stub_admin_health))
+        .layer(middleware::from_fn(csrf::csrf_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_redirect::require_session,
@@ -1400,6 +1406,190 @@ fn body_as_text(bytes: &[u8]) -> Option<String> {
     }
 }
 
+// -- /__ui/me/tokens --------------------------------------------------------
+//
+// Self-service API token management. Lists the caller's own tokens,
+// lets them create a new one (plaintext shown once on the response),
+// and revoke by name. Admins managing other users' tokens still go
+// through the CLI; this surface is deliberately "your own" only.
+//
+// First authed UI forms in the codebase — CSRF middleware checks every
+// POST here. The form template embeds `{{ csrf_token }}` and the
+// middleware compares it to the wm_csrf cookie set on the matching GET.
+
+#[derive(serde::Deserialize)]
+struct CreateTokenForm {
+    name: String,
+    ttl_hours: Option<String>,
+    /// Validated by the CSRF middleware; ignored here, only present so
+    /// `axum::Form` doesn't reject the request as malformed.
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CsrfOnlyForm {
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+}
+
+async fn tokens_page(State(state): State<AppState>, auth: AuthContext) -> Response {
+    let tokens = match state.auth().list_tokens_for(&auth.user_id) {
+        Ok(mut ts) => {
+            ts.sort_by_key(|t| std::cmp::Reverse(t.created_at));
+            ts
+        }
+        Err(e) => return ui_error_500(&state, &auth, format!("list tokens: {e}")),
+    };
+    render_tokens_page(&state, &auth, TokensPageData::list(&tokens))
+}
+
+async fn create_token_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::Form(form): axum::Form<CreateTokenForm>,
+) -> Response {
+    let name = form.name.trim();
+    if name.is_empty() {
+        return tokens_page_with_error(&state, &auth, "Name is required.");
+    }
+    let ttl = match form.ttl_hours.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(s) => match s.parse::<u64>() {
+            Ok(h) if h > 0 => Some(h * 3600),
+            _ => {
+                return tokens_page_with_error(
+                    &state,
+                    &auth,
+                    "TTL hours must be a positive integer.",
+                );
+            }
+        },
+    };
+
+    let (token, plaintext) = match state.auth().create_token(&auth.user_id, name, ttl) {
+        Ok(pair) => pair,
+        Err(crate::auth::AuthError::NameTaken(n)) => {
+            return tokens_page_with_error(
+                &state,
+                &auth,
+                &format!("A token named {n:?} already exists. Pick a different name."),
+            );
+        }
+        Err(e) => return ui_error_500(&state, &auth, format!("create token: {e}")),
+    };
+    let _ = token;
+
+    let tokens = state
+        .auth()
+        .list_tokens_for(&auth.user_id)
+        .map(|mut ts| {
+            ts.sort_by_key(|t| std::cmp::Reverse(t.created_at));
+            ts
+        })
+        .unwrap_or_default();
+    render_tokens_page(
+        &state,
+        &auth,
+        TokensPageData::after_create(&tokens, &plaintext, name),
+    )
+}
+
+async fn revoke_token_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(name): Path<String>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    // CSRF middleware has already validated `_csrf` for us; the form
+    // struct just exists so axum's Form extractor doesn't reject the
+    // request body.
+    match state.auth().revoke_token_by_name(&auth.user_id, &name) {
+        Ok(_) => {}
+        Err(e) => return ui_error_500(&state, &auth, format!("revoke: {e}")),
+    }
+    // 303 See Other so a browser refresh after revoke doesn't replay
+    // the POST.
+    axum::response::Redirect::to("/__ui/me/tokens").into_response()
+}
+
+#[derive(Serialize)]
+struct TokensPageData {
+    tokens: Vec<TokenRow>,
+    plaintext: Option<String>,
+    plaintext_name: Option<String>,
+    error: Option<String>,
+}
+
+impl TokensPageData {
+    fn list(tokens: &[crate::auth::Token]) -> Self {
+        Self {
+            tokens: tokens.iter().map(TokenRow::from).collect(),
+            plaintext: None,
+            plaintext_name: None,
+            error: None,
+        }
+    }
+    fn after_create(tokens: &[crate::auth::Token], plaintext: &str, name: &str) -> Self {
+        Self {
+            tokens: tokens.iter().map(TokenRow::from).collect(),
+            plaintext: Some(plaintext.to_string()),
+            plaintext_name: Some(name.to_string()),
+            error: None,
+        }
+    }
+    fn with_error(tokens: &[crate::auth::Token], msg: &str) -> Self {
+        Self {
+            tokens: tokens.iter().map(TokenRow::from).collect(),
+            plaintext: None,
+            plaintext_name: None,
+            error: Some(msg.to_string()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TokenRow {
+    name: String,
+    created_at: String,
+    last_used_at: Option<String>,
+    expires_at: Option<String>,
+}
+
+impl From<&crate::auth::Token> for TokenRow {
+    fn from(t: &crate::auth::Token) -> Self {
+        Self {
+            name: t.name.clone(),
+            created_at: t.created_at.to_rfc3339(),
+            last_used_at: t.last_used_at.map(|x| x.to_rfc3339()),
+            expires_at: t.expires_at.map(|x| x.to_rfc3339()),
+        }
+    }
+}
+
+fn render_tokens_page(state: &AppState, auth: &AuthContext, data: TokensPageData) -> Response {
+    render(
+        state,
+        "tokens.html",
+        context! {
+            page_title => "API tokens",
+            user => UserBadge::from(auth),
+            data => data,
+        },
+    )
+}
+
+fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> Response {
+    let tokens = state
+        .auth()
+        .list_tokens_for(&auth.user_id)
+        .unwrap_or_default();
+    let data = TokensPageData::with_error(&tokens, error);
+    let mut resp = render_tokens_page(state, auth, data);
+    *resp.status_mut() = StatusCode::BAD_REQUEST;
+    resp
+}
+
 // -- Stubs ------------------------------------------------------------------
 //
 // Each stub names what'll eventually live at this URL, plus the
@@ -1444,10 +1634,6 @@ async fn stub_unmatched(State(state): State<AppState>, auth: AuthContext) -> Res
         return forbidden_page(&state, &auth);
     }
     stub(&state, &auth, "Unmatched", "GET /__api/unmatched")
-}
-
-async fn stub_tokens(State(state): State<AppState>, auth: AuthContext) -> Response {
-    stub(&state, &auth, "My tokens", "GET /__api/tokens")
 }
 
 async fn stub_settings(State(state): State<AppState>, auth: AuthContext) -> Response {
@@ -1497,8 +1683,26 @@ fn forbidden_page(state: &AppState, auth: &AuthContext) -> Response {
 
 // -- Render helpers ---------------------------------------------------------
 
-fn render<S: Serialize>(state: &AppState, template: &str, ctx: S) -> Response {
-    match state.ui_templates().render(template, ctx) {
+/// Render a template with the current CSRF token automatically merged
+/// into the caller's context. Handlers stay focused on their page-
+/// specific fields — the logout button in `base.html` and any form-
+/// bearing template gets `{{ csrf_token }}` for free.
+///
+/// minijinja's `context!{}` macro produces an opaque tuple-struct
+/// shape that serde can't flatten, so we use minijinja's own spread
+/// syntax (`..ctx_value`) to merge the page context with the CSRF
+/// field — the macro's special-case for spread handles tuple-struct
+/// inputs natively.
+pub(crate) fn render<S: Serialize>(state: &AppState, template: &str, ctx: S) -> Response {
+    let csrf_token = csrf::CURRENT_CSRF
+        .try_with(|t| t.clone())
+        .unwrap_or_default();
+    let inner = minijinja::Value::from_serialize(&ctx);
+    let merged = context! {
+        csrf_token => csrf_token,
+        ..inner
+    };
+    match state.ui_templates().render(template, &merged) {
         Ok(body) => Html(body).into_response(),
         Err(e) => {
             tracing::error!(template, error = %e, "template render failed");

@@ -24,6 +24,7 @@
       <span class="app-user__name">{{ user.name }}</span>
       {%- if user.is_admin %}<span class="badge badge--admin">admin</span>{% endif %}
       <form method="post" action="/__auth/logout" class="logout-form">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button type="submit" class="link-button">Log out</button>
       </form>
     </div>
