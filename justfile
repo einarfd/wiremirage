@@ -52,6 +52,13 @@ run-web:
       SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
       cargo run -p wm-host
 
+# Pour a handful of groups + routes + traffic into a running
+# `just run-web` host so the UI has something to render. Wipes
+# happen at host stop (in-memory storage), so re-run this after
+# every restart.
+seed-dev:
+    ./scripts/seed-dev.sh
+
 run-cli *ARGS:
     cargo run -p wm-cli -- {{ARGS}}
 
