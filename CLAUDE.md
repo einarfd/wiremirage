@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–25 landed. The WIT contract is live at
+**Status:** slices 1–26 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -192,9 +192,20 @@ trace ID — with the same owner-or-admin gate. Binary bodies
 render as `(binary, N bytes)`; text bodies render verbatim with
 a truncated-warning if the journal had to trim them. minijinja
 gains the `json` feature for the `tojson` filter used to embed
-the SSE URL in the inline script safely. By design (per
-`mcp-surface.md`) user management is **not** in MCP — admins
-handle it via CLI/UI.
+the SSE URL in the inline script safely. Slice 26 wired action buttons onto the detail pages now that
+CSRF is online: `POST /__ui/groups/{group}/refresh|edit|delete`
+for the group lifecycle (refresh TTL, edit TTL + sliding flag,
+cascade-delete) and `POST /__ui/routes/{group}/{n}/delete` for
+routes. All owner-or-admin-gated; the registry's
+`refresh_group`, `patch_group`, `cascade_delete_group`, and
+`delete_route` are called in-process. Templates' "Manage from
+CLI" panels became real `.action-row` button blocks with a
+`confirm()` prompt on destructive actions and an `<details>`
+edit-TTL disclosure. New CSS: `.btn--danger`, `.action-row`,
+`.edit-disclosure`, `.filter-checkbox`. Route source editing,
+the "+ Add route" button, and the dry-run modal are still
+deferred. By design (per `mcp-surface.md`) user management is
+**not** in MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 

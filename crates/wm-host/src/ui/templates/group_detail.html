@@ -125,14 +125,42 @@
 
 <section class="card">
   <header class="card__header">
-    <h2>Manage from CLI</h2>
+    <h2>Manage</h2>
   </header>
-  <p class="text-muted">Mutating actions (refresh TTL, edit, delete) land in a later slice. For now:</p>
-  <ul class="action-list">
-    <li><code>wm groups refresh {{ group.name }}</code> — bump the TTL to its configured value</li>
-    <li><code>wm groups update {{ group.name }} --ttl-seconds N</code> — edit TTL</li>
-    <li><code>wm groups delete {{ group.name }}</code> — cascade-delete the group and all its routes</li>
-    <li><code>wm journal tail --group {{ group.name }}</code> — watch this group's traffic live</li>
-  </ul>
+  <div class="action-row">
+    <form method="post" action="/__ui/groups/{{ group.name }}/refresh" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button type="submit" class="btn">Refresh TTL</button>
+    </form>
+    <form method="post" action="/__ui/groups/{{ group.name }}/delete" class="inline-form"
+          onsubmit="return confirm('Delete {{ group.name }} and all its routes? This can\'t be undone.');">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn--danger">Delete group</button>
+    </form>
+  </div>
+
+  <details class="edit-disclosure">
+    <summary>Edit TTL</summary>
+    <form method="post" action="/__ui/groups/{{ group.name }}/edit" class="filter-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label class="filter-field">
+        <span class="filter-field__label">TTL (seconds)</span>
+        <input type="text" name="ttl_seconds" value="{{ group.ttl_seconds }}">
+      </label>
+      <label class="filter-checkbox">
+        <input type="checkbox" name="sliding_ttl" value="on"{% if group.sliding_ttl %} checked{% endif %}>
+        <span>Sliding TTL (bump on traffic)</span>
+      </label>
+      <button type="submit" class="btn btn--primary">Save</button>
+    </form>
+  </details>
+
+  <p class="text-muted" style="margin-top: var(--space-4)">
+    Or use the CLI:
+    <code>wm groups refresh {{ group.name }}</code>,
+    <code>wm groups update {{ group.name }} --ttl-seconds N</code>,
+    <code>wm groups delete {{ group.name }}</code>,
+    <code>wm journal tail --group {{ group.name }}</code>.
+  </p>
 </section>
 {% endblock %}

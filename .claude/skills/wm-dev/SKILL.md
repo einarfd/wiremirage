@@ -423,6 +423,50 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Web UI action buttons (slice 26)
+
+Sixth UI slice. Replaces the "Manage from CLI" panels on the
+group + route detail pages with real action buttons backed by
+the CSRF wiring landed in slice 25.
+
+- **Group actions** (`/__ui/groups/{group}/...`):
+  - `POST .../refresh` — re-arms the Valkey TTL to the
+    configured value via `Registry::refresh_group`.
+  - `POST .../edit` — accepts `ttl_seconds` (positive integer)
+    and `sliding_ttl` (HTML checkbox semantics: present + truthy
+    = on; absent or empty = off). Calls
+    `Registry::patch_group(ttl_seconds, sliding_ttl)`.
+    Validation failure (zero, negative, non-numeric) renders the
+    400 placeholder page.
+  - `POST .../delete` — `Registry::cascade_delete_group` +
+    `RouteTable::refresh_after_group_cascade`. Browsers see a
+    `confirm()` prompt before the form submits.
+- **Route action** (`/__ui/routes/{group}/{n}/delete`):
+  `Registry::delete_route` + `RouteTable::refresh_after_delete`.
+  Redirects back to the group detail if the group survived
+  (explicit groups do; implicit single-route groups vanish), or
+  the listing otherwise.
+- **Authorization**: every action handler runs
+  `resolve_owned_group` (or its route-shaped sibling) which
+  returns `Box<Response>` for rejection paths — kept boxed so
+  the `Result`'s `Err` variant doesn't trip clippy's
+  `result_large_err`. Same rule as the REST surface: 403 for
+  non-admin-non-owner, 404 for unknown.
+- **CSRF**: every POST goes through the slice-25 middleware.
+  Forms include `_csrf` from the request-scoped task-local; the
+  `confirm()` prompts are pure UX with no security role.
+- **CSS additions:** `.btn--danger` (red outline → solid on
+  hover), `.action-row` (flex-wrap row of buttons),
+  `.edit-disclosure` (clickable `<summary>` accenting + open-state
+  spacing), `.filter-checkbox` (inline label + checkbox).
+- **Tests:** `tests/ui_actions.rs` — 8 tier-2 tests covering
+  refresh-redirects, edit-persists, edit-validation-error,
+  delete-cascade, route-delete, non-admin 403s on both
+  endpoints, and the CSRF-missing 403 path.
+- **Not in this slice:** the "+ Add route" button on group
+  detail (waits for the route creation form), dry-run modal,
+  source editing.
+
 ## Web UI tokens page + CSRF middleware (slice 25)
 
 Fifth UI slice. Replaces the `/__ui/me/tokens` stub with a real

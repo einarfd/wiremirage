@@ -89,10 +89,26 @@ pub fn router(state: AppState) -> Router {
         .route("/__ui/", get(home))
         .route("/__ui/groups", get(groups_list_page))
         .route("/__ui/groups/{group}", get(group_detail_page))
+        .route(
+            "/__ui/groups/{group}/refresh",
+            axum::routing::post(group_refresh_form),
+        )
+        .route(
+            "/__ui/groups/{group}/edit",
+            axum::routing::post(group_edit_form),
+        )
+        .route(
+            "/__ui/groups/{group}/delete",
+            axum::routing::post(group_delete_form),
+        )
         .route("/__ui/groups/{group}/state", get(stub_group_state))
         .route("/__ui/routes", get(routes_list_page))
         .route("/__ui/routes/new", get(stub_routes_new))
         .route("/__ui/routes/{group}/{number}", get(route_detail_page))
+        .route(
+            "/__ui/routes/{group}/{number}/delete",
+            axum::routing::post(route_delete_form),
+        )
         .route("/__ui/routes/{group}/{number}/state", get(stub_route_state))
         .route("/__ui/journal/live", get(live_journal_page))
         .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
@@ -806,6 +822,141 @@ struct GroupDetailRouteRow {
     last_hit_at: Option<String>,
 }
 
+// -- Group action handlers (slice 26) ---------------------------------------
+//
+// POST endpoints that the buttons + edit form on the group-detail
+// page submit to. Owner-or-admin gate, CSRF middleware handles the
+// `_csrf` form-field check, then we mutate via the registry and
+// 303 back to a sensible landing page (the detail page on
+// edit/refresh, the listing on delete).
+
+#[derive(serde::Deserialize)]
+struct EditGroupForm {
+    /// New TTL in seconds. Empty/missing leaves the existing value.
+    ttl_seconds: Option<String>,
+    /// "on" when checked; absent when unchecked (HTML form quirk).
+    sliding_ttl: Option<String>,
+    #[serde(rename = "_csrf")]
+    _csrf: Option<String>,
+}
+
+async fn group_refresh_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    if let Err(e) = state.routes().registry().refresh_group(&group.id) {
+        return ui_error_500(&state, &auth, format!("refresh: {e}"));
+    }
+    axum::response::Redirect::to(&format!("/__ui/groups/{}", group.name)).into_response()
+}
+
+async fn group_edit_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    axum::Form(form): axum::Form<EditGroupForm>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    let ttl_seconds = match form.ttl_seconds.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(s) => match s.parse::<u64>() {
+            Ok(v) if v > 0 => Some(v),
+            _ => {
+                return ui_error_400_text(&state, &auth, "TTL seconds must be a positive integer.");
+            }
+        },
+    };
+    // HTML checkboxes only submit the field when checked; an
+    // unchecked box means "sliding off". So if the form arrived
+    // without ttl_seconds and without sliding_ttl, treat that as
+    // "no change". If sliding_ttl was explicitly present (or
+    // explicitly absent on a submit), wire the new value through.
+    let sliding = form.sliding_ttl.as_deref().map(|v| {
+        let v = v.trim();
+        v == "on" || v == "true" || v == "1"
+    });
+    // Always submit sliding_ttl change because the form *not having*
+    // the field means the checkbox was unchecked — but only treat the
+    // POST as setting it when the form mentioned the field at all.
+    // To distinguish, the template renders a hidden marker
+    // `sliding_ttl_marker=1` so we know the form was for editing.
+    let sliding_explicit = form.sliding_ttl.is_some() || ttl_seconds.is_some();
+    let sliding_to_set = if sliding_explicit {
+        Some(sliding.unwrap_or(false))
+    } else {
+        None
+    };
+
+    if let Err(e) = state
+        .routes()
+        .registry()
+        .patch_group(&group.id, ttl_seconds, sliding_to_set)
+    {
+        return ui_error_500(&state, &auth, format!("edit: {e}"));
+    }
+    axum::response::Redirect::to(&format!("/__ui/groups/{}", group.name)).into_response()
+}
+
+async fn group_delete_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    if let Err(e) = state.routes().registry().cascade_delete_group(&group.id) {
+        return ui_error_500(&state, &auth, format!("delete: {e}"));
+    }
+    state.routes().refresh_after_group_cascade(&group.id);
+    axum::response::Redirect::to("/__ui/groups").into_response()
+}
+
+/// Look up `group_ref` and confirm the caller can manage it. The
+/// detail page uses a 403/404 split; lifecycle endpoints use the same
+/// rule. Returns `Box<Response>` on rejection so the `Result`'s Err
+/// variant stays small (clippy's `result_large_err` lint).
+fn resolve_owned_group(
+    state: &AppState,
+    auth: &AuthContext,
+    group_ref: &str,
+) -> Result<crate::registry::Group, Box<Response>> {
+    let group = state
+        .routes()
+        .registry()
+        .read_group_by_ref(group_ref)
+        .map_err(|_| Box::new(ui_not_found(state, auth, &format!("Group {group_ref}"))))?;
+    if !auth.is_admin && group.owner_id != auth.user_id {
+        return Err(Box::new(forbidden_page(state, auth)));
+    }
+    Ok(group)
+}
+
+fn ui_error_400_text(state: &AppState, auth: &AuthContext, msg: &str) -> Response {
+    let mut resp = render(
+        state,
+        "placeholder.html",
+        context! {
+            page_title => "Bad request",
+            api_hint => msg,
+            user => UserBadge::from(auth),
+        },
+    );
+    *resp.status_mut() = StatusCode::BAD_REQUEST;
+    resp
+}
+
 // -- /__ui/routes/{group}/{number} ------------------------------------------
 //
 // Detail page for a single route. Metadata + a short tail of recent
@@ -1404,6 +1555,47 @@ fn body_as_text(bytes: &[u8]) -> Option<String> {
         }
         _ => Some(format!("(binary, {} bytes)", bytes.len())),
     }
+}
+
+// -- Route action handlers (slice 26) ---------------------------------------
+
+async fn route_delete_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
+        }
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+    if let Err(e) = state.routes().registry().delete_route(&group_ref, number) {
+        return ui_error_500(&state, &auth, format!("delete: {e}"));
+    }
+    state.routes().refresh_after_delete(&route.id);
+    // Redirect back to the group's detail page if the group still
+    // exists (implicit single-route groups vanish along with their
+    // sole route), otherwise the listing.
+    let landing = if state
+        .routes()
+        .registry()
+        .read_group_by_ref(&group_ref)
+        .is_ok()
+    {
+        format!("/__ui/groups/{group_ref}")
+    } else {
+        "/__ui/groups".to_string()
+    };
+    axum::response::Redirect::to(&landing).into_response()
 }
 
 // -- /__ui/me/tokens --------------------------------------------------------
