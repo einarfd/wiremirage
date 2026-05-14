@@ -199,6 +199,36 @@ async fn live_journal_admin_without_group_renders_host_wide_picker() {
 }
 
 #[tokio::test]
+async fn live_journal_host_wide_prefetches_across_groups_for_admin() {
+    // Regression: the host-wide admin view used to render an empty
+    // table on first paint because there's no host-wide journal
+    // list endpoint — only the SSE relay. After a tab-revisit, no
+    // historical entries appeared until the next dispatch. The page
+    // now fans out across every group and unions their recent
+    // entries server-side before rendering.
+    let h = start_with_traffic().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(&h, "/__ui/journal/live"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // The seeded traffic fired POSTs at stripe-mock — those entries
+    // should appear on the host-wide view's pre-fetch.
+    assert!(
+        body.contains("POST"),
+        "host-wide pre-fetch should surface stripe-mock traffic: {body}"
+    );
+    assert!(body.contains("stripe-mock"));
+    assert!(body.contains("status-2xx"));
+}
+
+#[tokio::test]
 async fn live_journal_non_admin_without_group_shows_picker_only() {
     let h = start_with_traffic().await;
     let client = no_redirect_client();

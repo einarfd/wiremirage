@@ -751,6 +751,19 @@ async fn group_detail_page(
         created_at: group.created_at.to_rfc3339(),
     };
 
+    // Pre-fetch the most recent few journal entries for this group
+    // so the live pane has content on first paint; the EventSource
+    // in the template then keeps it current.
+    let recent_entries: Vec<LiveJournalRow> =
+        fetch_recent_for_group(&state, &group.id, &group.name, 10)
+            .into_iter()
+            .map(|(r, name)| LiveJournalRow::from_record(&r, &name))
+            .collect();
+    let sse_url = format!(
+        "/__api/journal/tail?group={}",
+        urlencoding::encode(&group.name)
+    );
+
     render(
         &state,
         "group_detail.html",
@@ -760,6 +773,8 @@ async fn group_detail_page(
             group => group_view,
             routes => routes_view,
             route_count => routes_in_group.len(),
+            recent_entries => recent_entries,
+            sse_url => sse_url,
         },
     )
 }
@@ -1009,39 +1024,38 @@ async fn live_journal_page(
         None => ("none", false, None),
     };
 
-    // Pre-fetch a small page of recent entries so the table isn't
-    // empty on first paint. Only meaningful when a single group is
-    // scoped — there's no host-wide listing endpoint. Filter
+    // Pre-fetch a window of recent entries so the table isn't empty
+    // on first paint (or after navigating away and back). Window size
+    // is generous (200 raw) so even narrow filters usually have
+    // something to show. Group-scoped: read the group's journal
+    // directly. Host-wide (admin only): fan out across all groups,
+    // union, sort by created_at desc, take the head. Filter
     // method/path_pattern/status in-process to match what the SSE
-    // tail will then deliver.
-    let mut initial: Vec<LiveJournalRow> = Vec::new();
-    if let (Some(gid), Some(name)) = (resolved_group_id.as_deref(), group_param.as_deref())
-        && let Ok(records) = state.journal().list_for_group(
-            gid,
-            crate::journal::ListCursor {
-                before: None,
-                limit: 50,
-            },
-        )
-    {
-        initial = records
-            .into_iter()
-            .filter(|r| match q.method.as_deref() {
-                Some(m) => r.request.method.eq_ignore_ascii_case(m),
-                None => true,
-            })
-            .filter(|r| match q.status.as_deref() {
-                Some(s) => status_matches(r.response.status, s),
-                None => true,
-            })
-            .filter(|r| match q.path_pattern.as_deref() {
-                Some(p) => glob_match_simple(p, &r.request.path),
-                None => true,
-            })
-            .take(25)
-            .map(|r| LiveJournalRow::from_record(&r, name))
-            .collect();
-    }
+    // tail will deliver next.
+    const RAW_WINDOW: usize = 200;
+    const DISPLAY_LIMIT: usize = 50;
+    let initial = match (resolved_group_id.as_deref(), group_param.as_deref()) {
+        (Some(gid), Some(name)) => fetch_recent_for_group(&state, gid, name, RAW_WINDOW),
+        (None, None) if auth.is_admin => fetch_recent_host_wide(&state, RAW_WINDOW),
+        _ => Vec::new(),
+    };
+    let initial: Vec<LiveJournalRow> = initial
+        .into_iter()
+        .filter(|(r, _)| match q.method.as_deref() {
+            Some(m) => r.request.method.eq_ignore_ascii_case(m),
+            None => true,
+        })
+        .filter(|(r, _)| match q.status.as_deref() {
+            Some(s) => status_matches(r.response.status, s),
+            None => true,
+        })
+        .filter(|(r, _)| match q.path_pattern.as_deref() {
+            Some(p) => glob_match_simple(p, &r.request.path),
+            None => true,
+        })
+        .take(DISPLAY_LIMIT)
+        .map(|(r, name)| LiveJournalRow::from_record(&r, &name))
+        .collect();
 
     let sse_url = build_sse_url(group_param.as_deref(), &q);
     let any_filter_active = q.method.is_some() || q.path_pattern.is_some() || q.status.is_some();
@@ -1065,6 +1079,59 @@ async fn live_journal_page(
             sse_url => sse_url,
         },
     )
+}
+
+/// Fetch up to `limit` most-recent journal records for one group,
+/// pairing each with the group's display name so the row template
+/// has what it needs without a per-row lookup.
+fn fetch_recent_for_group(
+    state: &AppState,
+    group_id: &str,
+    group_name: &str,
+    limit: usize,
+) -> Vec<(crate::journal::JournalRecord, String)> {
+    state
+        .journal()
+        .list_for_group(
+            group_id,
+            crate::journal::ListCursor {
+                before: None,
+                limit,
+            },
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| (r, group_name.to_string()))
+        .collect()
+}
+
+/// Host-wide fan-out for the admin tail's pre-fetch: pull a window
+/// of recent entries from every group, union them, sort by
+/// `created_at` desc, return the head. Bounded by the per-group
+/// window (`per_group`) so a host with hundreds of groups doesn't
+/// pay an unbounded cost — at worst N_groups × per_group reads,
+/// then a sort. The SSE tail keeps the view current after this
+/// initial paint.
+fn fetch_recent_host_wide(
+    state: &AppState,
+    limit: usize,
+) -> Vec<(crate::journal::JournalRecord, String)> {
+    let registry = state.routes().registry();
+    let groups = match registry.list_groups() {
+        Ok(gs) => gs,
+        Err(_) => return Vec::new(),
+    };
+    // 20 entries per group is enough to cover the common case (a
+    // few hot groups dominating the host-wide tail) without
+    // ballooning the read count on a quiet host with many groups.
+    let per_group = 20.min(limit);
+    let mut all: Vec<(crate::journal::JournalRecord, String)> = Vec::new();
+    for g in groups {
+        all.extend(fetch_recent_for_group(state, &g.id, &g.name, per_group));
+    }
+    all.sort_by_key(|p| std::cmp::Reverse(p.0.created_at));
+    all.truncate(limit);
+    all
 }
 
 fn caller_can_view_group(state: &AppState, auth: &AuthContext, group_id: &str) -> bool {

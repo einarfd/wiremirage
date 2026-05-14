@@ -159,7 +159,16 @@ added the journal screens. `/__ui/journal/live` pre-fetches
 opens an `EventSource` against `GET /__api/journal/tail` — the
 slice-11 SSE endpoint — to prepend new rows as `handled` events
 arrive. Plain JS, no HTMX yet (single stream + append is not
-worth pulling in the runtime). Filter + group dropdown carry
+worth pulling in the runtime). Host-wide pre-fetch (admin
+without `?group=`) fans out across every group, unions their
+20 most-recent entries, sorts desc by `created_at`, and
+returns the top 50 so the page is populated on revisit, not
+just on new traffic. Group-scoped pre-fetch reads from the
+group's journal directly. Pre-fetch window is generous (200
+raw entries) so narrow filters still tend to have content
+after a reload. Group detail page (slice 23) now carries the
+same live pane scoped to that group via `?group=` — same
+EventSource pattern, ~10 most-recent entries pre-rendered. Filter + group dropdown carry
 through to the SSE URL via `build_sse_url`. Authorization
 mirrors the SSE endpoint: with `?group=` the caller must be
 admin or own a route in that group; without it, admin-only

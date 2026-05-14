@@ -71,6 +71,60 @@
 
 <section class="card">
   <header class="card__header">
+    <h2>Live activity</h2>
+    <a class="link" href="/__ui/journal/live?group={{ group.name }}">Full view &rarr;</a>
+  </header>
+  <ul id="group-live" class="action-list">
+  {%- for j in recent_entries %}
+    <li>
+      <code>{{ j.created_at_human }}</code>
+      <span class="status status-{{ j.status_class }}">{{ j.status }}</span>
+      <a href="/__ui/journal/{{ group.name }}/{{ j.number }}">{{ j.method }} <code>{{ j.path }}</code></a>
+    </li>
+  {%- else %}
+    <li id="group-live-empty" class="text-muted">No traffic yet. Hit one of this group's routes to see activity.</li>
+  {%- endfor %}
+  </ul>
+</section>
+
+<script>
+(function () {
+  // Group-detail live pane: same EventSource pattern as the
+  // /__ui/journal/live page, scoped to this group via ?group=.
+  // Prepend a row for each `handled` event; cap the list at 25.
+  var list = document.getElementById("group-live");
+  if (!list) return;
+  var es = new EventSource({{ sse_url | tojson }});
+
+  function statusClass(code) {
+    var b = Math.floor(code / 100);
+    return b >= 1 && b <= 5 ? b + "xx" : "other";
+  }
+  function fmtTime(iso) {
+    try { return new Date(iso).toLocaleTimeString(); }
+    catch (_) { return iso; }
+  }
+
+  es.addEventListener("handled", function (ev) {
+    try {
+      var e = JSON.parse(ev.data);
+      var li = document.createElement("li");
+      li.innerHTML =
+        '<code>' + fmtTime(e.created_at) + '</code> ' +
+        '<span class="status status-' + statusClass(e.response.status) + '">' + e.response.status + '</span> ' +
+        '<a href="/__ui/journal/' + encodeURIComponent(e.group_name) + '/' + e.number + '">' +
+        e.request.method + ' <code>' + e.request.path + '</code></a>';
+      var empty = document.getElementById("group-live-empty");
+      if (empty) empty.remove();
+      list.insertBefore(li, list.firstChild);
+      while (list.children.length > 25) list.removeChild(list.lastChild);
+    } catch (_) {}
+  });
+})();
+</script>
+
+<section class="card">
+  <header class="card__header">
     <h2>Manage from CLI</h2>
   </header>
   <p class="text-muted">Mutating actions (refresh TTL, edit, delete) land in a later slice. For now:</p>

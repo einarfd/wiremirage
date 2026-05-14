@@ -199,6 +199,40 @@ async fn group_detail_403_for_non_owner_non_admin() {
 }
 
 #[tokio::test]
+async fn group_detail_includes_live_activity_pane_after_traffic() {
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    // Drive a couple of mock requests so the pre-fetch has content.
+    for _ in 0..2 {
+        client
+            .post(url(&h, "/v1/charges"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+    }
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // The live-activity card renders with the most recent entries
+    // already in the DOM, and the EventSource script is wired up to
+    // the group-scoped SSE URL.
+    assert!(body.contains("Live activity"));
+    assert!(body.contains("status-2xx"), "pre-fetched 2xx entry: {body}");
+    assert!(
+        body.contains("/__api/journal/tail?group=stripe-mock"),
+        "group-scoped SSE URL present"
+    );
+}
+
+#[tokio::test]
 async fn group_detail_admin_can_view_any_group() {
     let (h, _, _) = start_seeded().await;
     let client = no_redirect_client();
