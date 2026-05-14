@@ -986,8 +986,21 @@ struct UiLiveJournalQuery {
 async fn live_journal_page(
     State(state): State<AppState>,
     auth: AuthContext,
-    Query(q): Query<UiLiveJournalQuery>,
+    Query(raw_q): Query<UiLiveJournalQuery>,
 ) -> Response {
+    // Form-submitted "Any method" sends `method=` (an empty value),
+    // which deserialises as `Some("")` and would filter out every
+    // entry under the naive `eq_ignore_ascii_case("")` check below.
+    // Normalise once up front so every downstream consumer (filter,
+    // SSE-URL builder, `any_filter_active`, form echo) sees `None`
+    // when the user picked the empty option.
+    let q = UiLiveJournalQuery {
+        group: nonempty(raw_q.group.as_deref()),
+        method: nonempty(raw_q.method.as_deref()),
+        path_pattern: nonempty(raw_q.path_pattern.as_deref()),
+        status: nonempty(raw_q.status.as_deref()),
+    };
+
     // Resolve the group of available groups for the picker. Admins
     // see all groups by name; non-admins see only their owned groups.
     let registry = state.routes().registry();

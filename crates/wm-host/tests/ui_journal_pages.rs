@@ -282,6 +282,40 @@ async fn live_journal_unknown_group_is_404() {
 }
 
 #[tokio::test]
+async fn live_journal_empty_form_values_do_not_wipe_entries() {
+    // Regression: submitting the filter form with "Any method"
+    // selected sends `method=` (empty value), which deserialised as
+    // `Some("")`. The pre-fetch filter then asked "does the entry's
+    // method equal the empty string?" — always false — and the table
+    // rendered empty. Affected method, path_pattern, and status.
+    let h = start_with_traffic().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(
+            &h,
+            "/__ui/journal/live?group=stripe-mock&method=&path_pattern=&status=",
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // Pre-fetched entries from the seeded traffic should still appear.
+    assert!(
+        body.contains("status-2xx"),
+        "empty filter values should not wipe the pre-fetched rows: {body}"
+    );
+    // The SSE URL should not contain empty filter params either.
+    assert!(
+        !body.contains("method=&"),
+        "empty method should be dropped from the SSE URL"
+    );
+}
+
+#[tokio::test]
 async fn live_journal_filters_round_trip_through_sse_url() {
     let h = start_with_traffic().await;
     let client = no_redirect_client();
