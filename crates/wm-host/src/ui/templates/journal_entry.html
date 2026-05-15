@@ -2,59 +2,53 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/journal/live?group={{ entry.group_name }}">Live journal</a>
+  <a href="/__ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
   <a href="/__ui/groups/{{ entry.group_name }}">{{ entry.group_name }}</a>
   <span class="breadcrumb__sep">›</span>
-  <span aria-current="page">#{{ entry.number }}</span>
+  <a href="/__ui/routes/{{ entry.group_name }}/{{ entry.route_number }}">{{ entry.method }} {{ entry.matched_pattern }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">journal #{{ entry.number }}</span>
 </nav>
 
-<section class="page-header">
+<header class="page-header">
   <h1><code>{{ entry.method }} {{ entry.path }}</code></h1>
   <p class="text-muted">
-    <span class="status status-{{ entry.status_class }}">{{ entry.status }}</span>
-    · {{ entry.duration_ms }} ms
-    · <time datetime="{{ entry.created_at }}">{{ entry.created_at }}</time>
-    · matched route <a href="/__ui/routes/{{ entry.group_name }}/{{ entry.route_number }}">#{{ entry.route_number }}</a>
+    <time datetime="{{ entry.created_at }}">{{ entry.created_at }}</time>
+    · matched
+    <a href="/__ui/routes/{{ entry.group_name }}/{{ entry.route_number }}"><code>{{ entry.method }} {{ entry.matched_pattern }}</code></a>
+    in <a href="/__ui/groups/{{ entry.group_name }}">{{ entry.group_name }}</a>
   </p>
-</section>
-
-<section class="card">
-  <header class="card__header"><h2>Summary</h2></header>
   <dl class="meta-grid">
-    <dt>Entry ID</dt>
-    <dd><code>{{ entry.id }}</code></dd>
-    <dt>Trace ID</dt>
-    <dd>{% if entry.trace_id %}<code>{{ entry.trace_id }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</dd>
-    <dt>Matched pattern</dt>
-    <dd><code>{{ entry.matched_pattern }}</code></dd>
-    <dt>Wall clock</dt>
+    <dt>Status</dt>
+    <dd><span class="status status-{{ entry.status_class }}">{{ entry.status }}</span></dd>
+    <dt>Duration</dt>
     <dd>{{ entry.duration_ms }} ms</dd>
-    {% if entry.path_params | length > 0 %}
-    <dt>Path params</dt>
-    <dd>{% for kv in entry.path_params %}<code>{{ kv[0] }}={{ kv[1] }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</dd>
-    {% endif %}
-    {% if entry.query | length > 0 %}
-    <dt>Query</dt>
-    <dd>{% for kv in entry.query %}<code>{{ kv[0] }}={{ kv[1] }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</dd>
-    {% endif %}
-    {% if entry.error %}
-    <dt>Error</dt>
-    <dd><code>{{ entry.error }}</code></dd>
-    {% endif %}
-    {% if entry.dropped_response_headers | length > 0 %}
-    <dt>Dropped response headers</dt>
-    <dd class="text-muted">{% for h in entry.dropped_response_headers %}<code>{{ h }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</dd>
-    {% endif %}
+    <dt>Trace</dt>
+    <dd>{% if entry.trace_id %}<code>{{ entry.trace_id }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</dd>
   </dl>
+  {% if entry.path_params | length > 0 or entry.query | length > 0 %}
+  <p class="text-muted">
+    {%- if entry.path_params | length > 0 -%}
+    Path params: {% for kv in entry.path_params %}<code>{{ kv[0] }}={{ kv[1] }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
+    {%- endif -%}
+    {%- if entry.path_params | length > 0 and entry.query | length > 0 %} · {% endif -%}
+    {%- if entry.query | length > 0 -%}
+    Query: {% for kv in entry.query %}<code>{{ kv[0] }}={{ kv[1] }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
+    {%- endif -%}
+  </p>
+  {% endif %}
+</header>
+
+{% if entry.error %}
+<section class="card card--error">
+  <header class="card__header"><h2>Handler error</h2></header>
+  <p><code>{{ entry.error }}</code></p>
 </section>
+{% endif %}
 
 <section class="card">
   <header class="card__header"><h2>Request</h2></header>
-  <dl class="meta-grid">
-    <dt>Method</dt><dd>{{ entry.method }}</dd>
-    <dt>Path</dt><dd><code>{{ entry.path }}</code></dd>
-  </dl>
   <h3>Headers</h3>
   {% if entry.request_headers | length == 0 %}
   <p class="text-muted">No request headers recorded.</p>
@@ -99,6 +93,16 @@
   {% if entry.response_body_truncated %}<p class="text-muted">Body truncated at the journal's storage limit. Original size: {{ entry.response_body_original_size }} bytes.</p>{% endif %}
   {% else %}
   <p class="text-muted">Empty body ({{ entry.response_body_original_size }} bytes).</p>
+  {% endif %}
+  {% if entry.dropped_response_headers | length > 0 %}
+  <details class="dropped-headers">
+    <summary class="text-muted">{{ entry.dropped_response_headers | length }} header{% if entry.dropped_response_headers | length != 1 %}s{% endif %} dropped by the host</summary>
+    <ul>
+      {%- for h in entry.dropped_response_headers %}
+      <li><code>{{ h }}</code></li>
+      {%- endfor %}
+    </ul>
+  </details>
   {% endif %}
 </section>
 

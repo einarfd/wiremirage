@@ -385,10 +385,17 @@ async fn journal_entry_renders_full_record_for_owner() {
     assert!(body.contains("Response"));
     // Status pill
     assert!(body.contains("status-2xx"));
-    // Breadcrumb back to Live journal
-    assert!(body.contains("/__ui/journal/live?group=stripe-mock"));
-    // Link back to the matched route detail
-    assert!(body.contains("/__ui/routes/stripe-mock/1"));
+    // Breadcrumb walks Groups → group → route → entry (matches the
+    // wireframe; slice-30-style restructure).
+    assert!(
+        body.contains("/__ui/groups/stripe-mock"),
+        "breadcrumb has group link"
+    );
+    assert!(
+        body.contains("/__ui/routes/stripe-mock/1"),
+        "breadcrumb has route link"
+    );
+    assert!(body.contains("journal #1"), "current-page label visible");
 }
 
 #[tokio::test]
