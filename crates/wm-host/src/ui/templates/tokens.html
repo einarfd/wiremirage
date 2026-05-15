@@ -37,8 +37,18 @@
       <input type="text" name="name" required placeholder="e.g. laptop-dev">
     </label>
     <label class="filter-field">
-      <span class="filter-field__label">TTL hours (optional)</span>
-      <input type="text" name="ttl_hours" placeholder="leave blank for no expiry">
+      <span class="filter-field__label">Expires</span>
+      <select name="ttl_preset">
+        <option value="never">Never</option>
+        <option value="30d">30 days</option>
+        <option value="90d">90 days</option>
+        <option value="1y">1 year</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </label>
+    <label class="filter-field">
+      <span class="filter-field__label">Custom hours</span>
+      <input type="text" name="ttl_hours" placeholder="used only when Custom">
     </label>
     <button type="submit" class="btn btn--primary">Create</button>
   </form>
@@ -54,10 +64,10 @@
   <table class="data-table">
     <thead>
       <tr>
-        <th scope="col">Name</th>
-        <th scope="col">Created</th>
-        <th scope="col">Last used</th>
-        <th scope="col">Expires</th>
+        <th scope="col"><a href="{{ data.sort_links.name }}">Name{% if data.sort == "name" %} {{ data.dir_arrow }}{% endif %}</a></th>
+        <th scope="col"><a href="{{ data.sort_links.created }}">Created{% if data.sort == "created" %} {{ data.dir_arrow }}{% endif %}</a></th>
+        <th scope="col"><a href="{{ data.sort_links.last_used }}">Last used{% if data.sort == "last_used" %} {{ data.dir_arrow }}{% endif %}</a></th>
+        <th scope="col"><a href="{{ data.sort_links.expires }}">Expires{% if data.sort == "expires" %} {{ data.dir_arrow }}{% endif %}</a></th>
         <th scope="col" class="text-muted">Actions</th>
       </tr>
     </thead>

@@ -1809,11 +1809,22 @@ async fn route_delete_form(
 #[derive(serde::Deserialize)]
 struct CreateTokenForm {
     name: String,
+    /// One of `never` / `30d` / `90d` / `1y` / `custom`. When `custom`
+    /// (or absent), `ttl_hours` is consulted. The empty string is
+    /// treated as `custom` so the old form (no preset, just hours)
+    /// keeps working.
+    ttl_preset: Option<String>,
     ttl_hours: Option<String>,
     /// Validated by the CSRF middleware; ignored here, only present so
     /// `axum::Form` doesn't reject the request as malformed.
     #[serde(rename = "_csrf")]
     _csrf: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct UiTokensQuery {
+    sort: Option<String>,
+    dir: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1822,15 +1833,51 @@ struct CsrfOnlyForm {
     _csrf: String,
 }
 
-async fn tokens_page(State(state): State<AppState>, auth: AuthContext) -> Response {
-    let tokens = match state.auth().list_tokens_for(&auth.user_id) {
-        Ok(mut ts) => {
-            ts.sort_by_key(|t| std::cmp::Reverse(t.created_at));
-            ts
-        }
+async fn tokens_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<UiTokensQuery>,
+) -> Response {
+    let mut tokens = match state.auth().list_tokens_for(&auth.user_id) {
+        Ok(ts) => ts,
         Err(e) => return ui_error_500(&state, &auth, format!("list tokens: {e}")),
     };
-    render_tokens_page(&state, &auth, TokensPageData::list(&tokens))
+    let (sort, dir) = resolve_token_sort(q.sort.as_deref(), q.dir.as_deref());
+    sort_tokens(&mut tokens, sort, dir);
+    let data = TokensPageData::list_with_sort(&tokens, sort, dir);
+    render_tokens_page(&state, &auth, data)
+}
+
+fn resolve_token_sort<'a>(sort: Option<&'a str>, dir: Option<&'a str>) -> (&'a str, &'a str) {
+    let sort = match sort {
+        Some(s) if matches!(s, "name" | "created" | "expires" | "last_used") => s,
+        _ => "created",
+    };
+    let dir = match dir {
+        Some("asc") => "asc",
+        _ => "desc",
+    };
+    (sort, dir)
+}
+
+fn sort_tokens(tokens: &mut [crate::auth::Token], sort: &str, dir: &str) {
+    use std::cmp::Ordering;
+    let cmp: fn(&crate::auth::Token, &crate::auth::Token) -> Ordering = match sort {
+        "name" => |a, b| a.name.cmp(&b.name),
+        "expires" => |a, b| {
+            // None means "never expires" — sort as the largest value
+            // so it sits at the end ascending, the start descending.
+            match (a.expires_at, b.expires_at) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (Some(x), Some(y)) => x.cmp(&y),
+            }
+        },
+        "last_used" => |a, b| a.last_used_at.cmp(&b.last_used_at),
+        _ => |a, b| a.created_at.cmp(&b.created_at),
+    };
+    tokens.sort_by(|a, b| if dir == "asc" { cmp(a, b) } else { cmp(b, a) });
 }
 
 async fn create_token_form(
@@ -1842,17 +1889,26 @@ async fn create_token_form(
     if name.is_empty() {
         return tokens_page_with_error(&state, &auth, "Name is required.");
     }
-    let ttl = match form.ttl_hours.as_deref().map(str::trim) {
-        Some("") | None => None,
-        Some(s) => match s.parse::<u64>() {
-            Ok(h) if h > 0 => Some(h * 3600),
-            _ => {
-                return tokens_page_with_error(
-                    &state,
-                    &auth,
-                    "TTL hours must be a positive integer.",
-                );
-            }
+    const DAY: u64 = 86_400;
+    let ttl = match form.ttl_preset.as_deref().map(str::trim) {
+        Some("never") => None,
+        Some("30d") => Some(30 * DAY),
+        Some("90d") => Some(90 * DAY),
+        Some("1y") => Some(365 * DAY),
+        // "custom", "", or absent: fall through to the hours field.
+        // The old form (no preset, just hours) keeps working.
+        _ => match form.ttl_hours.as_deref().map(str::trim) {
+            Some("") | None => None,
+            Some(s) => match s.parse::<u64>() {
+                Ok(h) if h > 0 => Some(h * 3600),
+                _ => {
+                    return tokens_page_with_error(
+                        &state,
+                        &auth,
+                        "TTL hours must be a positive integer.",
+                    );
+                }
+            },
         },
     };
 
@@ -1908,31 +1964,64 @@ struct TokensPageData {
     plaintext: Option<String>,
     plaintext_name: Option<String>,
     error: Option<String>,
+    sort: String,
+    dir: String,
+    dir_arrow: &'static str,
+    sort_links: TokensSortLinks,
 }
 
 impl TokensPageData {
-    fn list(tokens: &[crate::auth::Token]) -> Self {
+    fn list_with_sort(tokens: &[crate::auth::Token], sort: &str, dir: &str) -> Self {
         Self {
             tokens: tokens.iter().map(TokenRow::from).collect(),
             plaintext: None,
             plaintext_name: None,
             error: None,
+            sort: sort.to_string(),
+            dir: dir.to_string(),
+            dir_arrow: arrow_for(dir),
+            sort_links: TokensSortLinks::build(sort, dir),
         }
+    }
+    fn list(tokens: &[crate::auth::Token]) -> Self {
+        Self::list_with_sort(tokens, "created", "desc")
     }
     fn after_create(tokens: &[crate::auth::Token], plaintext: &str, name: &str) -> Self {
-        Self {
-            tokens: tokens.iter().map(TokenRow::from).collect(),
-            plaintext: Some(plaintext.to_string()),
-            plaintext_name: Some(name.to_string()),
-            error: None,
-        }
+        let mut data = Self::list(tokens);
+        data.plaintext = Some(plaintext.to_string());
+        data.plaintext_name = Some(name.to_string());
+        data
     }
     fn with_error(tokens: &[crate::auth::Token], msg: &str) -> Self {
+        let mut data = Self::list(tokens);
+        data.error = Some(msg.to_string());
+        data
+    }
+}
+
+#[derive(Serialize)]
+struct TokensSortLinks {
+    name: String,
+    created: String,
+    expires: String,
+    last_used: String,
+}
+
+impl TokensSortLinks {
+    fn build(current_sort: &str, current_dir: &str) -> Self {
+        let mk = |col: &str, default_dir: &str| -> String {
+            let dir = if current_sort == col {
+                flip(current_dir)
+            } else {
+                default_dir
+            };
+            format!("/__ui/me/tokens?sort={col}&dir={dir}")
+        };
         Self {
-            tokens: tokens.iter().map(TokenRow::from).collect(),
-            plaintext: None,
-            plaintext_name: None,
-            error: Some(msg.to_string()),
+            name: mk("name", "asc"),
+            created: mk("created", "desc"),
+            expires: mk("expires", "asc"),
+            last_used: mk("last_used", "desc"),
         }
     }
 }

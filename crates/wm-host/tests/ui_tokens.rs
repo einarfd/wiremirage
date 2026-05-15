@@ -358,3 +358,177 @@ async fn alice_does_not_see_admins_tokens() {
     assert!(body.contains("No tokens yet"));
     assert!(!body.contains("admin-only"));
 }
+
+#[tokio::test]
+async fn ttl_preset_30d_sets_a_30_day_expiry() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let page = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
+    let resp = client
+        .post(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&name=thirty-day&ttl_preset=30d&ttl_hours="
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    // Token landed in the table with a non-empty Expires cell.
+    assert!(body.contains("thirty-day"));
+    // The row's Expires column has a real date (not "—"). The dates are
+    // ISO 8601 so check for the canonical "T" separator at minimum.
+    let table_rows: Vec<&str> = body.lines().filter(|l| l.contains("thirty-day")).collect();
+    let row_section = body.split("<tbody>").nth(1).unwrap_or(&body);
+    assert!(
+        row_section.contains("T") && !row_section.contains("<td class=\"text-muted\">—</td>\n"),
+        "expires column has a real date: rows={table_rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn ttl_preset_never_creates_token_without_expiry() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let page = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
+    let resp = client
+        .post(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&name=forever&ttl_preset=never&ttl_hours=999"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    // The "ttl_hours=999" should be ignored since preset is "never".
+    // The forever row's Expires cell should be the empty dash.
+    let row = body
+        .split("forever")
+        .nth(1)
+        .expect("forever row")
+        .split("</tr>")
+        .next()
+        .unwrap();
+    assert!(row.contains("—"), "no-expiry dash on forever row: {row}");
+}
+
+#[tokio::test]
+async fn ttl_preset_custom_falls_through_to_hours_field() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let page = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
+    let resp = client
+        .post(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&name=custom-12h&ttl_preset=custom&ttl_hours=12"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    let row = body
+        .split("custom-12h")
+        .nth(1)
+        .expect("custom row")
+        .split("</tr>")
+        .next()
+        .unwrap();
+    // A real expiry should be present (not the muted dash).
+    assert!(
+        row.contains("T") || row.contains("<time"),
+        "custom row has a real expiry: {row}"
+    );
+}
+
+#[tokio::test]
+async fn token_list_sorts_by_name_when_requested() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    // Create three tokens with names that sort differently from creation order.
+    for n in ["gamma", "alpha", "beta"] {
+        let page = client
+            .get(url(&h, "/__ui/me/tokens"))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
+        client
+            .post(url(&h, "/__ui/me/tokens"))
+            .header("cookie", &cookie)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(format!("_csrf={csrf}&name={n}&ttl_preset=never"))
+            .send()
+            .await
+            .unwrap();
+    }
+    // Default sort = created desc → beta, alpha, gamma (newest first).
+    let default_body = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let default_order = order_of_names(&default_body, &["alpha", "beta", "gamma"]);
+    assert_eq!(default_order, vec!["beta", "alpha", "gamma"]);
+    // sort=name asc → alpha, beta, gamma.
+    let by_name = client
+        .get(url(&h, "/__ui/me/tokens?sort=name&dir=asc"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let name_order = order_of_names(&by_name, &["alpha", "beta", "gamma"]);
+    assert_eq!(name_order, vec!["alpha", "beta", "gamma"]);
+    // Active column carries the direction arrow.
+    assert!(
+        by_name.contains("Name ↑"),
+        "active asc arrow on Name: {by_name}"
+    );
+}
+
+/// Helper: find the order in which `needles` appear in `body`.
+fn order_of_names(body: &str, needles: &[&str]) -> Vec<String> {
+    let mut found: Vec<(usize, &str)> = needles
+        .iter()
+        .filter_map(|n| body.find(n).map(|i| (i, *n)))
+        .collect();
+    found.sort_by_key(|(i, _)| *i);
+    found.into_iter().map(|(_, n)| n.to_string()).collect()
+}
