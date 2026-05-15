@@ -391,6 +391,77 @@ impl Auth {
         Ok(out)
     }
 
+    /// Rename one of `owner_id`'s tokens. The hashed secret and metadata
+    /// (created_at, expires_at, last_used_at) are preserved; only the
+    /// human-readable name changes. The plaintext token continues to
+    /// authenticate.
+    ///
+    /// Errors:
+    ///   * `NotFound` — no token with `old_name`
+    ///   * `NameTaken(new_name)` — owner already has a token with that name
+    ///   * `Malformed` — bad storage shape (corruption)
+    pub fn rename_token(
+        &self,
+        owner_id: &str,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<Token, AuthError> {
+        let mut bucket = self.bucket()?;
+        // No-op rename is fine — just return the existing record.
+        if old_name == new_name {
+            return self
+                .get_token_by_name_using(&mut bucket, owner_id, old_name)?
+                .ok_or(AuthError::NotFound);
+        }
+        // New name must not already be in use by this owner.
+        if bucket
+            .get(&format!("token:by-name:{owner_id}:{new_name}"))?
+            .is_some()
+        {
+            return Err(AuthError::NameTaken(new_name.to_string()));
+        }
+        // Find the existing record.
+        let Some(bytes) = bucket.get(&format!("token:by-name:{owner_id}:{old_name}"))? else {
+            return Err(AuthError::NotFound);
+        };
+        let token_id = String::from_utf8(bytes)
+            .map_err(|_| AuthError::Malformed("token:by-name value".into()))?;
+        let Some(mut token) = self.read_token_by_id(&mut bucket, &token_id)? else {
+            return Err(AuthError::NotFound);
+        };
+        // Rewrite the name field on the record + swap the by-name index.
+        // Order: set new index first, then update the record's name
+        // field, then drop the old index. A crash mid-sequence leaves
+        // an extra index entry pointing at the (renamed) record rather
+        // than a dangling lookup.
+        bucket.set(
+            &format!("token:by-name:{owner_id}:{new_name}"),
+            token.id.as_bytes().to_vec(),
+        )?;
+        bucket.hash_set(
+            &format!("token:{}", token.id),
+            "name",
+            new_name.as_bytes().to_vec(),
+        )?;
+        bucket.delete(&format!("token:by-name:{owner_id}:{old_name}"))?;
+        token.name = new_name.to_string();
+        Ok(token)
+    }
+
+    fn get_token_by_name_using(
+        &self,
+        bucket: &mut Bucket,
+        owner_id: &str,
+        name: &str,
+    ) -> Result<Option<Token>, AuthError> {
+        let Some(bytes) = bucket.get(&format!("token:by-name:{owner_id}:{name}"))? else {
+            return Ok(None);
+        };
+        let token_id = String::from_utf8(bytes)
+            .map_err(|_| AuthError::Malformed("token:by-name value".into()))?;
+        self.read_token_by_id(bucket, &token_id)
+    }
+
     pub fn revoke_token_by_name(&self, owner_id: &str, name: &str) -> Result<bool, AuthError> {
         let mut bucket = self.bucket()?;
         let Some(bytes) = bucket.get(&format!("token:by-name:{owner_id}:{name}"))? else {
@@ -705,6 +776,82 @@ mod tests {
         auth.create_token(&user.id, "ci", None).unwrap();
         let err = auth.create_token(&user.id, "ci", None).unwrap_err();
         assert!(matches!(err, AuthError::NameTaken(_)));
+    }
+
+    #[test]
+    fn rename_token_updates_record_and_index_and_keeps_plaintext_valid() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        let (token, plaintext) = auth.create_token(&user.id, "laptop-old", None).unwrap();
+        let original_id = token.id.clone();
+        let original_hash = token.hash.clone();
+
+        let renamed = auth
+            .rename_token(&user.id, "laptop-old", "laptop-new")
+            .unwrap();
+        assert_eq!(renamed.id, original_id, "id stable across rename");
+        assert_eq!(renamed.hash, original_hash, "hash stable across rename");
+        assert_eq!(renamed.name, "laptop-new");
+
+        // Old name no longer resolves.
+        assert!(
+            auth.get_token_by_name(&user.id, "laptop-old")
+                .unwrap()
+                .is_none()
+        );
+        // New name does.
+        let fetched = auth
+            .get_token_by_name(&user.id, "laptop-new")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.id, original_id);
+        // Plaintext token still authenticates.
+        let ctx = auth.authenticate(&plaintext).unwrap();
+        assert!(ctx.is_some(), "plaintext token still authenticates");
+    }
+
+    #[test]
+    fn rename_token_rejects_name_collision() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        auth.create_token(&user.id, "ci", None).unwrap();
+        auth.create_token(&user.id, "laptop", None).unwrap();
+        let err = auth.rename_token(&user.id, "ci", "laptop").unwrap_err();
+        assert!(matches!(err, AuthError::NameTaken(n) if n == "laptop"));
+    }
+
+    #[test]
+    fn rename_token_to_same_name_is_a_noop() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        let (token, _) = auth.create_token(&user.id, "ci", None).unwrap();
+        let renamed = auth.rename_token(&user.id, "ci", "ci").unwrap();
+        assert_eq!(renamed.id, token.id);
+        assert_eq!(renamed.name, "ci");
+    }
+
+    #[test]
+    fn rename_token_returns_not_found_for_unknown_name() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth
+            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .unwrap()
+            .unwrap();
+        let err = auth.rename_token(&user.id, "no-such", "new").unwrap_err();
+        assert!(matches!(err, AuthError::NotFound));
     }
 
     #[test]

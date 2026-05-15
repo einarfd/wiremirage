@@ -78,7 +78,13 @@
         <td class="text-muted">{{ t.created_at }}</td>
         <td class="text-muted">{% if t.last_used_at %}{{ t.last_used_at }}{% else %}never{% endif %}</td>
         <td class="text-muted">{% if t.expires_at %}{{ t.expires_at }}{% else %}—{% endif %}</td>
-        <td>
+        <td class="token-actions">
+          <form method="post" action="/__ui/me/tokens/{{ t.name }}/rename" class="inline-form"
+                onsubmit="var n = prompt('New name for {{ t.name }}:', '{{ t.name }}'); if (!n || n === '{{ t.name }}') return false; this.new_name.value = n; return true;">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="new_name" value="">
+            <button type="submit" class="btn btn--ghost">Rename</button>
+          </form>
           <form method="post" action="/__ui/me/tokens/{{ t.name }}/revoke" class="inline-form" onsubmit="return confirm('Revoke {{ t.name }}? This can\'t be undone.');">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <button type="submit" class="btn btn--ghost">Revoke</button>

@@ -52,7 +52,10 @@ pub fn router() -> Router<AppState> {
             post(dry_run_route),
         )
         .route("/__api/tokens", post(create_token).get(list_tokens))
-        .route("/__api/tokens/{name}", get(get_token).delete(delete_token))
+        .route(
+            "/__api/tokens/{name}",
+            get(get_token).delete(delete_token).patch(patch_token),
+        )
         // Users — POST/GET (admin); GET /me (any authed); GET/PATCH/DELETE
         // /{name} (admin or self for the GET; admin-only for PATCH/DELETE).
         // /me must come before /{name} or axum's matcher will treat "me"
@@ -1133,6 +1136,28 @@ async fn delete_token(
         return Err(ApiError::not_found());
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchTokenBody {
+    /// New token name (required, non-empty).
+    name: String,
+}
+
+async fn patch_token(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(old_name): Path<String>,
+    Json(body): Json<PatchTokenBody>,
+) -> Result<Json<TokenRecord>, ApiError> {
+    let new_name = body.name.trim();
+    if new_name.is_empty() {
+        return Err(ApiError::validation("token name must not be empty"));
+    }
+    let token = state
+        .auth()
+        .rename_token(&auth.user_id, &old_name, new_name)?;
+    Ok(Json(TokenRecord::from(&token)))
 }
 
 // -- /__api/users -------------------------------------------------------------

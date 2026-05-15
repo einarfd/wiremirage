@@ -448,6 +448,10 @@ p { margin: 0 0 var(--space-3); }
   border-left: 3px solid var(--status-5xx);
 }
 .inline-form { display: inline; margin: 0; }
+.token-actions {
+  display: flex;
+  gap: var(--space-2);
+}
 
 .action-row {
   display: flex;

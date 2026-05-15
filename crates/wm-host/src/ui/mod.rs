@@ -137,6 +137,10 @@ pub fn router(state: AppState) -> Router {
             "/__ui/me/tokens/{name}/revoke",
             axum::routing::post(revoke_token_form),
         )
+        .route(
+            "/__ui/me/tokens/{name}/rename",
+            axum::routing::post(rename_token_form),
+        )
         .route("/__ui/settings", get(stub_settings))
         .route("/__ui/admin/health", get(stub_admin_health))
         .layer(middleware::from_fn(csrf::csrf_middleware))
@@ -1956,6 +1960,40 @@ async fn revoke_token_form(
     // 303 See Other so a browser refresh after revoke doesn't replay
     // the POST.
     axum::response::Redirect::to("/__ui/me/tokens").into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RenameTokenForm {
+    new_name: String,
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+}
+
+async fn rename_token_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(old_name): Path<String>,
+    axum::Form(form): axum::Form<RenameTokenForm>,
+) -> Response {
+    let new_name = form.new_name.trim();
+    if new_name.is_empty() {
+        return tokens_page_with_error(&state, &auth, "New name must not be empty.");
+    }
+    match state
+        .auth()
+        .rename_token(&auth.user_id, &old_name, new_name)
+    {
+        Ok(_) => axum::response::Redirect::to("/__ui/me/tokens").into_response(),
+        Err(crate::auth::AuthError::NotFound) => {
+            tokens_page_with_error(&state, &auth, &format!("Token {old_name:?} not found."))
+        }
+        Err(crate::auth::AuthError::NameTaken(n)) => tokens_page_with_error(
+            &state,
+            &auth,
+            &format!("A token named {n:?} already exists. Pick a different name."),
+        ),
+        Err(e) => ui_error_500(&state, &auth, format!("rename: {e}")),
+    }
 }
 
 #[derive(Serialize)]

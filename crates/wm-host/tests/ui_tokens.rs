@@ -523,6 +523,136 @@ async fn token_list_sorts_by_name_when_requested() {
     );
 }
 
+#[tokio::test]
+async fn rename_redirects_and_swaps_token_name() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let page = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
+    // Create then rename.
+    client
+        .post(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&name=old-name&ttl_preset=never"))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(url(&h, "/__ui/me/tokens/old-name/rename"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&new_name=fresh-name"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        (300..400).contains(&resp.status().as_u16()),
+        "rename redirects: {}",
+        resp.status()
+    );
+    let later = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(later.contains("fresh-name"), "new name listed: {later}");
+    assert!(!later.contains("old-name"), "old name gone: {later}");
+}
+
+#[tokio::test]
+async fn rename_collision_shows_inline_error_and_keeps_old_name() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let page = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
+    for n in ["taken", "renameable"] {
+        client
+            .post(url(&h, "/__ui/me/tokens"))
+            .header("cookie", &cookie)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(format!("_csrf={csrf}&name={n}&ttl_preset=never"))
+            .send()
+            .await
+            .unwrap();
+    }
+    let resp = client
+        .post(url(&h, "/__ui/me/tokens/renameable/rename"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&new_name=taken"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("already exists"), "collision error: {body}");
+    // Both tokens still present under their original names.
+    let later = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(later.contains("taken"));
+    assert!(later.contains("renameable"));
+}
+
+#[tokio::test]
+async fn rename_empty_new_name_shows_inline_error() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let page = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
+    client
+        .post(url(&h, "/__ui/me/tokens"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&name=x&ttl_preset=never"))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(url(&h, "/__ui/me/tokens/x/rename"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&new_name=   "))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("must not be empty"),
+        "empty-name error: {body}"
+    );
+}
+
 /// Helper: find the order in which `needles` appear in `body`.
 fn order_of_names(body: &str, needles: &[&str]) -> Vec<String> {
     let mut found: Vec<(usize, &str)> = needles
