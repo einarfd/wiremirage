@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–29 landed. The WIT contract is live at
+**Status:** slices 1–30 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -251,7 +251,23 @@ failure the form re-renders with `error.title` / `message` /
 submitted values preserved. CSRF on the POST. Tier-2:
 `tests/ui_route_new.rs` covers GET defaults / GET prefill /
 POST happy path against a mock compiler / reserved-path
-rejection / no-compiler-configured / missing-CSRF 403. By
+rejection / no-compiler-configured / missing-CSRF 403. Slice 30 cleaned up two pieces of wireframe
+drift the dogfood pass surfaced: group-detail had a separate
+"Manage" card at the bottom of the page (slice-26 layout)
+instead of the wireframe's inline header for Refresh/Edit TTL
++ footer for Full journal/Group state/Delete; and
+`/__ui/routes/new` was using `.filter-form`'s horizontal flex
+row instead of the wireframe's 2-column label/input grid +
+dedicated "Handler source" section. Both pages were
+restructured to match the wireframe (modulo the slice-24 call
+to keep the Live activity pane as a full-width card below
+routes rather than a right-column aside — the wireframe was
+updated to reflect that). Discoverability for the route-new
+form: "+ Add route" button on group detail's Routes section
+(pre-filling `?group={name}`), "+ New route" button next to
+the Routes list H1, and the empty-state copy on group detail
+links to the form directly. New CSS: `.form-grid`,
+`.source-editor`, `.page-footer`, `.page-header__row`. By
 design (per `mcp-surface.md`) user management is **not** in
 MCP — admins handle it via CLI/UI.
 

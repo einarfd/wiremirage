@@ -185,8 +185,11 @@ async fn group_detail_renders_metadata_and_routes_for_owner() {
     // Routes table renders with the route
     assert!(body.contains("POST"), "route method visible");
     assert!(body.contains("charges"), "route path visible");
-    // CLI hint section
-    assert!(body.contains("wm groups refresh"));
+    // + Add route button surfaces the slice-29 creation form.
+    assert!(
+        body.contains("/__ui/routes/new?group=stripe-mock"),
+        "add-route link visible: {body}"
+    );
 }
 
 #[tokio::test]

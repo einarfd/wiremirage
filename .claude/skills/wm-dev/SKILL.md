@@ -423,6 +423,52 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Group detail + route-new wireframe sync (slice 30)
+
+Cleanup slice driven by a dogfood pass: two pages had drifted
+from their wireframes and the route-new form had no natural
+entry point.
+
+- **Group detail (`/__ui/groups/{group}`)**: was rendering as
+  a sequence of cards (page-header card with H1, then a
+  Metadata card, then a Routes card, then a Live activity
+  card, then a Manage card with all actions at the bottom).
+  Wireframe shape is denser: H1 + description + metadata dl
+  + Refresh TTL / Edit TTL action row all *inside* the page
+  header; Routes section gets the `+ Add route` button in its
+  header; Live activity card stays where slice 24 put it
+  (full-width below routes — the wireframe was updated to
+  match); a `.page-footer` row at the bottom carries Full
+  journal · Group state · Delete group. The standalone
+  "Manage" card from slice 26 is gone — its actions
+  redistributed into header + footer positions. The
+  "Manage from CLI" hint panel from slice 23 is gone too;
+  buttons + `wm --help` cover discoverability.
+- **Route creation (`/__ui/routes/new`)**: slice 29 had
+  reused `.filter-form` (a horizontal flex row designed for
+  list-page filter bars), which put every form field in one
+  cramped row. Restructured to a `.form-grid` 2-column
+  label/input grid for the metadata four (Method, Path,
+  Group, Language) and a separate card for "Handler source"
+  with the textarea full-width, footer with Create + Cancel —
+  matching the wireframe directly.
+- **Discoverability gap**: the form was reachable only via the
+  unmatched-page deep link and direct URL. Slice 30 added:
+  "+ Add route" button on group detail's Routes section
+  header, pre-filling `?group={name}`; "+ New route" button
+  next to the Routes list page's H1; and group-detail's
+  empty-state copy linking to the form directly.
+- **CodeMirror**: still deferred (still a plain `<textarea>`).
+  The handler-source card explicitly labels it "plain
+  textarea · CodeMirror later" so the gap is visible.
+- **CSS additions**: `.form-grid`, `.source-editor`,
+  `.page-footer`, `.page-header__row` (vertical alignment for
+  a title with a button on the right).
+- **Test churn**: `tests/ui_detail_pages.rs::group_detail_renders_metadata_and_routes_for_owner`
+  switched from asserting on the gone "wm groups refresh"
+  CLI hint to asserting on the new `+ Add route` link
+  (`/__ui/routes/new?group=stripe-mock`).
+
 ## Web UI route creation form (slice 29)
 
 Ninth UI slice. Replaces the `/__ui/routes/new` stub with a

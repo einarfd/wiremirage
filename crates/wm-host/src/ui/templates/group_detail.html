@@ -7,7 +7,7 @@
   <span aria-current="page">{{ group.name }}</span>
 </nav>
 
-<section class="page-header">
+<header class="page-header">
   <h1>{{ group.name }}</h1>
   <p class="text-muted">
     {%- if group.implicit -%}
@@ -17,12 +17,6 @@
     {% if group.sliding_ttl %}sliding{% else %}fixed{% endif %} TTL
     {%- endif -%}
   </p>
-</section>
-
-<section class="card">
-  <header class="card__header">
-    <h2>Metadata</h2>
-  </header>
   <dl class="meta-grid">
     <dt>Owner</dt>
     <dd>{{ group.owner_name }}</dd>
@@ -35,14 +29,41 @@
     <dt>Group ID</dt>
     <dd><code>{{ group.id }}</code></dd>
   </dl>
-</section>
+  <div class="action-row">
+    <form method="post" action="/__ui/groups/{{ group.name }}/refresh" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button type="submit" class="btn">Refresh TTL</button>
+    </form>
+    <details class="edit-disclosure">
+      <summary>Edit TTL</summary>
+      <form method="post" action="/__ui/groups/{{ group.name }}/edit" class="filter-form">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <label class="filter-field">
+          <span class="filter-field__label">TTL (seconds)</span>
+          <input type="text" name="ttl_seconds" value="{{ group.ttl_seconds }}">
+        </label>
+        <label class="filter-checkbox">
+          <input type="checkbox" name="sliding_ttl" value="on"{% if group.sliding_ttl %} checked{% endif %}>
+          <span>Sliding TTL (bump on traffic)</span>
+        </label>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </form>
+    </details>
+  </div>
+</header>
 
 <section class="card">
   <header class="card__header">
     <h2>Routes <span class="text-muted">({{ route_count }})</span></h2>
+    <a class="btn" href="/__ui/routes/new?group={{ group.name }}">+ Add route</a>
   </header>
   {% if routes | length == 0 %}
-  <p class="empty-state">No routes in this group yet. Create one with <code>wm routes add --group {{ group.name }} --method GET --path /foo --source-file handler.ts</code>.</p>
+  <p class="empty-state">
+    No routes in this group yet.
+    <a href="/__ui/routes/new?group={{ group.name }}">Add the first one</a>
+    or use
+    <code>wm routes add --group {{ group.name }} --method GET --path /foo --source-file handler.ts</code>.
+  </p>
   {% else %}
   <table class="data-table">
     <thead>
@@ -123,45 +144,15 @@
 })();
 </script>
 
-<section class="card">
-  <header class="card__header">
-    <h2>Manage</h2>
-  </header>
-  <div class="action-row">
-    <form method="post" action="/__ui/groups/{{ group.name }}/refresh" class="inline-form">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button type="submit" class="btn">Refresh TTL</button>
-    </form>
-    <a class="btn btn--ghost" href="/__ui/groups/{{ group.name }}/state">Inspect state</a>
-    <form method="post" action="/__ui/groups/{{ group.name }}/delete" class="inline-form"
-          onsubmit="return confirm('Delete {{ group.name }} and all its routes? This can\'t be undone.');">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button type="submit" class="btn btn--danger">Delete group</button>
-    </form>
-  </div>
-
-  <details class="edit-disclosure">
-    <summary>Edit TTL</summary>
-    <form method="post" action="/__ui/groups/{{ group.name }}/edit" class="filter-form">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <label class="filter-field">
-        <span class="filter-field__label">TTL (seconds)</span>
-        <input type="text" name="ttl_seconds" value="{{ group.ttl_seconds }}">
-      </label>
-      <label class="filter-checkbox">
-        <input type="checkbox" name="sliding_ttl" value="on"{% if group.sliding_ttl %} checked{% endif %}>
-        <span>Sliding TTL (bump on traffic)</span>
-      </label>
-      <button type="submit" class="btn btn--primary">Save</button>
-    </form>
-  </details>
-
-  <p class="text-muted" style="margin-top: var(--space-4)">
-    Or use the CLI:
-    <code>wm groups refresh {{ group.name }}</code>,
-    <code>wm groups update {{ group.name }} --ttl-seconds N</code>,
-    <code>wm groups delete {{ group.name }}</code>,
-    <code>wm journal tail --group {{ group.name }}</code>.
-  </p>
-</section>
+<footer class="page-footer">
+  <a class="link" href="/__ui/journal/live?group={{ group.name }}">Full journal</a>
+  <span class="text-muted">·</span>
+  <a class="link" href="/__ui/groups/{{ group.name }}/state">Group state</a>
+  <span class="text-muted">·</span>
+  <form method="post" action="/__ui/groups/{{ group.name }}/delete" class="inline-form"
+        onsubmit="return confirm('Delete {{ group.name }} and all its routes? This can\'t be undone.');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn--danger">Delete group</button>
+  </form>
+</footer>
 {% endblock %}

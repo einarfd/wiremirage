@@ -176,6 +176,13 @@ p { margin: 0 0 var(--space-3); }
 .page-header {
   margin-bottom: var(--space-6);
 }
+.page-header__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
 
 .card {
   background: var(--surface);
@@ -479,4 +486,73 @@ p { margin: 0 0 var(--space-3); }
   padding: 1px var(--space-2);
   border-radius: var(--radius);
   font-variant-numeric: tabular-nums;
+}
+
+/* -- Form grid (route creation, etc.) ----------------------------- */
+
+.form-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--space-5);
+  row-gap: var(--space-3);
+  align-items: center;
+  margin-bottom: var(--space-4);
+}
+.form-grid > label {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.form-grid input,
+.form-grid select {
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  width: 100%;
+}
+.form-grid input:focus,
+.form-grid select:focus {
+  outline: none;
+  box-shadow: var(--focus);
+  border-color: var(--accent);
+}
+
+.source-editor {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+.source-editor:focus {
+  outline: none;
+  box-shadow: var(--focus);
+  border-color: var(--accent);
+}
+
+/* -- Detail-page footer (secondary nav row) ------------------------ */
+
+.page-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+/* Action row sitting inside a page-header card carries less margin
+   than the standalone action-row used in lower sections. */
+.page-header .action-row {
+  margin-top: var(--space-4);
+  margin-bottom: 0;
 }
