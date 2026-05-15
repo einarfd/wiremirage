@@ -21,7 +21,12 @@
   <form method="get" action="/__ui/routes" class="filter-form">
     <label class="filter-field">
       <span class="filter-field__label">Group</span>
-      <input type="text" name="group" value="{{ filters.group }}" placeholder="e.g. stripe-mock">
+      <select name="group">
+        <option value=""{% if filters.group == "" %} selected{% endif %}>Any</option>
+        {%- for g in available_groups %}
+        <option value="{{ g }}"{% if filters.group == g %} selected{% endif %}>{{ g }}</option>
+        {%- endfor %}
+      </select>
     </label>
     <label class="filter-field">
       <span class="filter-field__label">Method</span>

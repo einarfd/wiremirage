@@ -476,6 +476,24 @@ async fn routes_list_page(
         paged.next_offset,
     );
     let showing = rows.len() as u64;
+    // Pre-compute the group dropdown options. Admins see all groups
+    // (matching the default `owner_scope=everyone`), non-admin sees
+    // only their owned groups. Implicit single-route groups are
+    // filtered out — they're auto-generated and not interesting to
+    // filter by.
+    let registry = state.routes().registry();
+    let mut available_groups: Vec<String> = if auth.is_admin {
+        registry.list_groups().unwrap_or_default()
+    } else {
+        registry
+            .list_groups_by_owner(&auth.user_id)
+            .unwrap_or_default()
+    }
+    .into_iter()
+    .filter(|g| !g.implicit)
+    .map(|g| g.name)
+    .collect();
+    available_groups.sort();
 
     render(
         &state,
@@ -490,6 +508,7 @@ async fn routes_list_page(
             sort_links => sort_links,
             pagination => pagination,
             methods => ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            available_groups => available_groups,
         },
     )
 }
