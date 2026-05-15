@@ -6,47 +6,36 @@
   <span class="breadcrumb__sep">›</span>
   <a href="/__ui/groups/{{ route.group_name }}">{{ route.group_name }}</a>
   <span class="breadcrumb__sep">›</span>
-  <span aria-current="page">#{{ route.number }} {{ route.methods }} {{ route.path }}</span>
+  <span aria-current="page">{{ route.methods }} {{ route.path }}</span>
 </nav>
 
-<section class="page-header">
+<header class="page-header">
   <h1><code>{{ route.methods }} {{ route.path }}</code></h1>
   <p class="text-muted">
-    in <a href="/__ui/groups/{{ route.group_name }}">{{ route.group_name }}</a> ·
+    #{{ route.number }} in <a href="/__ui/groups/{{ route.group_name }}">{{ route.group_name }}</a> ·
     {% if route.hits_total > 0 -%}
     <strong>{{ route.hits_total }} hit{% if route.hits_total != 1 %}s{% endif %}</strong>, last {{ route.last_hit_at }}
     {%- else -%}
     no traffic yet
     {%- endif %}
   </p>
-</section>
-
-<section class="card">
-  <header class="card__header">
-    <h2>Metadata</h2>
-  </header>
   <dl class="meta-grid">
     <dt>Methods</dt>
     <dd>{{ route.methods }}</dd>
-    <dt>Path</dt>
-    <dd><code>{{ route.path }}</code></dd>
     <dt>Language</dt>
     <dd>{{ route.language }}</dd>
     <dt>Bindings</dt>
     <dd><code>{{ route.bindings_version }}</code></dd>
-    <dt>Component size</dt>
-    <dd>{{ route.component_size_human }}</dd>
     <dt>Owner</dt>
     <dd>{{ route.owner_name }}</dd>
+    <dt>Component size</dt>
+    <dd>{{ route.component_size_human }}</dd>
     <dt>Route ID</dt>
     <dd><code>{{ route.id }}</code></dd>
     <dt>Created</dt>
     <dd><time datetime="{{ route.created_at }}">{{ route.created_at }}</time></dd>
   </dl>
-  <p class="text-muted">
-    The handler is stored as a compiled wasm component; source viewing arrives with the CodeMirror slice.
-  </p>
-</section>
+</header>
 
 <section class="card">
   <header class="card__header">
@@ -81,24 +70,21 @@
   {% endif %}
 </section>
 
-<section class="card">
-  <header class="card__header">
-    <h2>Manage</h2>
-  </header>
-  <div class="action-row">
-    <a class="btn btn--ghost" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/state">Inspect state</a>
-    <form method="post" action="/__ui/routes/{{ route.group_name }}/{{ route.number }}/delete" class="inline-form"
-          onsubmit="return confirm('Delete {{ route.methods }} {{ route.path }}? This can\'t be undone.');">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button type="submit" class="btn btn--danger">Delete route</button>
-    </form>
-  </div>
-  <p class="text-muted" style="margin-top: var(--space-4)">
-    Editing the route's source + dry-run from the UI land in later slices.
-    Until then:
-    <code>wm routes test {{ route.group_name }} {{ route.number }} --method {{ route.first_method }} --path '{{ route.path }}'</code>
-    to dry-run, or <code>wm routes update {{ route.group_name }} {{ route.number }} ...</code>
-    to edit.
-  </p>
-</section>
+<p class="text-muted">
+  Source viewing + dry-run from the UI land in later slices.
+  Until then: <code>wm routes test {{ route.group_name }} {{ route.number }} --method {{ route.first_method }} --path '{{ route.path }}'</code>
+  to dry-run, or <code>wm routes update {{ route.group_name }} {{ route.number }} ...</code> to edit.
+</p>
+
+<footer class="page-footer">
+  <a class="link" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/state">Route state</a>
+  <span class="text-muted">·</span>
+  <span class="text-muted" title="UI dry-run modal not yet implemented — use the CLI for now">Run dry-run (CLI only)</span>
+  <span class="text-muted">·</span>
+  <form method="post" action="/__ui/routes/{{ route.group_name }}/{{ route.number }}/delete" class="inline-form"
+        onsubmit="return confirm('Delete {{ route.methods }} {{ route.path }}? This can\'t be undone.');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn--danger">Delete route</button>
+  </form>
+</footer>
 {% endblock %}
