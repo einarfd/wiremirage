@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–30 landed. The WIT contract is live at
+**Status:** slices 1–31 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -267,9 +267,27 @@ form: "+ Add route" button on group detail's Routes section
 (pre-filling `?group={name}`), "+ New route" button next to
 the Routes list H1, and the empty-state copy on group detail
 links to the form directly. New CSS: `.form-grid`,
-`.source-editor`, `.page-footer`, `.page-header__row`. By
-design (per `mcp-surface.md`) user management is **not** in
-MCP — admins handle it via CLI/UI.
+`.source-editor`, `.page-footer`, `.page-header__row`. Slice
+31 was an audit-driven cleanup that bundled five small
+fixes across the UI surface to match the wireframes: route-
+detail layout sync (metadata in header, footer row with
+Route state · Run dry-run · Delete route, retiring the
+slice-26 "Manage" card); tokens page polish (TTL preset
+dropdown — Never/30d/90d/1y/Custom — plus sortable column
+headers); token rename end-to-end (new
+`Auth::rename_token`, REST `PATCH /__api/tokens/{name}`, UI
+form per row with a `prompt()` for the new name); journal-
+entry layout sync (breadcrumb walks Groups → group → route
+→ #N, Status/Duration/Trace move into the header `<dl>`,
+dropped reserved headers collapse into a `<details>`
+inside Response, handler errors promote to a `.card--error`
+callout above Request, Summary card retired); and a small
+leftovers commit that switched the routes-list Group
+filter from a text input to a `<select>` of the caller's
+groups and added a `← Back to {group/route}` link in the
+state pages' footer to soften the destructive Clear
+button. By design (per `mcp-surface.md`) user management
+is **not** in MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 

@@ -423,6 +423,82 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Audit-driven cleanup (slice 31)
+
+A dogfood pass triggered a full wireframe audit (using the
+general-purpose subagent against the Arkiv spec). Five small
+commits landed under the slice-31 banner to close the gaps
+that didn't have a "Slice N state" deferred-note already.
+
+- **Route detail layout sync** (commit `deb4389`) — mirrors
+  what slice 30 did for group detail. Metadata moves into
+  the page header `<dl>` next to H1 + the hit-count
+  subtitle, no more standalone Metadata card. The slice-26
+  "Manage" card retires; its actions move into a
+  `.page-footer` row: **Route state** link · **Run dry-run**
+  placeholder (still CLI-only, rendered muted with a
+  tooltip) · **Delete route** button. Breadcrumb drops the
+  `#N` prefix and shows just `METHOD path`. CLI hint about
+  `wm routes test` / `wm routes update` lives in a muted
+  paragraph above the footer until source editing + the UI
+  dry-run modal land.
+- **Tokens page polish** (commit `b3d5ef3`) — TTL is now a
+  preset dropdown (`Never` / `30 days` / `90 days` /
+  `1 year` / `Custom`) with the old `ttl_hours` field
+  kept alongside as the custom-hours input. The old form
+  (no preset, just hours) keeps working. Column headers
+  Name / Created / Last used / Expires are sortable anchor
+  links with arrow on the active column. `expires` treats
+  None as the largest value (immortal tokens sit at the
+  end ascending, top descending); `last_used` uses default
+  Option ordering. Four new tier-2 tests.
+- **Token rename** (commit `43971fb`) — end-to-end feature
+  add. `Auth::rename_token(owner_id, old, new)` preserves
+  id + hash + metadata (plaintext keeps authenticating),
+  swaps the `token:by-name:{owner}:{name}` index in
+  write-new → update-record-name → drop-old order so a
+  crash leaves a redundant entry rather than a dangling
+  lookup. REST `PATCH /__api/tokens/{name}` with
+  `{ "name": "new" }`; CSRF-gated UI form per row using a
+  small `prompt()` for the new name. `NameTaken` → 409 /
+  inline 400 on the UI; empty name rejected at the entry
+  point. Four unit tests in `auth::tests` + three tier-2
+  tests in `ui_tokens.rs`.
+- **Journal entry layout sync** (commit `1ba67ca`) —
+  breadcrumb now walks `Groups → group → route → #N` (was
+  `Live journal → group → #N`). Status / Duration / Trace
+  move into a `.meta-grid` `<dl>` in the page header; the
+  separate Summary card retires (matched pattern folds
+  into the description line, path_params + query render
+  as a muted line under the dl, entry id drops, wall clock
+  is now Duration). Dropped reserved headers collapse into
+  a `<details>` inside Response. Handler errors promote
+  to a `.card--error` callout above Request. Request /
+  Response stay as split header-table + body-block
+  sections rather than the wireframe's combined HTTP-style
+  `<pre>` — documented as a deliberate divergence
+  (binary bodies render cleanly).
+- **Routes list group filter + state-page Back links**
+  (commit `e2cec9d`) — small leftovers bundle. Routes
+  list's Group filter switches from a free-text input to
+  a `<select>` of the caller's non-implicit groups
+  (admin sees all). Both `/__ui/groups/{group}/state`
+  and `/__ui/routes/{group}/{n}/state` get a
+  `← Back to {target}` link in a `.page-footer` row,
+  pairing the destructive Clear button with a non-
+  destructive sibling.
+
+After slice 31 the spec catch-up commit walked the
+wireframe doc and added "Slice 31 state" notes per
+affected page, plus dropped the now-implemented
+"deferred" markers (where the audit found us already
+shipping the item). Still deferred at end of slice 31:
+OAuth (login page), Source editing + Dry-run modal (route
+detail), Pause/Resume on the Live journal,
+"Did you mean…" suggestions on Unmatched (needs
+`near_misses` populated upstream), Admin health + Settings
+stub pages, CodeMirror across the source viewer/editor.
+
 ## Group detail + route-new wireframe sync (slice 30)
 
 Cleanup slice driven by a dogfood pass: two pages had drifted
