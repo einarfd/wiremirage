@@ -21,12 +21,34 @@ test:
     cargo test --workspace
 
 # Tier-3: real Valkey container via testcontainers-rs. Needs Docker.
+# Reaps stragglers on exit — testcontainers-rs 0.27 has no ryuk
+# integration, and the shared `OnceLock<SharedValkey>` in
+# `valkey_storage.rs` leaks at process exit because Rust doesn't run
+# Drop on statics. The label filter only matches containers
+# testcontainers itself spawned, so the dev compose stack
+# (`docker compose up`) is left alone.
 test-valkey:
+    #!/usr/bin/env bash
+    set -e
+    cleanup() {
+      docker ps -aq --filter 'label=org.testcontainers.managed-by=testcontainers' 2>/dev/null \
+        | xargs -r docker rm -f >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
     cargo test -p wm-host --features valkey-tests --test valkey_storage
 
 # Tier-3: real TypeScript compiler sidecar via testcontainers-rs. Builds the
 # image first, then runs the end-to-end source-based POST tests. Needs Docker.
+# Same cleanup trap as `test-valkey` — async Drop on ContainerAsync can
+# also miss when a test panics mid-runtime-shutdown.
 test-sidecar:
+    #!/usr/bin/env bash
+    set -e
+    cleanup() {
+      docker ps -aq --filter 'label=org.testcontainers.managed-by=testcontainers' 2>/dev/null \
+        | xargs -r docker rm -f >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
     docker build -f compiler/typescript/Dockerfile -t wiremirage/compiler-typescript:dev .
     cargo test -p wm-host --features sidecar-tests --test sidecar_e2e
 

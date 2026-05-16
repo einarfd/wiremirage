@@ -7,6 +7,17 @@
 //! runner, `valkey/valkey:8`) on first test access, and every test gets
 //! its own scope (unique group/route prefix) so they don't interfere when
 //! run in parallel.
+//!
+//! Container lifecycle note: the `OnceLock<SharedValkey>` below holds the
+//! `Container` for the whole test binary. Rust does not run Drop on
+//! statics at process exit, so the container *will* leak at the end of
+//! the test run. testcontainers-rs 0.27 has no ryuk reaper to clean up
+//! externally either. The justfile `test-valkey` recipe wraps the run in
+//! a trap that `docker rm -f`s every container labelled
+//! `org.testcontainers.managed-by=testcontainers` on exit — see the
+//! justfile for the full filter rationale. Don't replace the OnceLock
+//! with per-test containers without measuring the cost (35 tests × a
+//! valkey-startup each adds real wall-clock).
 
 #![cfg(feature = "valkey-tests")]
 
