@@ -423,6 +423,64 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Dry-run seed state (slice 33)
+
+Lets agents/CLI/UI pre-populate the dry-run snapshot's
+`kv:` and `gkv:` before the handler runs. Solves the
+"test `if counter > 3`" pain that previously required
+driving real traffic first.
+
+- **Core** (`dry_run.rs`): `DryRunRequest` gains
+  `kv_overrides: HashMap<String, Vec<u8>>` and
+  `gkv_overrides: HashMap<String, Vec<u8>>`. In
+  `run_in_snapshot`, after the existing
+  `copy_keys_with_prefix` deep-copy of real state and
+  before the handler is instantiated, the overrides are
+  written via `bucket.set(key, value)` on the dry route
+  and group buckets. Order matters: real-state-copy →
+  overrides → handler. Overrides win on collision. Real
+  state is never touched — overrides land in the
+  disposable `dryrun:{run_id}:` namespace and are wiped
+  on completion with the rest of the snapshot.
+- **REST / wm-core** (`models.rs::DryRunBody`): same
+  field shape as the host, `HashMap<String, Vec<u8>>`.
+  Serializes as `{"counter": [52, 53]}` in JSON (matches
+  the existing `body: Vec<u8>` array-of-ints
+  convention). Verbose but consistent.
+- **MCP** (`tools/state.rs::DryRunRouteArgs`): uses
+  `kv_overrides_b64: Option<HashMap<String, String>>`
+  and `gkv_overrides_b64` with explicit base64 string
+  values, matching the existing `body_b64` convention.
+  `decode_overrides_b64` helper base64-decodes each
+  value and surfaces the offending key in the error
+  message on bad input.
+- **CLI** (`wm routes test`): two new repeatable flags:
+  `--kv KEY=VALUE` and `--gkv KEY=VALUE`. UTF-8 only;
+  for binary, the REST/MCP base64 path is the answer.
+  `parse_override_pairs` trims whitespace around keys,
+  rejects missing-`=` and empty keys, and allows `=` in
+  the value side (so base64 padding round-trips).
+- **UI** (`route_dry_run.html` + `mod.rs`): a third
+  "Seed state" card on the dry-run page with two
+  textareas (Route kv / Group gkv). Same
+  `parse_kv_lines(_, '=')` helper used for headers and
+  query; bad input renders inline 400 with the offending
+  field preserved.
+- **Out of scope**: typed seeds for lists/sets/hashes —
+  if a handler does `ctx.kv.list_push("queue", x)` and
+  reads back via `list_range`, the workaround is still
+  to seed via real traffic. Adding a list/set/hash seed
+  schema would need a discriminated union in the
+  request and matching write paths in the snapshot
+  machinery. Worth its own slice when someone hits the
+  wall.
+- **Tests:**
+  - `tests/api_routes.rs::dry_run_kv_overrides_seed_snapshot_state` — REST happy path against counter_handler, confirms real state stays empty after multiple seeded runs.
+  - `tests/mcp_e2e.rs::dry_run_route_with_kv_overrides_seeds_snapshot` — MCP base64 path + a bad-base64 rejection test.
+  - `tests/ui_dry_run.rs::dry_run_kv_override_seeds_snapshot` — UI form path.
+  - `tests/ui_dry_run.rs::dry_run_bad_kv_override_renders_inline_400` — bad textarea input.
+  - `handlers::tests::parse_override_pairs_*` — 5 CLI unit tests covering happy path, key trim, missing `=`, empty key, value-with-equals.
+
 ## Dry-run UI page (slice 32)
 
 Surfaces the slice-16 dry-run API at

@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–32 landed. The WIT contract is live at
+**Status:** slices 1–33 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -296,7 +296,24 @@ error. Owner-or-admin gated; CSRF on the POST. The route
 detail page's footer "Run dry-run" link is now real (not
 the slice-30 "CLI only" placeholder). Eight tier-2 tests
 including verification that dry-run touches neither the
-route's real kv nor the journal. By design (per
+route's real kv nor the journal. Slice 33 added dry-run
+seed state across all surfaces: `DryRunRequest` gains
+`kv_overrides` + `gkv_overrides` maps that the snapshot
+machinery applies *after* the real-state deep-copy and
+*before* the handler runs, letting agents test
+state-dependent branches (`if counter > 3`) without
+driving real traffic first. REST takes Vec<u8> values
+(array-of-ints JSON, matches `body` field); MCP
+`dry_run_route` takes `kv_overrides_b64` /
+`gkv_overrides_b64` as base64-encoded string values
+(matches the `body_b64` convention); CLI `wm routes test`
+gains `--kv KEY=VALUE` / `--gkv KEY=VALUE` repeatable
+flags (UTF-8 bytes); the UI dry-run page adds two
+textareas under a "Seed state" card with `key=value` per
+line. Real state is never touched — overrides land in the
+disposable `dryrun:{run_id}:` namespace. Bytes-only:
+list/set/hash seeding is deferred (the workaround is to
+seed via real traffic before dry-run). By design (per
 `mcp-surface.md`) user management is **not** in MCP —
 admins handle it via CLI/UI.
 

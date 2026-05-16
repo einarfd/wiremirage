@@ -179,6 +179,16 @@ pub struct DryRunBody {
     pub path_params: Option<Vec<(String, String)>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub query: Vec<(String, String)>,
+    /// Pre-populate the route's private `kv:` snapshot with these
+    /// entries before the handler runs. Lets agents exercise state-
+    /// dependent branches without driving real traffic first. Real
+    /// state is never touched — overrides land in the disposable
+    /// dry-run namespace.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub kv_overrides: std::collections::HashMap<String, Vec<u8>>,
+    /// Same as `kv_overrides`, scoped to the group's shared `gkv:`.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub gkv_overrides: std::collections::HashMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

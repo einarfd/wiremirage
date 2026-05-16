@@ -15,6 +15,7 @@
 //! `PEXPIRE` so a host crash between snapshot and cleanup doesn't
 //! leave orphans forever. In-memory storage clears on restart anyway.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,7 +33,7 @@ use crate::store::{Storage, StoreError};
 /// Synthetic request shape posted to the dry-run endpoint. Mirrors
 /// the WIT request type, with sensible defaults for fields most
 /// callers won't bother setting (headers, body, query, path_params).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DryRunRequest {
     pub method: String,
     pub path: String,
@@ -48,6 +49,20 @@ pub struct DryRunRequest {
     pub path_params: Option<Vec<(String, String)>>,
     #[serde(default)]
     pub query: Vec<(String, String)>,
+    /// Seed entries written into the route's private `kv:` namespace
+    /// *after* the real-state deep-copy and *before* the handler
+    /// runs. Lets a caller test state-dependent branches like
+    /// `if counter > 3` without first hitting the route N times.
+    /// Bytes-only (no list/set/hash seeding yet); collection-typed
+    /// branches need the seed-via-real-traffic workaround for now.
+    /// Real `kv:` state is never touched — overrides land in the
+    /// disposable snapshot.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub kv_overrides: HashMap<String, Vec<u8>>,
+    /// Same as `kv_overrides`, scoped to the group's shared `gkv:`
+    /// namespace.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub gkv_overrides: HashMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,7 +208,7 @@ async fn run_in_snapshot(
         tracing::warn!(error = %e, "dry-run safety TTL failed");
     }
 
-    let route_bucket = match storage.route_bucket_under(dry_root, &route.group_id, &route.id) {
+    let mut route_bucket = match storage.route_bucket_under(dry_root, &route.group_id, &route.id) {
         Ok(b) => b,
         Err(e) => {
             return Err(RunFail {
@@ -203,7 +218,7 @@ async fn run_in_snapshot(
             });
         }
     };
-    let group_bucket = match storage.group_bucket_under(dry_root, &route.group_id) {
+    let mut group_bucket = match storage.group_bucket_under(dry_root, &route.group_id) {
         Ok(b) => b,
         Err(e) => {
             return Err(RunFail {
@@ -213,6 +228,28 @@ async fn run_in_snapshot(
             });
         }
     };
+    // Apply seed-state overrides on top of the real-state deep-copy.
+    // Order matters: overrides win, so a caller can flip `counter=4`
+    // without resetting the rest of the route's state. Bytes-only;
+    // list/set/hash overrides land in a follow-up.
+    for (k, v) in &req.kv_overrides {
+        if let Err(e) = route_bucket.set(k, v.clone()) {
+            return Err(RunFail {
+                message: format!("apply kv override {k:?}: {e}"),
+                logs: Vec::new(),
+                snapshot_keys,
+            });
+        }
+    }
+    for (k, v) in &req.gkv_overrides {
+        if let Err(e) = group_bucket.set(k, v.clone()) {
+            return Err(RunFail {
+                message: format!("apply gkv override {k:?}: {e}"),
+                logs: Vec::new(),
+                snapshot_keys,
+            });
+        }
+    }
 
     let component = match routes.component_for(route) {
         Ok(c) => c,

@@ -222,6 +222,16 @@ pub struct TestRouteArgs {
     /// doesn't re-run the matcher).
     #[arg(long = "path-param", value_name = "NAME=VALUE")]
     pub path_params: Vec<String>,
+    /// `key=value` entry to seed into the route's private `kv:`
+    /// snapshot before the handler runs. Repeatable. Lets you test
+    /// state-dependent branches (`if counter > 3`) without first
+    /// driving real traffic. Value is sent as UTF-8 bytes; real `kv:`
+    /// state is never touched.
+    #[arg(long = "kv", value_name = "KEY=VALUE")]
+    pub kv_overrides: Vec<String>,
+    /// Same as `--kv`, scoped to the group's shared `gkv:`.
+    #[arg(long = "gkv", value_name = "KEY=VALUE")]
+    pub gkv_overrides: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]

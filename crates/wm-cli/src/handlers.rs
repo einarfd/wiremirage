@@ -439,6 +439,8 @@ fn build_test_route_body(args: TestRouteArgs) -> Result<(String, DryRunBody), Cl
         Some(s) => s.into_bytes(),
         None => Vec::new(),
     };
+    let kv_overrides = parse_override_pairs(&args.kv_overrides, "--kv")?;
+    let gkv_overrides = parse_override_pairs(&args.gkv_overrides, "--gkv")?;
     Ok((
         args.slug,
         DryRunBody {
@@ -452,8 +454,33 @@ fn build_test_route_body(args: TestRouteArgs) -> Result<(String, DryRunBody), Cl
                 Some(path_params)
             },
             query: Vec::new(),
+            kv_overrides,
+            gkv_overrides,
         },
     ))
+}
+
+/// Parse `KEY=VALUE` pairs from a CLI flag (e.g. `--kv counter=4`).
+/// Trims whitespace around both key and value; rejects empty keys and
+/// pairs without `=`.
+fn parse_override_pairs(
+    raw: &[String],
+    flag_name: &str,
+) -> Result<std::collections::HashMap<String, Vec<u8>>, ClientError> {
+    let mut out = std::collections::HashMap::with_capacity(raw.len());
+    for entry in raw {
+        let (k, v) = entry.split_once('=').ok_or_else(|| {
+            ClientError::Validation(format!("{flag_name} must be 'KEY=VALUE', got {entry:?}"))
+        })?;
+        let key = k.trim();
+        if key.is_empty() {
+            return Err(ClientError::Validation(format!(
+                "{flag_name} has empty key: {entry:?}"
+            )));
+        }
+        out.insert(key.to_string(), v.as_bytes().to_vec());
+    }
+    Ok(out)
 }
 
 /// Default the dry-run request path to the route's own path. The
@@ -741,5 +768,38 @@ mod tests {
         // --sliding takes precedence if both are somehow set; clap
         // already enforces conflicts_with so this branch is defensive.
         assert_eq!(sliding_flag(true, true), Some(true));
+    }
+
+    #[test]
+    fn parse_override_pairs_happy_path() {
+        let parsed = parse_override_pairs(&["counter=4".into(), "name=alice".into()], "--kv")
+            .expect("parse");
+        assert_eq!(parsed.get("counter").unwrap(), b"4");
+        assert_eq!(parsed.get("name").unwrap(), b"alice");
+    }
+
+    #[test]
+    fn parse_override_pairs_trims_key_whitespace() {
+        let parsed = parse_override_pairs(&["  counter  =4".into()], "--kv").expect("parse");
+        assert!(parsed.contains_key("counter"));
+    }
+
+    #[test]
+    fn parse_override_pairs_rejects_missing_equals() {
+        let err = parse_override_pairs(&["nope".into()], "--kv").unwrap_err();
+        assert!(format!("{err}").contains("--kv must be 'KEY=VALUE'"));
+    }
+
+    #[test]
+    fn parse_override_pairs_rejects_empty_key() {
+        let err = parse_override_pairs(&["=value".into()], "--kv").unwrap_err();
+        assert!(format!("{err}").contains("empty key"));
+    }
+
+    #[test]
+    fn parse_override_pairs_allows_equals_in_value() {
+        // The value side may carry equals (e.g. base64 padding).
+        let parsed = parse_override_pairs(&["k=a=b=c".into()], "--kv").expect("parse");
+        assert_eq!(parsed.get("k").unwrap(), b"a=b=c");
     }
 }

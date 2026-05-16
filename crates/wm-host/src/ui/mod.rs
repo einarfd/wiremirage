@@ -1748,6 +1748,10 @@ struct DryRunForm {
     query: String,
     #[serde(default)]
     body: String,
+    #[serde(default)]
+    kv_overrides: String,
+    #[serde(default)]
+    gkv_overrides: String,
 }
 
 #[derive(Serialize, Default, Clone)]
@@ -1757,6 +1761,8 @@ struct DryRunFormState {
     headers: String,
     query: String,
     body: String,
+    kv_overrides: String,
+    gkv_overrides: String,
 }
 
 #[derive(Serialize)]
@@ -1826,6 +1832,8 @@ async fn route_dry_run_submit(
         headers: form.headers.clone(),
         query: form.query.clone(),
         body: form.body.clone(),
+        kv_overrides: form.kv_overrides.clone(),
+        gkv_overrides: form.gkv_overrides.clone(),
     };
 
     let headers = match parse_kv_lines(&form.headers, ':') {
@@ -1865,6 +1873,39 @@ async fn route_dry_run_submit(
         );
     }
 
+    let kv_overrides = match parse_kv_lines(&form.kv_overrides, '=') {
+        Ok(pairs) => pairs
+            .into_iter()
+            .map(|(k, v)| (k, v.into_bytes()))
+            .collect(),
+        Err(msg) => {
+            return render_dry_run(
+                &state,
+                &auth,
+                &route,
+                form_state,
+                Some(format!("kv overrides: {msg}")),
+                None,
+            );
+        }
+    };
+    let gkv_overrides = match parse_kv_lines(&form.gkv_overrides, '=') {
+        Ok(pairs) => pairs
+            .into_iter()
+            .map(|(k, v)| (k, v.into_bytes()))
+            .collect(),
+        Err(msg) => {
+            return render_dry_run(
+                &state,
+                &auth,
+                &route,
+                form_state,
+                Some(format!("gkv overrides: {msg}")),
+                None,
+            );
+        }
+    };
+
     let request = crate::dry_run::DryRunRequest {
         method: form.method.clone(),
         path: form.path.clone(),
@@ -1872,6 +1913,8 @@ async fn route_dry_run_submit(
         body: form.body.as_bytes().to_vec(),
         path_params: None,
         query,
+        kv_overrides,
+        gkv_overrides,
     };
     let response = match crate::dry_run::dry_run(
         state.runtime().clone(),

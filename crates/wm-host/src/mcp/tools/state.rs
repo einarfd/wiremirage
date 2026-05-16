@@ -84,6 +84,16 @@ pub struct DryRunRouteArgs {
     /// Override the path-params list the handler sees. Defaults to
     /// none.
     pub path_params: Option<Vec<(String, String)>>,
+    /// Seed entries written into the route's private `kv:` namespace
+    /// *after* the real-state deep-copy and *before* the handler
+    /// runs — lets you exercise state-dependent branches without
+    /// driving real traffic first. Map values are base64-encoded
+    /// bytes (`{ "counter": "NA==" }` to seed counter=`"4"`). Real
+    /// state is never touched.
+    pub kv_overrides_b64: Option<std::collections::HashMap<String, String>>,
+    /// Same as `kv_overrides_b64`, scoped to the group's shared
+    /// `gkv:` namespace.
+    pub gkv_overrides_b64: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -103,6 +113,26 @@ pub struct DryRunLogEntry {
     pub level: String,
     pub message: String,
     pub timestamp: String,
+}
+
+/// Decode an `Option<HashMap<String, base64_string>>` into the
+/// `HashMap<String, Vec<u8>>` shape the dry-run pipeline expects.
+/// Surfaces the offending key in the error message on bad input.
+fn decode_overrides_b64(
+    raw: Option<&std::collections::HashMap<String, String>>,
+    field: &str,
+) -> Result<std::collections::HashMap<String, Vec<u8>>, ErrorData> {
+    let Some(raw) = raw else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let mut out = std::collections::HashMap::with_capacity(raw.len());
+    for (k, v) in raw {
+        let bytes = B64
+            .decode(v.as_bytes())
+            .map_err(|e| validation(format!("{field}[{k:?}] is not valid base64: {e}")))?;
+        out.insert(k.clone(), bytes);
+    }
+    Ok(out)
 }
 
 fn parse_route_slug(slug: &str) -> Result<(String, u32), ErrorData> {
@@ -217,6 +247,10 @@ impl WmMcpServer {
                 .map_err(|e| validation(format!("body_b64 is not valid base64: {e}")))?,
             None => Vec::new(),
         };
+        let kv_overrides =
+            decode_overrides_b64(args.kv_overrides_b64.as_ref(), "kv_overrides_b64")?;
+        let gkv_overrides =
+            decode_overrides_b64(args.gkv_overrides_b64.as_ref(), "gkv_overrides_b64")?;
         let req = DryRunRequest {
             method: args.method,
             path,
@@ -224,6 +258,8 @@ impl WmMcpServer {
             body,
             path_params: args.path_params,
             query: Vec::new(),
+            kv_overrides,
+            gkv_overrides,
         };
         let result = dry_run(
             self.state.runtime().clone(),

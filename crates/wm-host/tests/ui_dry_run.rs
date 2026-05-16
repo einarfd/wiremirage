@@ -357,6 +357,68 @@ async fn dry_run_path_must_start_with_slash() {
 }
 
 #[tokio::test]
+async fn dry_run_kv_override_seeds_snapshot() {
+    // Seeded `count=5`, handler `incr`s, expects `count=6`. Real
+    // state stays empty.
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let resp = client
+        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&method=POST&path=/bump&headers=&query=&body=&kv_overrides=count%3D5&gkv_overrides="
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("count=6"),
+        "seeded count=5, incr → count=6: {body}"
+    );
+    // Real route state is still empty.
+    let pre = h
+        .state
+        .routes()
+        .registry()
+        .list_route_state("counter-demo", 1)
+        .expect("route state");
+    assert!(
+        pre.is_empty(),
+        "real kv untouched by override (had: {pre:?})"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_bad_kv_override_renders_inline_400() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    // No `=` separator on the override line.
+    let resp = client
+        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&method=POST&path=/bump&headers=&query=&body=&kv_overrides=no-equals-here&gkv_overrides="
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("kv overrides"));
+    // Form value preserved for the user to edit.
+    assert!(
+        body.contains("no-equals-here"),
+        "override field preserved: {body}"
+    );
+}
+
+#[tokio::test]
 async fn dry_run_without_csrf_is_forbidden() {
     let h = start().await;
     let client = no_redirect_client();

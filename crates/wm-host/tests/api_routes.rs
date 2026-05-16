@@ -1098,6 +1098,79 @@ async fn dry_run_does_not_journal_or_mutate_state() {
 }
 
 #[tokio::test]
+async fn dry_run_kv_overrides_seed_snapshot_state() {
+    // Verifies the slice-33 seed-state surface: the handler reads the
+    // override value as starting state instead of whatever the real
+    // counter holds, and the real counter stays untouched.
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/dryrun-with-seed",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": counter_b64(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+
+    // No real traffic — real `count` is unset. Seed `count=5`; the
+    // handler `incr`s it and should return `count=6`.
+    let resp = h
+        .client
+        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .json(&json!({
+            "method": "GET",
+            "path": "/v1/dryrun-with-seed",
+            // Vec<u8> on the wire is an array of ints (matches `body`
+            // serialization). `"5"` as ASCII = [53].
+            "kv_overrides": {"count": [53]}
+        }))
+        .send()
+        .await
+        .expect("post dry-run");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let dry_body = body["body"].as_array().expect("body array");
+    let bytes: Vec<u8> = dry_body.iter().map(|v| v.as_u64().unwrap() as u8).collect();
+    assert_eq!(String::from_utf8(bytes).unwrap(), "count=6");
+
+    // Second seeded run from a different starting point. Snapshot is
+    // disposable, so each run starts fresh.
+    let resp = h
+        .client
+        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .json(&json!({
+            "method": "GET",
+            "path": "/v1/dryrun-with-seed",
+            "kv_overrides": {"count": [49]} // "1"
+        }))
+        .send()
+        .await
+        .expect("post dry-run 2");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let dry_body = body["body"].as_array().expect("body array");
+    let bytes: Vec<u8> = dry_body.iter().map(|v| v.as_u64().unwrap() as u8).collect();
+    assert_eq!(String::from_utf8(bytes).unwrap(), "count=2");
+
+    // Real `count` was never written — a real GET starts at 1.
+    let real = h
+        .client
+        .get(h.url("/v1/dryrun-with-seed"))
+        .send()
+        .await
+        .expect("get")
+        .text()
+        .await
+        .expect("text");
+    assert_eq!(real, "count=1", "real counter untouched by dry-run seeds");
+}
+
+#[tokio::test]
 async fn dry_run_non_owner_forbidden() {
     let h = Harness::start().await;
     let created: serde_json::Value = h

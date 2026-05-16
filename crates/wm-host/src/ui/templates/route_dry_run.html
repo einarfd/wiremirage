@@ -59,6 +59,28 @@
       against the request path you supply; if the handler doesn't read
       path params, you can leave the path as-is.
     </p>
+  </section>
+
+  <section class="card">
+    <header class="card__header">
+      <h2>Seed state</h2>
+      <span class="text-muted">optional · UTF-8 only</span>
+    </header>
+    <p class="text-muted">
+      Pre-populate the dry-run's <code>kv:</code> + <code>gkv:</code>
+      snapshot with these entries. Lets you test branches like
+      <code>if counter &gt; 3</code> without driving real traffic first.
+      Real state is never touched. One <code>key=value</code> per line.
+      Values are sent as UTF-8 bytes — for binary, use the REST or MCP
+      surfaces.
+    </p>
+    <div class="form-grid">
+      <label for="dry-kv">Route kv</label>
+      <textarea id="dry-kv" name="kv_overrides" rows="4" class="source-editor" placeholder="counter=4&#10;last_user=alice">{{ form.kv_overrides }}</textarea>
+
+      <label for="dry-gkv">Group gkv</label>
+      <textarea id="dry-gkv" name="gkv_overrides" rows="4" class="source-editor" placeholder="rate_limit=100">{{ form.gkv_overrides }}</textarea>
+    </div>
     <div class="action-row">
       <button type="submit" class="btn btn--primary">Run</button>
       <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Back to route</a>

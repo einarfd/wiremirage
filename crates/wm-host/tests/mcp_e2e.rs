@@ -22,6 +22,11 @@ use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
 
 const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
+const COUNTER_COMPONENT_PATH: &str = env!("WM_FIXTURE_COUNTER_HANDLER_COMPONENT");
+
+fn counter_wasm() -> Vec<u8> {
+    std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture")
+}
 
 #[derive(Debug, Clone, Default)]
 struct DummyClient;
@@ -740,6 +745,88 @@ async fn list_recent_unmatched_filters_by_path_pattern() {
         .expect("list_recent_unmatched");
     let body = resp.structured_content.expect("structured");
     assert_eq!(body["entries"].as_array().unwrap().len(), 2);
+
+    client.cancel().await.expect("cancel");
+}
+
+// -- Slice 33: dry-run seed state ---------------------------------------------
+
+#[tokio::test]
+async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+    let h = start().await;
+
+    // Register the counter route directly via the registry (avoids
+    // round-tripping through `create_route` MCP, which would also
+    // need a wasm artifact uploaded).
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/v1/dryrun-mcp".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: counter_wasm(),
+            owner_id: h
+                .state
+                .auth()
+                .get_user_by_name("bootstrap")
+                .expect("user")
+                .expect("bootstrap user exists")
+                .id,
+        })
+        .expect("create route");
+    h.state.routes().refresh_after_create(route.clone());
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Seed `count=9` (base64 of byte 0x39 = '9'), expect the
+    // handler's `incr` to return `count=10`.
+    let resp = client
+        .call_tool(
+            CallToolRequestParams::new("dry_run_route").with_arguments(
+                serde_json::json!({
+                    "route": format!("{}/{}", route.group_name, route.number),
+                    "method": "GET",
+                    "path": "/v1/dryrun-mcp",
+                    "kv_overrides_b64": { "count": B64.encode(b"9") },
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("dry_run_route");
+    let structured = resp.structured_content.expect("structured");
+    let body_b64 = structured["body_b64"].as_str().expect("body_b64");
+    let body_bytes = B64.decode(body_b64).expect("decode body");
+    assert_eq!(String::from_utf8(body_bytes).unwrap(), "count=10");
+
+    // Bad base64 in the override map surfaces a typed error.
+    let bad = client
+        .call_tool(
+            CallToolRequestParams::new("dry_run_route").with_arguments(
+                serde_json::json!({
+                    "route": format!("{}/{}", route.group_name, route.number),
+                    "method": "GET",
+                    "path": "/v1/dryrun-mcp",
+                    "kv_overrides_b64": { "count": "not-base-64!!!" },
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await;
+    assert!(bad.is_err(), "bad base64 in override is rejected");
 
     client.cancel().await.expect("cancel");
 }
