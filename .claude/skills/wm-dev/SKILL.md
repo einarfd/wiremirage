@@ -423,6 +423,48 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Live journal Pause/Resume (slice 34)
+
+The wireframe-since-slice-24 Pause button finally lands.
+Pure client-side change in `live_journal.html` — no host
+work, no new tests beyond a smoke check that the button
+renders.
+
+- **State**: a `paused` boolean and a `buffer` array
+  (capped at 500). While paused, the `handled` SSE
+  listener pushes to `buffer` instead of calling
+  `renderRow`. On overflow we `shift()` the oldest, so a
+  long pause + heavy traffic doesn't grow memory but
+  the user keeps the most-recent N entries visible on
+  resume.
+- **Resume flush order**: oldest-first via `renderRow`,
+  which prepends — so the newest ends up at the top,
+  matching the un-paused ordering exactly. No surprises
+  for the operator.
+- **Status indicator**: extended to report `paused` /
+  `paused · N buffered` / `live` / `disconnected (will
+  retry)` based on `paused` + `connected` flags. A small
+  `setStatus()` helper centralizes the rendering so the
+  three event handlers + the button click all go through
+  one place.
+- **Button**: rendered only when `can_tail` is true
+  (same guard as the SSE script block) — non-admin
+  picker-view callers see no button. Initial label
+  `Pause`, toggles to `Resume` on click.
+- **Tests:** `ui_journal_pages.rs` —
+  `live_journal_page_renders_with_group_filter` extended
+  to assert the button + initial label;
+  `live_journal_picker_view_omits_pause_button` covers
+  the non-tail picker path. JS behavior beyond
+  rendering can't easily be tier-2-tested without a
+  headless browser, which we don't have.
+- **Not in this slice**: highlight-on-arrival animation
+  for new rows (still deferred per slice-24 notes); the
+  buffer-cap value is hard-coded at 500 (small enough
+  to be safe, large enough that "step away for a coffee"
+  pauses still keep useful data — could be made
+  configurable later if anyone cares).
+
 ## Dry-run seed state (slice 33)
 
 Lets agents/CLI/UI pre-populate the dry-run snapshot's

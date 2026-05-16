@@ -1998,7 +1998,18 @@ async fn tail_journal(
     }
 
     let rx = state.journal().subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+
+    // Emit an immediate `:ready` comment so the browser's
+    // `EventSource.onopen` fires as soon as it sees the response body —
+    // otherwise it waits for either the first journal event or axum's
+    // `KeepAlive::default()` (15 seconds). That made the UI's
+    // "connecting…" label hang for up to 15 s on every page load when
+    // no traffic was flowing.
+    let ready = futures::stream::once(async {
+        Ok::<_, std::convert::Infallible>(Event::default().comment("ready"))
+    });
+
+    let live = BroadcastStream::new(rx).filter_map(move |result| {
         let filter = filter.clone();
         async move {
             match result {
@@ -2039,7 +2050,7 @@ async fn tail_journal(
         }
         None => futures::future::FutureExt::boxed(std::future::pending::<()>()),
     };
-    let stream = stream.take_until(stop);
+    let stream = ready.chain(live).take_until(stop);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 

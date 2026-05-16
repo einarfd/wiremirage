@@ -143,6 +143,33 @@ async fn tail_requires_auth() {
 }
 
 #[tokio::test]
+async fn tail_emits_ready_comment_immediately() {
+    // Regression: before slice-34 polish, the SSE stream had no
+    // pre-amble, so the browser's EventSource.onopen waited for
+    // either the first journal event or axum's 15s keep-alive — the
+    // UI status indicator hung on "connecting…" the whole time. The
+    // handler now chains an immediate `:ready` comment in front of
+    // the broadcast stream, so the first chunk arrives within
+    // milliseconds even on an idle host.
+    let h = start().await;
+    let mut resp = open_tail(&h.base_url, ADMIN_TOKEN, "").await;
+    assert_eq!(resp.status().as_u16(), 200);
+    // Read the first chunk with a tight budget. Axum's KeepAlive is
+    // 15s; if we're still waiting at 2s, the ready-comment is gone
+    // and the test fails fast.
+    let first = tokio::time::timeout(Duration::from_secs(2), resp.chunk())
+        .await
+        .expect("first chunk within 2s")
+        .expect("chunk result")
+        .expect("first chunk non-empty");
+    let text = String::from_utf8_lossy(&first);
+    assert!(
+        text.contains(":ready") || text.contains(": ready"),
+        "first SSE chunk is the :ready comment, got: {text:?}"
+    );
+}
+
+#[tokio::test]
 async fn tail_host_wide_is_admin_only() {
     let h = start().await;
     // Provision a non-admin user with their own token.

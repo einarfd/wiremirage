@@ -197,6 +197,35 @@ async fn live_journal_page_renders_with_group_filter() {
     );
     // Status pill class for the 200 response
     assert!(body.contains("status-2xx"));
+    // Pause/Resume button is present when the page can tail (slice 34).
+    assert!(
+        body.contains("id=\"live-pause\""),
+        "pause button rendered when tailing is possible"
+    );
+    assert!(body.contains(">Pause</button>"), "initial label is Pause");
+}
+
+#[tokio::test]
+async fn live_journal_picker_view_omits_pause_button() {
+    // Non-admin without a group sees the picker view, which doesn't
+    // open an SSE connection — Pause has nothing to pause, so it
+    // should be absent.
+    let h = start_with_traffic().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "alice").await;
+    let body = client
+        .get(url(&h, "/__ui/journal/live"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !body.contains("id=\"live-pause\""),
+        "no pause button when not tailing"
+    );
 }
 
 #[tokio::test]

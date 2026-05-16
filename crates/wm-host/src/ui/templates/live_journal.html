@@ -50,7 +50,10 @@
 <section class="card">
   <header class="card__header">
     <h2>Recent activity</h2>
-    <span id="live-status" class="text-muted">{% if can_tail %}connecting…{% else %}idle{% endif %}</span>
+    <span class="inline">
+      {% if can_tail %}<button type="button" id="live-pause" class="btn btn--ghost">Pause</button>{% endif %}
+      <span id="live-status" class="text-muted">{% if can_tail %}connecting…{% else %}idle{% endif %}</span>
+    </span>
   </header>
   {% if not can_tail %}
   <p class="empty-state">Pick a group above to start tailing.</p>
@@ -100,10 +103,34 @@
   var url = {{ sse_url | tojson }};
   var rows = document.getElementById("live-rows");
   var status = document.getElementById("live-status");
+  var pauseBtn = document.getElementById("live-pause");
   if (!rows) return;
 
+  // Pause/Resume state. While paused, incoming events accumulate in
+  // `buffer` (oldest-first by arrival order). On resume we flush them
+  // in arrival order via renderRow (which prepends), so the newest
+  // ends up at the top — same shape as the un-paused stream. Cap the
+  // buffer so a long pause + heavy traffic doesn't grow it forever.
+  var paused = false;
+  var buffer = [];
+  var BUFFER_CAP = 500;
+  var connected = false;
+
+  function setStatus() {
+    if (!connected) {
+      status.textContent = "disconnected (will retry)";
+      return;
+    }
+    if (paused) {
+      status.textContent = buffer.length > 0
+        ? "paused · " + buffer.length + " buffered"
+        : "paused";
+    } else {
+      status.textContent = "live";
+    }
+  }
+
   var es = new EventSource(url);
-  status.textContent = "live";
 
   function statusClass(code) {
     var bucket = Math.floor(code / 100);
@@ -147,19 +174,49 @@
   es.addEventListener("handled", function (ev) {
     try {
       var entry = JSON.parse(ev.data);
-      renderRow(entry);
+      if (paused) {
+        buffer.push(entry);
+        if (buffer.length > BUFFER_CAP) {
+          // Drop the oldest so memory doesn't grow without bound. The
+          // user can still see the most-recent ones on resume.
+          buffer.shift();
+        }
+        setStatus();
+      } else {
+        renderRow(entry);
+      }
     } catch (e) {
       console.error("malformed live entry", e);
     }
   });
 
   es.addEventListener("error", function () {
-    status.textContent = "disconnected (will retry)";
+    connected = false;
+    setStatus();
   });
 
   es.addEventListener("open", function () {
-    status.textContent = "live";
+    connected = true;
+    setStatus();
   });
+
+  if (pauseBtn) {
+    pauseBtn.addEventListener("click", function () {
+      paused = !paused;
+      if (!paused) {
+        // Flush buffered events oldest-first. Each renderRow prepends,
+        // so the newest ends up at the top of the table — matching the
+        // ordering the user would have seen without pausing.
+        var pending = buffer;
+        buffer = [];
+        for (var i = 0; i < pending.length; i++) {
+          renderRow(pending[i]);
+        }
+      }
+      pauseBtn.textContent = paused ? "Resume" : "Pause";
+      setStatus();
+    });
+  }
 })();
 </script>
 {% endif %}

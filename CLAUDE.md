@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–33 landed. The WIT contract is live at
+**Status:** slices 1–34 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -313,9 +313,15 @@ textareas under a "Seed state" card with `key=value` per
 line. Real state is never touched — overrides land in the
 disposable `dryrun:{run_id}:` namespace. Bytes-only:
 list/set/hash seeding is deferred (the workaround is to
-seed via real traffic before dry-run). By design (per
-`mcp-surface.md`) user management is **not** in MCP —
-admins handle it via CLI/UI.
+seed via real traffic before dry-run). Slice 34 added
+Pause/Resume to `/__ui/journal/live` — pure client-side
+JS that buffers incoming SSE events (capped at 500) while
+paused and flushes them oldest-first on resume so the
+table order matches the un-paused stream. The status
+indicator reports `paused · N buffered` while paused so
+operators can see traffic without losing it. By design
+(per `mcp-surface.md`) user management is **not** in
+MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 
