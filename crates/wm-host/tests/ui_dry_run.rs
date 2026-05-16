@@ -75,6 +75,7 @@ async fn start() -> Harness {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: counter_wasm(),
+            source: None,
             owner_id: admin.id.clone(),
         })
         .expect("route");

@@ -570,6 +570,187 @@ fn echo_bytes() -> Vec<u8> {
     std::fs::read(env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT")).expect("read echo fixture")
 }
 
+// -- Source storage + GET /source ---------------------------------------------
+
+const TS_SOURCE: &str = "export function handle(req, _r, _g) { return { status: 200, headers: [], body: new Uint8Array() }; }";
+
+#[tokio::test]
+async fn source_is_persisted_for_source_language_routes() {
+    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "typescript",
+            "source": TS_SOURCE,
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let group = body["group"]["name"].as_str().unwrap().to_string();
+    let number = body["number"].as_u64().unwrap();
+
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .send()
+        .await
+        .expect("get source");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["slug"], format!("{group}/{number}"));
+    assert_eq!(body["language"], "typescript");
+    assert_eq!(body["source"], TS_SOURCE);
+}
+
+#[tokio::test]
+async fn source_is_null_for_wasm_uploaded_routes() {
+    let h = Harness::start().await;
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/wasm",
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let group = body["group"]["name"].as_str().unwrap().to_string();
+    let number = body["number"].as_u64().unwrap();
+
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .send()
+        .await
+        .expect("get source");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["language"], "wasm");
+    // `source` is `None` -> omitted by skip_serializing_if.
+    assert!(
+        body.get("source").map(|v| v.is_null()).unwrap_or(true),
+        "expected null/missing source for wasm-only route, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn source_updates_on_source_language_patch() {
+    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/thing",
+            "language": "typescript",
+            "source": TS_SOURCE,
+        }))
+        .await;
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let group = body["group"]["name"].as_str().unwrap().to_string();
+    let number = body["number"].as_u64().unwrap();
+
+    let new_src = "export function handle(req, _r, _g) { /* v2 */ return { status: 200, headers: [], body: new Uint8Array() }; }";
+    let resp = h
+        .client
+        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .json(&json!({ "language": "typescript", "source": new_src }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .send()
+        .await
+        .expect("get source");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["source"], new_src);
+}
+
+#[tokio::test]
+async fn source_cleared_when_wasm_swapped_in() {
+    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/swap",
+            "language": "typescript",
+            "source": TS_SOURCE,
+        }))
+        .await;
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let group = body["group"]["name"].as_str().unwrap().to_string();
+    let number = body["number"].as_u64().unwrap();
+
+    // Swap the artifact to a raw wasm component — source should now be
+    // cleared (a wasm record has no meaningful source).
+    let resp = h
+        .client
+        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .json(&json!({
+            "language": "wasm",
+            "bindings_version": "0.1.0",
+            "compiled_wasm": echo_b64(),
+        }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .send()
+        .await
+        .expect("get source");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["language"], "wasm");
+    assert!(
+        body.get("source").map(|v| v.is_null()).unwrap_or(true),
+        "source should be cleared after wasm swap, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn source_endpoint_forbids_non_owner() {
+    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/private",
+            "language": "typescript",
+            "source": TS_SOURCE,
+        }))
+        .await;
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let group = body["group"]["name"].as_str().unwrap().to_string();
+    let number = body["number"].as_u64().unwrap();
+
+    let (_id, other) = h.provision_user("nosey", false);
+    let resp = other
+        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .send()
+        .await
+        .expect("get source");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn source_endpoint_returns_404_for_unknown_route() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .get(h.url("/__api/routes/nope/99/source"))
+        .send()
+        .await
+        .expect("get source");
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
 // -- Auth -------------------------------------------------------------------
 
 #[tokio::test]

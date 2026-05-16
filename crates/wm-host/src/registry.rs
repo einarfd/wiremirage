@@ -60,6 +60,11 @@ pub struct Route {
     pub bindings_version: String,
     #[serde(with = "serde_bytes")]
     pub compiled_wasm: Vec<u8>,
+    /// Original handler source as submitted by the caller. `Some` for
+    /// source-language routes (`typescript`, `javascript`, ...) so the
+    /// UI / CLI / MCP can show the code; `None` for routes uploaded as
+    /// pre-compiled `wasm` and for routes that pre-date this field.
+    pub source: Option<String>,
     pub created_at: DateTime<Utc>,
     /// User ULID of the caller that created the route. DELETE/PATCH require
     /// the caller to match this id (or to be admin).
@@ -130,6 +135,9 @@ pub struct NewRoute {
     pub language: String,
     pub bindings_version: String,
     pub compiled_wasm: Vec<u8>,
+    /// Original handler source for source-language routes. `None` for
+    /// pre-compiled `wasm` uploads (no source ever existed in the host).
+    pub source: Option<String>,
     /// User ULID of the caller creating this route.
     pub owner_id: String,
 }
@@ -146,6 +154,12 @@ pub struct PatchRoute {
     pub language: Option<String>,
     pub bindings_version: Option<String>,
     pub compiled_wasm: Option<Vec<u8>>,
+    /// New source to persist alongside `compiled_wasm`. `None` means
+    /// "leave alone"; `Some(None)` means "clear" (e.g. a wasm swap that
+    /// has no source). The API layer enforces consistency — a
+    /// source-language swap sends `Some(Some(src))`; a wasm swap sends
+    /// `Some(None)`.
+    pub source: Option<Option<String>>,
 }
 
 /// One entry from a route's per-route kv namespace. `kind` is the
@@ -631,6 +645,7 @@ impl Registry {
             language: params.language,
             bindings_version: params.bindings_version,
             compiled_wasm: params.compiled_wasm,
+            source: params.source,
             created_at: Utc::now(),
             owner_id: params.owner_id,
             hits_total: 0,
@@ -729,6 +744,7 @@ impl Registry {
             "language",
             "bindings_version",
             "compiled_wasm",
+            "source",
             "created_at",
             "owner_id",
             "hits_total",
@@ -923,6 +939,15 @@ impl Registry {
             route.compiled_wasm = wasm.clone();
             bucket.hash_set(&key, "compiled_wasm", wasm)?;
         }
+        // `Some(Some(_))` writes the new source; `Some(None)` clears the
+        // field (a wasm swap on a previously source-language route).
+        if let Some(src_opt) = patch.source {
+            route.source = src_opt.clone();
+            match src_opt {
+                Some(src) => bucket.hash_set(&key, "source", src.into_bytes())?,
+                None => bucket.hash_delete(&key, "source")?,
+            }
+        }
 
         // Re-add by-method-path entries for the new (method, path) set.
         if methods_changing || path_changing {
@@ -1029,6 +1054,13 @@ fn write_route(bucket: &mut Bucket, route: &Route) -> Result<(), RegistryError> 
         route.bindings_version.as_bytes().to_vec(),
     )?;
     bucket.hash_set(&key, "compiled_wasm", route.compiled_wasm.clone())?;
+    // Source is optional: only persisted for source-language routes.
+    // Pre-compiled `wasm` uploads have no source to keep; we delete the
+    // field so a re-read returns `None` rather than an empty string.
+    match &route.source {
+        Some(src) => bucket.hash_set(&key, "source", src.as_bytes().to_vec())?,
+        None => bucket.hash_delete(&key, "source")?,
+    }
     bucket.hash_set(
         &key,
         "created_at",
@@ -1078,6 +1110,9 @@ fn decode_route(fields: &HashMap<String, Vec<u8>>) -> Result<Route, RegistryErro
             .get("compiled_wasm")
             .cloned()
             .ok_or_else(|| RegistryError::Malformed("compiled_wasm missing".into()))?,
+        // Source is optional — pre-slice-36 records won't have it, and
+        // wasm-only routes never have it. Absent = `None`.
+        source: utf8_opt(fields, "source"),
         created_at: parse_ts(&utf8(fields, "created_at")?)?,
         owner_id: utf8(fields, "owner_id")?,
         // Activity fields are optional — pre-slice-17 records won't
@@ -1163,6 +1198,7 @@ mod tests {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: "test-owner".into(),
         }
     }
@@ -1258,6 +1294,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"A".to_vec(),
+                source: None,
                 owner_id: "alice".into(),
             })
             .unwrap();
@@ -1269,6 +1306,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"B".to_vec(),
+                source: None,
                 owner_id: "bob".into(),
             })
             .unwrap();
@@ -1502,6 +1540,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"B".to_vec(),
+                source: None,
                 owner_id: "test-owner".into(),
             })
             .unwrap();
@@ -1517,6 +1556,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"C".to_vec(),
+                source: None,
                 owner_id: "test-owner".into(),
             })
             .unwrap();

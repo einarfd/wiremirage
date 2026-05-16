@@ -20,7 +20,7 @@ use crate::models::{
     ListGroupsResponse, ListJournalParams, ListJournalResponse, ListRouteStateResponse,
     ListRoutesParams, ListRoutesResponse, ListTokensResponse, ListUnmatchedParams,
     ListUnmatchedResponse, PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
-    UnmatchedRecord,
+    RouteSourceResponse, UnmatchedRecord,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -300,6 +300,16 @@ impl Client {
         self.send_no_body(
             Method::DELETE,
             &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+        )
+        .await
+    }
+
+    pub async fn get_route_source(&self, slug: &str) -> Result<RouteSourceResponse, ClientError> {
+        let (group, number) = split_route_slug(slug)?;
+        self.send(
+            Method::GET,
+            &format!("/__api/routes/{}/{number}/source", urlencode(group)),
+            None::<&()>,
         )
         .await
     }

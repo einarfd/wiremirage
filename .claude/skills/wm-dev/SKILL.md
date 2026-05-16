@@ -423,6 +423,62 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Source storage on the registry (slice 36)
+
+The `Route` record gains an `Option<String> source` alongside
+`compiled_wasm`. For source-language routes (`typescript`,
+`javascript`), we now keep the original handler source the user
+posted; for pre-compiled `wasm` uploads, `source` is `None`
+(no source ever existed in the host).
+
+- **`registry.rs`**: `Route`, `NewRoute`, and `PatchRoute` gain
+  `source: Option<String>` / `Option<Option<String>>` (tri-state
+  patch). `write_route` deletes the `source` Valkey field when
+  `None` rather than storing an empty string, so re-reads
+  cleanly return `None` via `utf8_opt`. `update_route`'s artifact-
+  swap branch honours `patch.source`: source-language swap writes
+  the new string; wasm swap deletes the field. The Route struct
+  list in `delete_route` includes "source".
+- **`api.rs`**: `create_route_core`'s match arm now returns a
+  4-tuple `(compiled_wasm, language, bindings_version, source)`
+  — the source-language branch sets `Some(source)`, the wasm
+  branch sets `None`. `patch_route_core` computes
+  `source_patch: Option<Option<String>>` alongside the artifact
+  decision: wasm swap → `Some(None)`, source-lang swap →
+  `Some(Some(src))`, no change → `None`. New endpoint
+  `GET /__api/routes/{group}/{number}/source` (owner-or-admin
+  gate) returns a `RouteSourceResponse { slug, language,
+  source }`. The `compiled_wasm` bytes still never appear on
+  list/get; `source` follows the same pattern — only the dedicated
+  `/source` endpoint returns it.
+- **`mcp/tools/routes.rs`**: new `show_route_source` tool
+  (owner-or-admin gate, returns `ShowRouteSourceResult`).
+  `create_route` MCP passes `source: None` (MCP create stays
+  wasm-only). `update_route` MCP passes
+  `source: if compiled_wasm.is_some() { Some(None) } else { None }`
+  (wasm swap clears any stored source).
+- **`wm-core`**: `RouteSourceResponse` mirrors the host struct.
+  `Client::get_route_source(slug)` is the wm-core entry point.
+- **`wm-cli`**: `wm routes source <slug>` prints the source to
+  stdout in Human mode (or `(no source stored — route was
+  uploaded as pre-compiled '{language}')` if `None`); `--json`
+  emits the wire shape.
+- **Why MCP doesn't accept source on `create_route`/`update_route`.**
+  The slice-10 decision is preserved: agents post pre-compiled
+  wasm bytes through MCP. The `source` field on the record
+  exists for the dedicated viewer/show endpoint, not for round-
+  trip source-via-MCP. Source-language create still goes
+  through CLI/REST.
+- **Tests:**
+  - `tests/api_routes.rs::source_is_persisted_for_source_language_routes` — TS source round-trips through `GET /source`.
+  - `tests/api_routes.rs::source_is_null_for_wasm_uploaded_routes` — wasm upload → null source.
+  - `tests/api_routes.rs::source_updates_on_source_language_patch` — patch with new source swaps in.
+  - `tests/api_routes.rs::source_cleared_when_wasm_swapped_in` — patch from source-lang → wasm clears stored source.
+  - `tests/api_routes.rs::source_endpoint_forbids_non_owner` — 403 on owner-mismatch.
+  - `tests/api_routes.rs::source_endpoint_returns_404_for_unknown_route` — missing → 404.
+  - `tests/mcp_e2e.rs::show_route_source_returns_source_for_typescript_route` — MCP returns the source.
+  - `tests/mcp_e2e.rs::show_route_source_is_null_for_wasm_route` — MCP returns null for wasm.
+
 ## Unmatched near-misses (slice 35)
 
 Closes the last big agent-facing gap from the slice-28 spec

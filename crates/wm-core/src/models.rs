@@ -167,6 +167,17 @@ pub struct ListRouteStateResponse {
     pub entries: Vec<RouteStateEntry>,
 }
 
+/// Response shape for `GET /__api/routes/{group}/{n}/source`. `source`
+/// is `None` for pre-compiled `wasm` uploads (no source ever existed)
+/// and for records that pre-date the source-storage slice.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RouteSourceResponse {
+    pub slug: String,
+    pub language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DryRunBody {
     pub method: String,

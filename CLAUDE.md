@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–35 landed. The WIT contract is live at
+**Status:** slices 1–36 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -332,8 +332,20 @@ The UI's unmatched list page now shows a "Did you mean
 …?" hint per row (or "No close neighbours." when empty),
 and the detail page lists every near-miss with an
 explanation; REST `/__api/unmatched/{n}` and MCP both
-serialise the same shape. By design (per
-`mcp-surface.md`) user management is **not** in MCP —
+serialise the same shape. Slice 36 added source storage on
+the registry: the `Route` record gains
+`source: Option<String>` alongside `compiled_wasm`,
+populated for source-language uploads and `None` for
+pre-compiled wasm. New endpoint
+`GET /__api/routes/{group}/{n}/source` (owner-or-admin)
+returns `{ slug, language, source }`; MCP exposes the
+same as `show_route_source`; the CLI as
+`wm routes source <slug>`. Like `compiled_wasm`, the
+source is never inlined on list/get responses — only the
+dedicated endpoint returns it. Wasm swaps via PATCH clear
+any stored source; source-language swaps overwrite it.
+Sets up the route-source viewer slice on the UI. By design
+(per `mcp-surface.md`) user management is **not** in MCP —
 admins handle it via CLI/UI.
 
 ## Where the design lives

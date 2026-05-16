@@ -86,6 +86,7 @@ async fn start_seeded() -> (Harness, String, String) {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: echo_wasm(),
+            source: None,
             owner_id: admin.id.clone(),
         })
         .expect("route");
@@ -97,6 +98,7 @@ async fn start_seeded() -> (Harness, String, String) {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: echo_wasm(),
+            source: None,
             owner_id: alice.id.clone(),
         })
         .expect("route");
@@ -420,6 +422,7 @@ async fn root_user_route_shadows_redirect() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: echo_wasm(),
+            source: None,
             owner_id: admin.id.clone(),
         })
         .expect("route");

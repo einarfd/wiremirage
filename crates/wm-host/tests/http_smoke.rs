@@ -40,6 +40,7 @@ async fn start_with_seeded_route(
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: echo_bytes(),
+            source: None,
             owner_id: "test-owner".into(),
         })
         .expect("create route");

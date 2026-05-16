@@ -94,6 +94,7 @@ async fn start_seeded(
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: vec![],
                 owner_id,
+                source: None,
             })
             .expect("create route");
     }

@@ -48,6 +48,10 @@ pub fn router() -> Router<AppState> {
             get(get_route_state).delete(delete_route_state),
         )
         .route(
+            "/__api/routes/{group}/{number}/source",
+            get(get_route_source),
+        )
+        .route(
             "/__api/routes/{group}/{number}/dry-run",
             post(dry_run_route),
         )
@@ -525,7 +529,7 @@ pub(crate) async fn create_route_core(
         ));
     }
 
-    let (compiled_wasm, language, bindings_version) = match body.language.as_str() {
+    let (compiled_wasm, language, bindings_version, source) = match body.language.as_str() {
         "wasm" => {
             let encoded = body
                 .compiled_wasm
@@ -546,7 +550,7 @@ pub(crate) async fn create_route_core(
             // request.
             wasmtime::component::Component::from_binary(state.runtime().engine(), &bytes)
                 .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
-            (bytes, "wasm".to_string(), bv)
+            (bytes, "wasm".to_string(), bv, None)
         }
         other => {
             // Source-based path: hand off to the compiler sidecar.
@@ -579,6 +583,7 @@ pub(crate) async fn create_route_core(
                 artifact.component,
                 other.to_string(),
                 artifact.bindings_version,
+                Some(source),
             )
         }
     };
@@ -590,6 +595,7 @@ pub(crate) async fn create_route_core(
         language,
         bindings_version,
         compiled_wasm,
+        source,
         owner_id: auth.user_id.clone(),
     })?;
 
@@ -866,7 +872,12 @@ async fn patch_route(
     // preserved; `language` and `bindings_version` are ignored in that
     // case to keep the metadata in sync with what's actually loaded.
     let artifact_changing = body.compiled_wasm.is_some() || body.source.is_some();
-    let (compiled_wasm, language, bindings_version) = if artifact_changing {
+    // `source_patch` mirrors `PatchRoute::source`: outer `Option` is
+    // "field present in patch?", inner is the actual value to store.
+    // A wasm swap clears any prior source (Some(None)); a source-lang
+    // swap stores the new source (Some(Some(_))); no artifact change
+    // leaves source alone (None).
+    let (compiled_wasm, language, bindings_version, source_patch) = if artifact_changing {
         let lang = body.language.as_deref().ok_or_else(|| {
             ApiError::validation(
                 "`language` is required when changing the route's source/wasm artifact",
@@ -890,7 +901,7 @@ async fn patch_route(
                 }
                 wasmtime::component::Component::from_binary(state.runtime().engine(), &bytes)
                     .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
-                (Some(bytes), Some("wasm".to_string()), Some(bv))
+                (Some(bytes), Some("wasm".to_string()), Some(bv), Some(None))
             }
             other => {
                 let source = body.source.as_deref().ok_or_else(|| {
@@ -917,11 +928,12 @@ async fn patch_route(
                     Some(artifact.component),
                     Some(other.to_string()),
                     Some(artifact.bindings_version),
+                    Some(Some(source.to_string())),
                 )
             }
         }
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
 
     let updated = state.routes().registry().update_route(
@@ -933,6 +945,7 @@ async fn patch_route(
             language,
             bindings_version,
             compiled_wasm,
+            source: source_patch,
         },
     )?;
     state.routes().refresh_after_update(updated.clone());
@@ -1005,6 +1018,42 @@ async fn delete_route_state(
         .registry()
         .clear_route_state(&group, number)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// -- Source --------------------------------------------------------------------
+
+/// Response shape for `GET /__api/routes/{group}/{n}/source`. The
+/// `source` field carries the original handler source the caller sent;
+/// `None` for pre-compiled `wasm` uploads (no source ever existed) and
+/// for records that pre-date slice 36. The slug is included so the
+/// agent/UI rendering the result doesn't have to re-thread it from the
+/// request URL.
+#[derive(Debug, Serialize)]
+struct RouteSourceResponse {
+    slug: String,
+    language: String,
+    source: Option<String>,
+}
+
+async fn get_route_source(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+) -> Result<Json<RouteSourceResponse>, ApiError> {
+    let route = state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group, number)?;
+    if route.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may read its source",
+        ));
+    }
+    Ok(Json(RouteSourceResponse {
+        slug: render_slug(&route.group_name, route.number),
+        language: route.language,
+        source: route.source,
+    }))
 }
 
 // -- Dry-run ------------------------------------------------------------------

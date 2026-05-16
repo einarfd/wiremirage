@@ -108,6 +108,7 @@ async fn counter_persists_across_requests_via_http() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: counter_bytes(),
+            source: None,
             owner_id: "test-owner".into(),
         })
         .expect("create route");

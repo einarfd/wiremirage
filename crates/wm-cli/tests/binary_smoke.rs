@@ -202,6 +202,7 @@ async fn wm_match_against_real_host() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: "test-owner".into(),
         })
         .expect("create_route");
@@ -305,6 +306,7 @@ async fn wm_routes_update_changes_path() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: h
                 .state
                 .auth()
@@ -373,6 +375,7 @@ async fn wm_routes_state_lists_and_clears() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: bootstrap_id,
         })
         .expect("create_route");
@@ -461,6 +464,7 @@ async fn wm_routes_test_dry_runs_against_bogus_wasm() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: bootstrap_id,
         })
         .expect("create_route");
@@ -743,6 +747,7 @@ async fn wm_routes_list_paginates_with_total_and_next_offset() {
                 language: "wasm".into(),
                 bindings_version: wm_host::SUPPORTED_BINDINGS_VERSION.into(),
                 compiled_wasm: vec![0, 0, 0, 0], // bytes don't matter for list
+                source: None,
                 owner_id: admin_id.clone(),
             })
             .expect("create route");

@@ -145,6 +145,7 @@ async fn list_tools_returns_all_expected_tools() {
         "refresh_group_ttl",
         "show_group",
         "show_route",
+        "show_route_source",
         "summarize_workspace",
         "who_am_i",
         // Slice 11
@@ -543,6 +544,7 @@ async fn find_route_returns_hit_and_method_mismatch_near_miss() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: "test-owner".into(),
         })
         .expect("create_route");
@@ -595,6 +597,115 @@ async fn find_route_returns_hit_and_method_mismatch_near_miss() {
         .unwrap();
     assert_eq!(near.len(), 1);
     assert_eq!(near[0]["reason"].as_str(), Some("method_mismatch"));
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn show_route_source_returns_source_for_typescript_route() {
+    let h = start().await;
+
+    // Stash a "source-language" route directly via the registry so we
+    // don't need a real compiler sidecar. The bytes-as-component
+    // validation is bypassed at this layer (MCP create_route is
+    // wasm-only, but we're going through the registry here).
+    let bootstrap_user = h
+        .state
+        .auth()
+        .get_user_by_name("bootstrap")
+        .expect("get_user_by_name")
+        .expect("bootstrap user exists");
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/v1/snippet".into(),
+            language: "typescript".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            source: Some("export function handle() {}".into()),
+            owner_id: bootstrap_user.id.clone(),
+        })
+        .expect("create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("show_route_source").with_arguments(
+                serde_json::json!({ "route": slug })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("show_route_source");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["language"].as_str(), Some("typescript"));
+    assert_eq!(
+        structured["source"].as_str(),
+        Some("export function handle() {}")
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn show_route_source_is_null_for_wasm_route() {
+    let h = start().await;
+
+    let bootstrap_user = h
+        .state
+        .auth()
+        .get_user_by_name("bootstrap")
+        .expect("get_user_by_name")
+        .expect("bootstrap user exists");
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(wm_host::registry::NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/v1/wasm".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: b"FAKE".to_vec(),
+            source: None,
+            owner_id: bootstrap_user.id.clone(),
+        })
+        .expect("create_route");
+    let slug = format!("{}/{}", route.group_name, route.number);
+    h.state.routes().refresh_after_create(route);
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("show_route_source").with_arguments(
+                serde_json::json!({ "route": slug })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("show_route_source");
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(structured["language"].as_str(), Some("wasm"));
+    assert!(structured["source"].is_null());
 
     client.cancel().await.expect("cancel");
 }
@@ -772,6 +883,7 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: counter_wasm(),
+            source: None,
             owner_id: h
                 .state
                 .auth()

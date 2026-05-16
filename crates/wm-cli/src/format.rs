@@ -13,7 +13,7 @@ use wm_core::{
     DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse,
     ListJournalResponse, ListRouteStateResponse, ListRoutesResponse, ListTokensResponse,
     ListUnmatchedResponse, ListUsersResponse, MatchResponse, NearMiss, NearMissReason, RouteRecord,
-    TokenRecord, UnmatchedRecord, UserRecord,
+    RouteSourceResponse, TokenRecord, UnmatchedRecord, UserRecord,
 };
 
 /// Output mode requested via the global `--json` flag.
@@ -556,6 +556,21 @@ pub fn render_route_state(list: &ListRouteStateResponse, format: Format) {
                 .collect();
             print_table(&["KEY", "KIND", "VALUE"], &rows);
         }
+    }
+}
+
+// -- Source -------------------------------------------------------------------
+
+pub fn render_route_source(resp: &RouteSourceResponse, format: Format) {
+    match format {
+        Format::Json => print_json(resp),
+        Format::Human => match &resp.source {
+            Some(src) => print!("{src}"),
+            None => println!(
+                "(no source stored — route was uploaded as pre-compiled `{}`)",
+                resp.language
+            ),
+        },
     }
 }
 

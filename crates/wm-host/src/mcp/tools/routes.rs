@@ -21,7 +21,7 @@ use crate::api_filters::{FilterParseError, SortDir, glob_match, parse_since, val
 use crate::mcp::context::{auth_from, ensure_route_owner_or_admin};
 use crate::mcp::error::{forbidden, map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
-use crate::registry::{NewRoute, PatchRoute, Route};
+use crate::registry::{NewRoute, PatchRoute, Route, render_slug};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RouteRecord {
@@ -116,6 +116,16 @@ pub struct ListRoutesResult {
 pub struct ShowRouteArgs {
     /// Route slug `{group}/{number}` (e.g. `stripe-mock/7`).
     pub route: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ShowRouteSourceResult {
+    pub slug: String,
+    pub language: String,
+    /// Original handler source as submitted by the caller. `None` for
+    /// pre-compiled `wasm` uploads (no source ever existed in the
+    /// host) and for records that pre-date source storage.
+    pub source: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -295,6 +305,25 @@ impl WmMcpServer {
     }
 
     #[tool(
+        name = "show_route_source",
+        description = "Return the original handler source the route was created from. `source` is null for routes uploaded as pre-compiled `wasm` (no source ever existed). Owner-or-admin."
+    )]
+    pub async fn show_route_source(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ShowRouteArgs>,
+    ) -> Result<Json<ShowRouteSourceResult>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let (group_ref, number) = parse_slug(&args.route)?;
+        let route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        Ok(Json(ShowRouteSourceResult {
+            slug: render_slug(&route.group_name, route.number),
+            language: route.language,
+            source: route.source,
+        }))
+    }
+
+    #[tool(
         name = "create_route",
         description = "Create a new route. Slice 10 supports pre-compiled wasm uploads only (`language: \"wasm\"` with `compiled_wasm_b64`). Source-based TypeScript creation is intentionally CLI/REST-side for now (the agent flow is to author with files, not inline strings)."
     )]
@@ -330,6 +359,9 @@ impl WmMcpServer {
                     .bindings_version
                     .unwrap_or_else(|| SUPPORTED_BINDINGS_VERSION.into()),
                 compiled_wasm: bytes,
+                // MCP is wasm-only on create, so no source ever flows
+                // through this surface.
+                source: None,
                 owner_id: auth.user_id,
             })
             .map_err(map_registry_error)?;
@@ -395,6 +427,14 @@ impl WmMcpServer {
                     path: args.path,
                     language,
                     bindings_version,
+                    // MCP is wasm-only on update — a wasm swap always
+                    // clears any prior source (Some(None)); a no-op
+                    // artifact keeps source alone (None).
+                    source: if compiled_wasm.is_some() {
+                        Some(None)
+                    } else {
+                        None
+                    },
                     compiled_wasm,
                 },
             )

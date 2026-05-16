@@ -187,6 +187,13 @@ pub enum RoutesCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Print the original handler source the route was created from.
+    /// Empty (with a note) for pre-compiled `wasm` uploads. Owner-or-
+    /// admin only.
+    Source {
+        /// Route slug `{group}/{n}`.
+        slug: String,
+    },
     /// Dry-run the route's handler against a synthetic request. State
     /// reads see a point-in-time snapshot; writes land in the
     /// snapshot and are discarded after the call. Skips the journal.

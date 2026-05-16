@@ -271,6 +271,10 @@ async fn handle_routes(
             let r = client.patch_route(&slug, &body.1).await?;
             format::render_route(&r, format);
         }
+        RoutesCommand::Source { slug } => {
+            let resp = client.get_route_source(&slug).await?;
+            format::render_route_source(&resp, format);
+        }
         RoutesCommand::State { slug, clear } => {
             if clear {
                 client.clear_route_state(&slug).await?;

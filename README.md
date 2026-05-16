@@ -166,6 +166,7 @@ wm routes add --group stripe-mock --method POST --path /v1/charges \
   --source-file handler.ts                 # compiles via the sidecar
 wm routes list
 wm routes update stripe-mock/1 --source-file new-handler.ts  # PATCH
+wm routes source stripe-mock/1             # print stored handler source
 wm routes state stripe-mock/1              # list per-route kv
 wm routes test stripe-mock/1 --method POST # dry-run (no journal, isolated state)
 wm journal list stripe-mock                # newest first, paginated
@@ -206,14 +207,14 @@ claude mcp add --transport http wiremirage \
   --header "Authorization: Bearer wmt_..."
 ```
 
-The current surface is 20 tools — identity (`who_am_i`), discovery
+The current surface is 21 tools — identity (`who_am_i`), discovery
 (`summarize_workspace`, `list_recent_unmatched`, `find_route`),
 group CRUD (`list_groups`, `show_group`, `create_group`,
 `delete_group`, `refresh_group_ttl`), route CRUD (`list_routes`,
-`show_route`, `create_route`, `update_route`, `delete_route`),
-state + dry-run (`clear_group_state`, `show_route_state`,
-`clear_route_state`, `dry_run_route`), and the slice-11 streaming
-pair (`wait_for_request`, `tail_journal`). The streaming tools
+`show_route`, `show_route_source`, `create_route`, `update_route`,
+`delete_route`), state + dry-run (`clear_group_state`,
+`show_route_state`, `clear_route_state`, `dry_run_route`), and the
+slice-11 streaming pair (`wait_for_request`, `tail_journal`). The streaming tools
 subscribe to a single-host broadcast bus inside the host and return
 accumulated entries when their stop condition fires (count + timeout
 for `wait_for_request`; max_entries + idle timeout for

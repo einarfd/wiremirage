@@ -225,6 +225,7 @@ async fn match_route_round_trips_hit_and_miss() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: "test-owner".into(),
         })
         .expect("registry create_route");
@@ -281,6 +282,7 @@ async fn patch_route_round_trip_metadata_only() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: bootstrap_user_id(&h),
         })
         .expect("registry create_route");
@@ -324,6 +326,7 @@ async fn patch_route_with_empty_body_is_validation_error() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: bootstrap_user_id(&h),
         })
         .expect("registry create_route");
@@ -355,6 +358,7 @@ async fn patch_route_by_non_owner_is_forbidden() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: bootstrap_user_id(&h),
         })
         .expect("registry create_route");
@@ -408,6 +412,7 @@ async fn route_state_list_and_clear_via_client() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: bootstrap_user_id(&h),
         })
         .expect("create_route");
@@ -460,6 +465,7 @@ async fn dry_run_against_bogus_wasm_returns_error_shape() {
             language: "wasm".into(),
             bindings_version: "0.1.0".into(),
             compiled_wasm: b"FAKE".to_vec(),
+            source: None,
             owner_id: bootstrap_user_id(&h),
         })
         .expect("create_route");

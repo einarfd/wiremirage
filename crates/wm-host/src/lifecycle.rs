@@ -169,6 +169,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"FAKE".to_vec(),
+                source: None,
                 owner_id: owner_id.into(),
             })
             .unwrap();
@@ -223,6 +224,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"A".to_vec(),
+                source: None,
                 owner_id: "alice".into(),
             })
             .unwrap();
@@ -235,6 +237,7 @@ mod tests {
                 language: "wasm".into(),
                 bindings_version: "0.1.0".into(),
                 compiled_wasm: b"B".to_vec(),
+                source: None,
                 owner_id: "alice".into(),
             })
             .unwrap();
