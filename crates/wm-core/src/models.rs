@@ -281,10 +281,34 @@ pub struct UnmatchedRecord {
     pub trace_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub request: RequestEnvelope,
-    /// Routes that nearly matched (e.g. same path, different method).
-    /// Empty when no near-misses were detected.
+    /// Routes that nearly matched. Populated by the dispatcher at
+    /// unmatched-write time (slice 35); empty when nothing nearby
+    /// was found. Mirror of the host's `UnmatchedNearMiss`.
     #[serde(default)]
-    pub near_misses: Vec<String>,
+    pub near_misses: Vec<UnmatchedNearMiss>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UnmatchedNearMiss {
+    /// `{group}/{number}` slug.
+    pub route: String,
+    pub route_path: String,
+    pub route_methods: Vec<String>,
+    pub reason: UnmatchedNearMissReason,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnmatchedNearMissReason {
+    MethodMismatch {
+        expected_methods: Vec<String>,
+        got: String,
+    },
+    PrefixMatch {
+        segment_index: usize,
+        expected: String,
+        got: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

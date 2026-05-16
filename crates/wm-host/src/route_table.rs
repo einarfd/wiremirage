@@ -123,6 +123,14 @@ impl RouteTable {
         if let Some(m) = self.find_match(method, path) {
             return MatchProbe::Hit(Box::new(m));
         }
+        MatchProbe::Miss(self.compute_near_misses(method, path))
+    }
+
+    /// Compute near-misses for `(method, path)` without first checking
+    /// whether the request actually matches. The dispatcher's unmatched-
+    /// write path uses this directly because it already knows nothing
+    /// matched — re-running `find_match` would be wasted work.
+    pub fn compute_near_misses(&self, method: &str, path: &str) -> Vec<NearMiss> {
         let routes = self.routes.read().expect("poisoned");
         let mut near = Vec::new();
         for route in routes.iter() {
@@ -156,7 +164,7 @@ impl RouteTable {
         if near.len() > NEAR_MISS_LIMIT {
             near.truncate(NEAR_MISS_LIMIT);
         }
-        MatchProbe::Miss(near)
+        near
     }
 
     /// Return the cached compiled `Component` for the route, compiling on

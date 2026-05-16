@@ -18,10 +18,11 @@ use crate::bindings::wiremirage::handler::http::{
 };
 use crate::journal::{
     HANDLED_BODY_LIMIT, HandlerLogEntry, NewJournalEntry, NewUnmatchedEntry, RequestEnvelope,
-    ResourceUsage, ResponseEnvelope, UNMATCHED_BODY_LIMIT, truncate_body,
+    ResourceUsage, ResponseEnvelope, UNMATCHED_BODY_LIMIT, UnmatchedNearMiss,
+    UnmatchedNearMissReason, truncate_body,
 };
 use crate::log::LogRecord;
-use crate::route_table::RouteTable;
+use crate::route_table::{NearMiss, NearMissReason, RouteTable};
 use crate::telemetry::HeaderExtractor;
 
 /// Path prefixes the host owns; user routes can never claim them. Requests
@@ -344,6 +345,15 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             }
 
             span.record("outcome", "unmatched_404");
+            // Compute nearby routes the SUT might have meant. Slice 35
+            // — the heavy lifting is already in `compute_near_misses`,
+            // which is the same probe slice 13's `find_route` runs.
+            let near_misses: Vec<UnmatchedNearMiss> = state
+                .routes()
+                .compute_near_misses(method.as_str(), uri.path())
+                .into_iter()
+                .map(project_near_miss)
+                .collect();
             // Journal the unmatched request. Best-effort: a journal
             // failure is logged but doesn't change what the SUT sees.
             let envelope = build_request_envelope(
@@ -356,6 +366,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             if let Err(e) = state.journal().record_unmatched(NewUnmatchedEntry {
                 trace_id: trace_id.clone(),
                 request: envelope,
+                near_misses,
             }) {
                 tracing::warn!(error = %e, "failed to record unmatched journal entry");
             }
@@ -530,6 +541,36 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
 /// (semantically it claims to be a parent of a downstream span). A
 /// plain `X-Trace-Id` is honest about being a correlation hint, not a
 /// propagation primitive. If `traceresponse` finalizes, swap it in.
+/// Slim down a `route_table::NearMiss` (which carries the full
+/// `Route` including `compiled_wasm`) into the persistable
+/// `UnmatchedNearMiss` shape stored on the journal record.
+fn project_near_miss(nm: NearMiss) -> UnmatchedNearMiss {
+    let route = format!("{}/{}", nm.route.group_name, nm.route.number);
+    UnmatchedNearMiss {
+        route,
+        route_path: nm.route.path,
+        route_methods: nm.route.methods,
+        reason: match nm.reason {
+            NearMissReason::MethodMismatch {
+                expected_methods,
+                got,
+            } => UnmatchedNearMissReason::MethodMismatch {
+                expected_methods,
+                got,
+            },
+            NearMissReason::PrefixMatch {
+                segment_index,
+                expected,
+                got,
+            } => UnmatchedNearMissReason::PrefixMatch {
+                segment_index,
+                expected,
+                got,
+            },
+        },
+    }
+}
+
 fn inject_response_trace_id(trace_id: &Option<String>, headers: &mut HeaderMap) {
     let Some(tid) = trace_id else {
         return;

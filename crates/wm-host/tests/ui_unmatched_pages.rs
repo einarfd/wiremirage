@@ -16,6 +16,9 @@ use reqwest::Client;
 use reqwest::redirect::Policy;
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
+use wm_host::journal::{
+    NewUnmatchedEntry, RequestEnvelope, UnmatchedNearMiss, UnmatchedNearMissReason,
+};
 use wm_host::local_auth::LocalAuth;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
@@ -27,6 +30,7 @@ const SECRET: &[u8; 32] = b"thirty-two-byte-development-key!";
 struct Harness {
     addr: String,
     server: tokio::task::JoinHandle<()>,
+    state: AppState,
 }
 
 impl Drop for Harness {
@@ -60,13 +64,17 @@ async fn start() -> Harness {
             LocalAuth::parse("admin:devpassword:admin,alice:devpassword").expect("auth"),
         )
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
-    let app = router(state);
+    let app = router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Harness { addr, server }
+    Harness {
+        addr,
+        server,
+        state,
+    }
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
@@ -320,4 +328,105 @@ async fn unmatched_detail_non_admin_is_forbidden() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 403);
+}
+
+// -- Slice 35: "Did you mean…" near-miss rendering -------------------------
+
+/// Inject an unmatched record with a synthetic method-mismatch near-miss
+/// — bypasses the dispatcher so the test focuses on the UI rendering
+/// rather than the near-miss-computation path (covered separately in
+/// `tests/api_routes.rs`).
+fn inject_unmatched_with_near_miss(h: &Harness, method: &str, path: &str) {
+    h.state
+        .journal()
+        .record_unmatched(NewUnmatchedEntry {
+            trace_id: None,
+            request: RequestEnvelope {
+                method: method.into(),
+                path: path.into(),
+                headers: vec![],
+                body: vec![],
+                body_truncated: false,
+                original_body_size: 0,
+            },
+            near_misses: vec![UnmatchedNearMiss {
+                route: "stripe-mock/3".into(),
+                route_path: "/v1/refunds".into(),
+                route_methods: vec!["POST".into()],
+                reason: UnmatchedNearMissReason::MethodMismatch {
+                    expected_methods: vec!["POST".into()],
+                    got: method.into(),
+                },
+            }],
+        })
+        .expect("record");
+}
+
+#[tokio::test]
+async fn unmatched_list_renders_did_you_mean_hint() {
+    let h = start().await;
+    inject_unmatched_with_near_miss(&h, "GET", "/v1/refunds");
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(&h, "/__ui/unmatched"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("Did you mean"), "list shows hint: {body}");
+    // minijinja HTML-escapes `/` to `&#x2f;` in href attrs. Browsers
+    // decode it back, but the rendered string carries the entity.
+    assert!(
+        body.contains("/__ui/routes/stripe-mock&#x2f;3"),
+        "hint links to suggested route: {body}"
+    );
+}
+
+#[tokio::test]
+async fn unmatched_list_shows_no_close_neighbours_when_empty() {
+    let h = start().await;
+    record_unmatched(&h, &no_redirect_client(), "GET", "/v1/orphan").await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(&h, "/__ui/unmatched"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("No close neighbours"),
+        "empty-near-misses copy visible: {body}"
+    );
+}
+
+#[tokio::test]
+async fn unmatched_detail_lists_near_misses_with_explanation() {
+    let h = start().await;
+    inject_unmatched_with_near_miss(&h, "GET", "/v1/refunds");
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(&h, "/__ui/unmatched/1"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("Did you mean"));
+    assert!(body.contains("/__ui/routes/stripe-mock&#x2f;3"));
+    // The explanation includes the reason + expected method.
+    assert!(
+        body.contains("Pattern matched") && body.contains("POST"),
+        "method-mismatch explanation present: {body}"
+    );
 }

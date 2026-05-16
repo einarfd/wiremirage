@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–34 landed. The WIT contract is live at
+**Status:** slices 1–35 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -319,9 +319,22 @@ JS that buffers incoming SSE events (capped at 500) while
 paused and flushes them oldest-first on resume so the
 table order matches the un-paused stream. The status
 indicator reports `paused · N buffered` while paused so
-operators can see traffic without losing it. By design
-(per `mcp-surface.md`) user management is **not** in
-MCP — admins handle it via CLI/UI.
+operators can see traffic without losing it. Slice 35
+populated `UnmatchedRecord.near_misses` (which had always
+been `vec![]`): the dispatcher's unmatched-write path now
+calls `RouteTable::compute_near_misses(method, path)` —
+the same probe slice 13's `find_route` runs — and stores
+the slim `UnmatchedNearMiss { route, route_path,
+route_methods, reason }` records on the journal entry.
+Reason carries either `MethodMismatch { expected_methods,
+got }` or `PrefixMatch { segment_index, expected, got }`.
+The UI's unmatched list page now shows a "Did you mean
+…?" hint per row (or "No close neighbours." when empty),
+and the detail page lists every near-miss with an
+explanation; REST `/__api/unmatched/{n}` and MCP both
+serialise the same shape. By design (per
+`mcp-surface.md`) user management is **not** in MCP —
+admins handle it via CLI/UI.
 
 ## Where the design lives
 

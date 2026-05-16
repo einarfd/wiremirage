@@ -137,9 +137,43 @@ pub struct UnmatchedRecord {
     pub trace_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub request: RequestEnvelope,
-    /// Routes that almost matched (same path, different method, etc.).
-    /// Empty in slice 7 — populated by a follow-up.
-    pub near_misses: Vec<String>,
+    /// Routes that almost matched (same path, different method, or
+    /// a one-segment string-prefix difference). Empty when no
+    /// near-misses were detected. Populated by the dispatcher at
+    /// unmatched-write time via `RouteTable::compute_near_misses`.
+    #[serde(default)]
+    pub near_misses: Vec<UnmatchedNearMiss>,
+}
+
+/// A nearby route attached to an `UnmatchedRecord`. Slim projection
+/// of `route_table::NearMiss` — keeps the route's slug + path +
+/// methods so the UI / agent can render the suggestion without a
+/// follow-up lookup, but drops the heavy `compiled_wasm` field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct UnmatchedNearMiss {
+    /// `{group}/{number}` slug.
+    pub route: String,
+    pub route_path: String,
+    pub route_methods: Vec<String>,
+    pub reason: UnmatchedNearMissReason,
+}
+
+/// Why the route nearly-but-didn't match. Same two flavours the
+/// slice-13 `find_route` MCP tool surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnmatchedNearMissReason {
+    /// Pattern matched, methods didn't.
+    MethodMismatch {
+        expected_methods: Vec<String>,
+        got: String,
+    },
+    /// One path segment differs by a literal string prefix.
+    PrefixMatch {
+        segment_index: usize,
+        expected: String,
+        got: String,
+    },
 }
 
 /// Inputs the dispatcher hands to the journal at write time. Owned so
@@ -168,6 +202,11 @@ pub struct NewJournalEntry {
 pub struct NewUnmatchedEntry {
     pub trace_id: Option<String>,
     pub request: RequestEnvelope,
+    /// Computed by the dispatcher (or the test driver) at write
+    /// time. Empty when nothing nearby was found, or when the
+    /// caller doesn't have a route table to consult.
+    #[doc(hidden)]
+    pub near_misses: Vec<UnmatchedNearMiss>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -400,7 +439,7 @@ impl Journal {
             trace_id: entry.trace_id,
             created_at: Utc::now(),
             request: entry.request,
-            near_misses: Vec::new(),
+            near_misses: entry.near_misses,
         };
         let key = format!("unmatched:{}", record.id);
         let json = serde_json::to_vec(&record)
@@ -637,6 +676,7 @@ mod tests {
             .record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
                 request: sample_envelope(b"oops"),
+                near_misses: Vec::new(),
             })
             .unwrap();
         assert_eq!(written.number, 1);
@@ -652,12 +692,14 @@ mod tests {
             .record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
                 request: sample_envelope(b""),
+                near_misses: Vec::new(),
             })
             .unwrap();
         let r2 = j
             .record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
                 request: sample_envelope(b""),
+                near_misses: Vec::new(),
             })
             .unwrap();
         assert_eq!(r1.number, 1);
@@ -671,6 +713,7 @@ mod tests {
             j.record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
                 request: sample_envelope(b""),
+                near_misses: Vec::new(),
             })
             .unwrap();
         }

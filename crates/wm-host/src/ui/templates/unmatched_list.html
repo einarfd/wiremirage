@@ -51,6 +51,14 @@
         <strong>{{ e.method }} <code>{{ e.path }}</code></strong>
         <span class="text-muted">#{{ e.number }}</span>
       </header>
+      {% if e.primary_hint %}
+      <p class="text-muted">
+        Did you mean
+        <a class="link" href="/__ui/routes/{{ e.primary_hint.route }}"><code>{{ e.primary_hint.route_methods }} {{ e.primary_hint.route_path }}</code></a>?
+      </p>
+      {% else %}
+      <p class="text-muted">No close neighbours.</p>
+      {% endif %}
       <div class="inline">
         <a class="link" href="/__ui/unmatched/{{ e.number }}">View request</a>
         <span class="text-muted">·</span>

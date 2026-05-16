@@ -423,6 +423,72 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Unmatched near-misses (slice 35)
+
+Closes the last big agent-facing gap from the slice-28 spec
+note: `UnmatchedRecord.near_misses` had always been
+`vec![]`. The dispatcher now populates it at unmatched-
+write time, and the UI / REST / CLI all surface the
+suggestions.
+
+- **`route_table.rs`**: split `compute_near_misses(method,
+  path) -> Vec<NearMiss>` out of `probe`. The unmatched-
+  write path already knows there's no hit, so re-running
+  `find_match` would be wasted work. `probe` keeps its
+  Hit-or-Miss contract by calling the new helper.
+- **`journal.rs`**: `UnmatchedRecord.near_misses` changes
+  from `Vec<String>` to `Vec<UnmatchedNearMiss>`. The new
+  type carries the `{group}/{n}` slug, the route's path
+  + methods, and a reason: either
+  `MethodMismatch { expected_methods, got }` or
+  `PrefixMatch { segment_index, expected, got }` — same
+  two reasons slice 13's `find_route` MCP tool exposes,
+  serialised with `#[serde(tag = "kind",
+  rename_all = "snake_case")]` so the JSON wire format
+  matches `{"kind": "method_mismatch", "expected_methods":
+  [...], "got": "..."}`. `NewUnmatchedEntry` gains the
+  matching field; `record_unmatched` propagates it onto
+  the persisted record. Old Valkey entries with
+  `near_misses: []` deserialise fine into the new type
+  (empty list matches any element type).
+- **`server.rs`**: the dispatcher's unmatched-404 branch
+  calls `state.routes().compute_near_misses(method, path)`,
+  maps each `NearMiss` (which carries the full `Route`
+  including the heavy `compiled_wasm`) through
+  `project_near_miss` into the slim `UnmatchedNearMiss`,
+  and passes the list into the journal write.
+- **`wm-core/src/models.rs`**: parallel `UnmatchedNearMiss`
+  + `UnmatchedNearMissReason` definitions so the
+  CLI/wm-core client deserialises the new shape. The two
+  type families are kept structurally identical; they
+  don't share a crate because wm-host doesn't depend on
+  wm-core.
+- **CLI** (`wm-cli/src/format.rs`): `render_unmatched_list`
+  now prints each near-miss as `slug METHOD path —
+  reason (details)` instead of the old plain slug. JSON
+  output unchanged in spirit but with richer per-entry
+  data.
+- **UI**: `UnmatchedRow` gains a `primary_hint: Option<…>`
+  (first near-miss only, surfaced as a "Did you mean
+  …?" line on the list page; empty → "No close
+  neighbours."). `UnmatchedDetailView` gains a
+  `near_misses` vec of slim view-models that include an
+  `explanation: String` rendered via a `From<&Unmatched
+  NearMiss>` impl — keeps the reason-formatting in Rust
+  rather than smearing match arms through the template.
+- **MCP**: no schema change required. The richer
+  `UnmatchedRecord` flows through `list_recent_unmatched`
+  unchanged (the MCP `UnmatchedSummary` projection drops
+  near_misses today — agents who want them drop to REST
+  `GET /__api/unmatched/{n}`; could be added to the MCP
+  list response in a follow-up).
+- **Tests:**
+  - `tests/api_routes.rs::unmatched_record_carries_near_misses_for_method_mismatch` — register POST /v1/charges, hit GET /v1/charges, verify the unmatched journal record carries a method-mismatch near-miss with `expected_methods` and `got`.
+  - `tests/api_routes.rs::unmatched_record_carries_near_misses_for_prefix_typo` — register /v1/refunds, hit /v1/refund, verify the prefix-match near-miss.
+  - `tests/ui_unmatched_pages.rs::unmatched_list_renders_did_you_mean_hint` — synthetic near-miss injected via `record_unmatched`, list page shows "Did you mean" + link.
+  - `tests/ui_unmatched_pages.rs::unmatched_list_shows_no_close_neighbours_when_empty` — empty near-miss case.
+  - `tests/ui_unmatched_pages.rs::unmatched_detail_lists_near_misses_with_explanation` — detail page lists the reason text.
+
 ## Live journal Pause/Resume (slice 34)
 
 The wireframe-since-slice-24 Pause button finally lands.

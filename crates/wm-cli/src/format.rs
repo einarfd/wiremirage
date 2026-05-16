@@ -273,8 +273,25 @@ pub fn render_unmatched_entry(u: &UnmatchedRecord, format: Format) {
             );
             if !u.near_misses.is_empty() {
                 println!("near_misses:");
-                for slug in &u.near_misses {
-                    println!("  {slug}");
+                for nm in &u.near_misses {
+                    let reason = match &nm.reason {
+                        wm_core::UnmatchedNearMissReason::MethodMismatch {
+                            expected_methods,
+                            ..
+                        } => format!(
+                            "method_mismatch (expected: {})",
+                            expected_methods.join(", ")
+                        ),
+                        wm_core::UnmatchedNearMissReason::PrefixMatch { expected, got, .. } => {
+                            format!("prefix_match (expected: {expected}, got: {got})")
+                        }
+                    };
+                    println!(
+                        "  {slug} {methods} {path} — {reason}",
+                        slug = nm.route,
+                        methods = nm.route_methods.join(","),
+                        path = nm.route_path,
+                    );
                 }
             }
         }

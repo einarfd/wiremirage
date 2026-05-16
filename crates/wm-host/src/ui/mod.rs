@@ -2551,10 +2551,26 @@ struct UnmatchedRow {
     created_at_short: String,
     method_q: String,
     path_q: String,
+    /// First near-miss to display inline as "Did you mean…". `None`
+    /// when the journal record has no near-misses. The detail page
+    /// surfaces the full list.
+    primary_hint: Option<UnmatchedRowHint>,
+}
+
+#[derive(Serialize)]
+struct UnmatchedRowHint {
+    route: String,
+    route_path: String,
+    route_methods: String,
 }
 
 impl UnmatchedRow {
     fn from_record(r: &crate::journal::UnmatchedRecord) -> Self {
+        let primary_hint = r.near_misses.first().map(|nm| UnmatchedRowHint {
+            route: nm.route.clone(),
+            route_path: nm.route_path.clone(),
+            route_methods: nm.route_methods.join(", "),
+        });
         Self {
             number: r.number,
             method: r.request.method.clone(),
@@ -2563,6 +2579,7 @@ impl UnmatchedRow {
             created_at_short: r.created_at.format("%H:%M:%S").to_string(),
             method_q: urlencoding::encode(&r.request.method).into_owned(),
             path_q: urlencoding::encode(&r.request.path).into_owned(),
+            primary_hint,
         }
     }
 }
@@ -2593,10 +2610,27 @@ struct UnmatchedDetailView {
     request_body_original_size: usize,
     method_q: String,
     path_q: String,
+    near_misses: Vec<UnmatchedDetailNearMiss>,
+}
+
+#[derive(Serialize)]
+struct UnmatchedDetailNearMiss {
+    route: String,
+    route_path: String,
+    route_methods: String,
+    reason: &'static str,
+    /// Human-readable detail, e.g. "expected POST, got GET" /
+    /// "expected `refunds`, got `refund`".
+    explanation: String,
 }
 
 impl UnmatchedDetailView {
     fn from_record(r: &crate::journal::UnmatchedRecord) -> Self {
+        let near_misses = r
+            .near_misses
+            .iter()
+            .map(UnmatchedDetailNearMiss::from)
+            .collect();
         Self {
             id: r.id.clone(),
             number: r.number,
@@ -2610,6 +2644,36 @@ impl UnmatchedDetailView {
             request_body_original_size: r.request.original_body_size,
             method_q: urlencoding::encode(&r.request.method).into_owned(),
             path_q: urlencoding::encode(&r.request.path).into_owned(),
+            near_misses,
+        }
+    }
+}
+
+impl From<&crate::journal::UnmatchedNearMiss> for UnmatchedDetailNearMiss {
+    fn from(nm: &crate::journal::UnmatchedNearMiss) -> Self {
+        let (reason, explanation) = match &nm.reason {
+            crate::journal::UnmatchedNearMissReason::MethodMismatch {
+                expected_methods,
+                got,
+            } => (
+                "method_mismatch",
+                format!(
+                    "Pattern matched, but expected {} — got {}.",
+                    expected_methods.join(", "),
+                    got,
+                ),
+            ),
+            crate::journal::UnmatchedNearMissReason::PrefixMatch { expected, got, .. } => (
+                "prefix_match",
+                format!("Path differs by one segment: expected `{expected}`, got `{got}`."),
+            ),
+        };
+        Self {
+            route: nm.route.clone(),
+            route_path: nm.route_path.clone(),
+            route_methods: nm.route_methods.join(", "),
+            reason,
+            explanation,
         }
     }
 }

@@ -1887,6 +1887,80 @@ async fn unmatched_request_produces_unmatched_record() {
 }
 
 #[tokio::test]
+async fn unmatched_record_carries_near_misses_for_method_mismatch() {
+    let h = Harness::start().await;
+    // Register a POST /v1/charges route — the SUT hits GET /v1/charges
+    // (same path, wrong method). The dispatcher should write an
+    // unmatched record whose `near_misses` flags the method mismatch.
+    h.create_route_body(json!({
+        "methods": ["POST"],
+        "path": "/v1/charges",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+    let unauth = Client::new();
+    let miss = unauth.get(h.url("/v1/charges")).send().await.expect("get");
+    assert_eq!(miss.status().as_u16(), 404);
+
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/unmatched"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let near = listed["entries"][0]["near_misses"]
+        .as_array()
+        .expect("near_misses array");
+    assert_eq!(near.len(), 1, "one method-mismatch near-miss");
+    let nm = &near[0];
+    assert_eq!(nm["route_path"], "/v1/charges");
+    assert_eq!(nm["reason"]["kind"], "method_mismatch");
+    assert_eq!(nm["reason"]["got"], "GET");
+    assert!(nm["route"].as_str().unwrap().ends_with("/1"));
+}
+
+#[tokio::test]
+async fn unmatched_record_carries_near_misses_for_prefix_typo() {
+    let h = Harness::start().await;
+    // Register /v1/refunds — the SUT hits /v1/refund (one segment off
+    // by a literal-prefix).
+    h.create_route_body(json!({
+        "methods": ["POST"],
+        "path": "/v1/refunds",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+    let unauth = Client::new();
+    let miss = unauth.post(h.url("/v1/refund")).send().await.expect("post");
+    assert_eq!(miss.status().as_u16(), 404);
+
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url("/__api/unmatched"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    let near = listed["entries"][0]["near_misses"]
+        .as_array()
+        .expect("near_misses array");
+    assert_eq!(near.len(), 1, "one prefix-match near-miss");
+    let nm = &near[0];
+    assert_eq!(nm["reason"]["kind"], "prefix_match");
+    assert_eq!(nm["reason"]["expected"], "refunds");
+    assert_eq!(nm["reason"]["got"], "refund");
+}
+
+#[tokio::test]
 async fn reserved_path_404_does_not_journal() {
     let h = Harness::start().await;
     // Hit a /__api/* path that doesn't exist — should be 404 (reserved

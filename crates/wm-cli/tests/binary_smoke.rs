@@ -798,6 +798,7 @@ async fn wm_unmatched_list_filters_by_path_pattern() {
                     body_truncated: false,
                     original_body_size: 0,
                 },
+                near_misses: Vec::new(),
             })
             .expect("record unmatched");
     }

@@ -29,6 +29,22 @@
 </section>
 
 <section class="card">
+  <header class="card__header"><h2>Did you mean…</h2></header>
+  {% if entry.near_misses | length == 0 %}
+  <p class="text-muted">No close neighbours. Either the path is genuinely unknown or no registered route shares its shape.</p>
+  {% else %}
+  <ul class="action-list">
+  {%- for nm in entry.near_misses %}
+    <li class="stack">
+      <a class="link" href="/__ui/routes/{{ nm.route }}"><code>{{ nm.route_methods }} {{ nm.route_path }}</code></a>
+      <span class="text-muted">— {{ nm.explanation }}</span>
+    </li>
+  {%- endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="card">
   <header class="card__header"><h2>Request</h2></header>
   <dl class="meta-grid">
     <dt>Method</dt><dd>{{ entry.method }}</dd>
