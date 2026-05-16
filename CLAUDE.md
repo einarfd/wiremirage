@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–31 landed. The WIT contract is live at
+**Status:** slices 1–32 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -286,8 +286,19 @@ leftovers commit that switched the routes-list Group
 filter from a text input to a `<select>` of the caller's
 groups and added a `← Back to {group/route}` link in the
 state pages' footer to soften the destructive Clear
-button. By design (per `mcp-surface.md`) user management
-is **not** in MCP — admins handle it via CLI/UI.
+button. Slice 32 added the dry-run UI page at
+`/__ui/routes/{group}/{n}/dry-run` — a real full page (not
+a JS modal) with a form for method/path/headers/query/body
+that calls `dry_run::dry_run` directly and re-renders with
+a Response card showing status pill, duration, snapshot
+key count, headers, body, handler logs, and any handler
+error. Owner-or-admin gated; CSRF on the POST. The route
+detail page's footer "Run dry-run" link is now real (not
+the slice-30 "CLI only" placeholder). Eight tier-2 tests
+including verification that dry-run touches neither the
+route's real kv nor the journal. By design (per
+`mcp-surface.md`) user management is **not** in MCP —
+admins handle it via CLI/UI.
 
 ## Where the design lives
 

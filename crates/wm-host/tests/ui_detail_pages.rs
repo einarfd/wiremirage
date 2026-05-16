@@ -299,8 +299,13 @@ async fn route_detail_renders_metadata_for_owner() {
     assert!(body.contains("wasm"), "language metadata");
     assert!(body.contains("0.1.0"), "bindings version");
     assert!(body.contains("KiB") || body.contains("B"), "size");
-    // CLI hint section
-    assert!(body.contains("wm routes test"));
+    // Footer carries the dry-run link (real, not CLI-only since
+    // slice 32 added the UI page).
+    assert!(
+        body.contains("/dry-run"),
+        "dry-run footer link visible: {body}"
+    );
+    assert!(body.contains("Run dry-run"));
 }
 
 #[tokio::test]

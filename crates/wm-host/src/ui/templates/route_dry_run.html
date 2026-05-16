@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/groups/{{ route_group_name }}">{{ route_group_name }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}">{{ route_methods }} {{ route_path }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">Dry-run</span>
+</nav>
+
+<header class="page-header">
+  <h1>Dry-run · <code>{{ route_methods }} {{ route_path }}</code></h1>
+  <p class="text-muted">
+    Runs the handler against a synthetic request. State reads see a
+    point-in-time snapshot of <code>kv:</code> + <code>gkv:</code>; writes
+    land in the snapshot and are discarded on completion. No journal
+    entry is written.
+  </p>
+</header>
+
+{% if error %}
+<section class="card card--error">
+  <header class="card__header"><h2>Couldn't run</h2></header>
+  <p>{{ error }}</p>
+</section>
+{% endif %}
+
+<form method="post" action="/__ui/routes/{{ route_group_name }}/{{ route_number }}/dry-run">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+  <section class="card">
+    <header class="card__header"><h2>Synthetic request</h2></header>
+    <div class="form-grid">
+      <label for="dry-method">Method</label>
+      <select id="dry-method" name="method">
+        {%- for m in methods %}
+        <option value="{{ m }}"{% if form.method == m %} selected{% endif %}>{{ m }}</option>
+        {%- endfor %}
+      </select>
+
+      <label for="dry-path">Path</label>
+      <input type="text" id="dry-path" name="path" value="{{ form.path }}" required>
+
+      <label for="dry-headers">Headers</label>
+      <textarea id="dry-headers" name="headers" rows="4" class="source-editor" placeholder="content-type: application/json&#10;authorization: Bearer …">{{ form.headers }}</textarea>
+
+      <label for="dry-query">Query</label>
+      <textarea id="dry-query" name="query" rows="3" class="source-editor" placeholder="key=value&#10;page=1">{{ form.query }}</textarea>
+
+      <label for="dry-body">Body</label>
+      <textarea id="dry-body" name="body" rows="8" class="source-editor" placeholder='{"amount": 1000}'>{{ form.body }}</textarea>
+    </div>
+    <p class="text-muted">
+      Headers are one per line as <code>name: value</code>. Query lines are
+      <code>key=value</code>. Path params are derived from <code>{{ route_path }}</code>
+      against the request path you supply; if the handler doesn't read
+      path params, you can leave the path as-is.
+    </p>
+    <div class="action-row">
+      <button type="submit" class="btn btn--primary">Run</button>
+      <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Back to route</a>
+    </div>
+  </section>
+</form>
+
+{% if response %}
+<section class="card">
+  <header class="card__header">
+    <h2>Response</h2>
+    <span class="text-muted">
+      <span class="status status-{{ response.status_class }}">{{ response.status }}</span>
+      · {{ response.duration_ms }} ms
+      · {{ response.snapshot_keys }} snapshot key{% if response.snapshot_keys != 1 %}s{% endif %}
+    </span>
+  </header>
+
+  {% if response.error %}
+  <p class="card--error" style="padding: var(--space-3); border-left: 3px solid var(--status-5xx);">
+    Handler error: <code>{{ response.error }}</code>
+  </p>
+  {% endif %}
+
+  <h3>Headers</h3>
+  {% if response.headers | length == 0 %}
+  <p class="text-muted">No response headers.</p>
+  {% else %}
+  <table class="data-table">
+    <thead><tr><th scope="col">Name</th><th scope="col">Value</th></tr></thead>
+    <tbody>
+    {%- for kv in response.headers %}
+      <tr><td><code>{{ kv[0] }}</code></td><td><code>{{ kv[1] }}</code></td></tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h3>Body</h3>
+  {% if response.body_text %}
+  <pre class="code-block"><code>{{ response.body_text }}</code></pre>
+  {% else %}
+  <p class="text-muted">Empty body ({{ response.body_original_size }} bytes).</p>
+  {% endif %}
+
+  {% if response.handler_logs | length > 0 %}
+  <h3>Handler logs</h3>
+  <table class="data-table">
+    <thead><tr><th scope="col">Time</th><th scope="col">Level</th><th scope="col">Message</th></tr></thead>
+    <tbody>
+    {%- for log in response.handler_logs %}
+      <tr>
+        <td class="text-muted"><time datetime="{{ log.timestamp }}">{{ log.timestamp }}</time></td>
+        <td>{{ log.level }}</td>
+        <td>{{ log.message }}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

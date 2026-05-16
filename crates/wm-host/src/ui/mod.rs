@@ -70,6 +70,7 @@ impl UiTemplates {
         tmpl!("tokens.html", "templates/tokens.html");
         tmpl!("group_state.html", "templates/group_state.html");
         tmpl!("route_state.html", "templates/route_state.html");
+        tmpl!("route_dry_run.html", "templates/route_dry_run.html");
         tmpl!("unmatched_list.html", "templates/unmatched_list.html");
         tmpl!("unmatched_detail.html", "templates/unmatched_detail.html");
         tmpl!("not_found.html", "templates/not_found.html");
@@ -127,6 +128,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/__ui/routes/{group}/{number}/state",
             get(route_state_page).post(route_state_clear_form),
+        )
+        .route(
+            "/__ui/routes/{group}/{number}/dry-run",
+            get(route_dry_run_page).post(route_dry_run_submit),
         )
         .route("/__ui/journal/live", get(live_journal_page))
         .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
@@ -1722,6 +1727,249 @@ async fn route_state_clear_form(
         route.group_name, number
     ))
     .into_response()
+}
+
+// -- Dry-run page -----------------------------------------------------------
+//
+// UI wrapper around `POST /__api/routes/{group}/{n}/dry-run`. GET renders
+// an empty form (method/path/headers/body); POST calls `dry_run::dry_run`
+// directly and re-renders the same page with the response card filled in.
+// Owner-or-admin gated, same rule as the REST surface. CSRF on the POST.
+
+#[derive(serde::Deserialize)]
+struct DryRunForm {
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+    method: String,
+    path: String,
+    #[serde(default)]
+    headers: String,
+    #[serde(default)]
+    query: String,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Serialize, Default, Clone)]
+struct DryRunFormState {
+    method: String,
+    path: String,
+    headers: String,
+    query: String,
+    body: String,
+}
+
+#[derive(Serialize)]
+struct DryRunResponseView {
+    status: u16,
+    status_class: &'static str,
+    duration_ms: u64,
+    snapshot_keys: u64,
+    headers: Vec<(String, String)>,
+    body_text: Option<String>,
+    body_original_size: usize,
+    handler_logs: Vec<HandlerLogView>,
+    error: Option<String>,
+}
+
+async fn route_dry_run_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+) -> Response {
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+    let form = DryRunFormState {
+        method: route
+            .methods
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "POST".into()),
+        path: route.path.clone(),
+        ..DryRunFormState::default()
+    };
+    render_dry_run(&state, &auth, &route, form, None, None)
+}
+
+async fn route_dry_run_submit(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+    axum::Form(form): axum::Form<DryRunForm>,
+) -> Response {
+    let _ = form._csrf;
+
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+
+    let form_state = DryRunFormState {
+        method: form.method.clone(),
+        path: form.path.clone(),
+        headers: form.headers.clone(),
+        query: form.query.clone(),
+        body: form.body.clone(),
+    };
+
+    let headers = match parse_kv_lines(&form.headers, ':') {
+        Ok(v) => v,
+        Err(msg) => {
+            return render_dry_run(
+                &state,
+                &auth,
+                &route,
+                form_state,
+                Some(format!("Headers: {msg}")),
+                None,
+            );
+        }
+    };
+    let query = match parse_kv_lines(&form.query, '=') {
+        Ok(v) => v,
+        Err(msg) => {
+            return render_dry_run(
+                &state,
+                &auth,
+                &route,
+                form_state,
+                Some(format!("Query: {msg}")),
+                None,
+            );
+        }
+    };
+    if !form.path.starts_with('/') {
+        return render_dry_run(
+            &state,
+            &auth,
+            &route,
+            form_state,
+            Some("Path must start with /".into()),
+            None,
+        );
+    }
+
+    let request = crate::dry_run::DryRunRequest {
+        method: form.method.clone(),
+        path: form.path.clone(),
+        headers,
+        body: form.body.as_bytes().to_vec(),
+        path_params: None,
+        query,
+    };
+    let response = match crate::dry_run::dry_run(
+        state.runtime().clone(),
+        state.routes().clone(),
+        route.clone(),
+        request,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return render_dry_run(
+                &state,
+                &auth,
+                &route,
+                form_state,
+                Some(format!("Dry-run failed: {e}")),
+                None,
+            );
+        }
+    };
+
+    let view = DryRunResponseView {
+        status: response.status,
+        status_class: status_class(response.status),
+        duration_ms: response.duration_ms,
+        snapshot_keys: response.snapshot_keys,
+        headers: response.headers,
+        body_text: body_as_text(&response.body),
+        body_original_size: response.body.len(),
+        handler_logs: response
+            .handler_logs
+            .into_iter()
+            .map(|l| HandlerLogView {
+                level: l.level,
+                message: l.message,
+                timestamp: l.timestamp.to_rfc3339(),
+            })
+            .collect(),
+        error: response.error,
+    };
+    render_dry_run(&state, &auth, &route, form_state, None, Some(view))
+}
+
+fn render_dry_run(
+    state: &AppState,
+    auth: &AuthContext,
+    route: &Route,
+    form: DryRunFormState,
+    error: Option<String>,
+    response: Option<DryRunResponseView>,
+) -> Response {
+    let had_error = error.is_some();
+    let mut resp = render(
+        state,
+        "route_dry_run.html",
+        context! {
+            page_title => format!("Dry-run: {} {}", route.methods.join(", "), route.path),
+            user => UserBadge::from(auth),
+            route_group_name => &route.group_name,
+            route_number => route.number,
+            route_methods => route.methods.join(", "),
+            route_path => &route.path,
+            methods => ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            form => form,
+            error => error,
+            response => response,
+        },
+    );
+    if had_error {
+        *resp.status_mut() = StatusCode::BAD_REQUEST;
+    }
+    resp
+}
+
+/// Parse a multi-line textarea into key/value pairs, splitting each
+/// non-empty line on the first `sep`. Leading/trailing whitespace
+/// around both key and value is trimmed. Empty lines and lines that
+/// are just whitespace are skipped. Returns the original line's text
+/// in the error message when parsing fails so users can find the
+/// offender.
+fn parse_kv_lines(input: &str, sep: char) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for raw in input.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = line.split_once(sep) else {
+            return Err(format!("missing `{sep}` in line: {line:?}"));
+        };
+        let k = k.trim();
+        if k.is_empty() {
+            return Err(format!("empty key in line: {line:?}"));
+        }
+        out.push((k.to_string(), v.trim().to_string()));
+    }
+    Ok(out)
 }
 
 #[derive(Serialize)]

@@ -423,6 +423,59 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Dry-run UI page (slice 32)
+
+Surfaces the slice-16 dry-run API at
+`/__ui/routes/{group}/{n}/dry-run` as a real full page —
+the route-detail footer's "Run dry-run" link is no longer
+the slice-30 muted "CLI only" placeholder.
+
+- **Page shape**: form on top (Method dropdown / Path
+  text / Headers textarea / Query textarea / Body
+  textarea), Response card below when the user has
+  submitted. Not a JS modal — keeps the asset surface
+  small, deep-linkable, accessible without overlay
+  patterns.
+- **Form parsing**: `parse_kv_lines(input, sep)` splits a
+  multi-line textarea on the first `sep` per line —
+  `:` for Headers, `=` for Query. Trims whitespace,
+  skips blank lines, errors on missing-separator with
+  the offending line in the message. Path must start
+  with `/`. Bad form input renders inline 400 with all
+  fields preserved.
+- **Handler call**: builds a `dry_run::DryRunRequest` and
+  calls `dry_run::dry_run(runtime, routes, route, request)`
+  directly (no REST round-trip). Re-uses the slice-16
+  semantics: snapshot of `kv:` + `gkv:` under a
+  `dryrun:{run_id}:` root, handler instantiated against
+  the shifted root, snapshot wiped on completion, no
+  journal write.
+- **Response rendering**: `DryRunResponseView` carries
+  status / status_class / duration_ms / snapshot_keys /
+  headers / body_text (UTF-8 or `(binary, N bytes)` via
+  the shared `body_as_text` helper) / handler_logs /
+  error. Inline `.card--error` callout when the handler
+  trapped or returned an error.
+- **Authz**: owner-or-admin, mirroring REST. CSRF on
+  the POST.
+- **Out of scope**: path-params override (rarely needed
+  in practice; users who care can phrase the route
+  pattern + literal path so the handler reads what it
+  wants), CodeMirror on Body, file upload for binary
+  bodies.
+- **Tests**: `tests/ui_dry_run.rs` — 8 tier-2 tests.
+  GET form pre-fills from the route's first method +
+  path. POST runs the handler, renders status + body
+  (verified against `counter_handler`'s `count=1`
+  response). Crucially, three back-to-back dry-runs
+  leave the route's real `kv:` and the journal
+  unchanged. Bad headers / non-`/` path → inline 400
+  with form values preserved. Missing CSRF → 403.
+  Non-owner → 403. Unknown route → 404.
+- **Test churn**: `ui_detail_pages::route_detail_renders_metadata_for_owner`
+  swapped its `wm routes test` assertion for one
+  checking that the new footer link is present.
+
 ## Audit-driven cleanup (slice 31)
 
 A dogfood pass triggered a full wireframe audit (using the
