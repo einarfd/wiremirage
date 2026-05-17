@@ -227,6 +227,95 @@ async fn edit_form_renders_with_current_source_for_ts_route() {
     );
     assert!(body.contains("name=\"source\""));
     assert!(body.contains("name=\"_csrf\""));
+    // Language picker present and the route's current language is
+    // pre-selected. The seed route was registered as typescript.
+    assert!(
+        body.contains("name=\"language\""),
+        "language select present"
+    );
+    assert!(
+        body.contains("value=\"typescript\" selected"),
+        "current language pre-selected: {body}"
+    );
+}
+
+#[tokio::test]
+async fn edit_submit_switches_language_typescript_to_javascript() {
+    // The PATCH path accepts `language` as part of the artifact triple
+    // (slice 15), so the UI form lets users flip TS ↔ JS without
+    // re-creating the route. The mock compiler returns canned bytes
+    // regardless of the input language, so the assertion focuses on
+    // what the registry stores afterwards.
+    let h = start_with_mock_compiler().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let form_body = format!(
+        "_csrf={csrf}&language=javascript&source={}",
+        urlencoding::encode(UPDATED_SOURCE),
+    );
+    let resp = client
+        .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303, "303 redirect on success");
+
+    // Detail page should now report the language as JavaScript.
+    let detail = client
+        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        detail.contains("javascript"),
+        "language switched to javascript on detail: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn edit_submit_ignores_unsupported_language_values() {
+    // A hand-crafted POST that sends e.g. `language=wasm` should NOT
+    // silently flip the route to a wasm artifact — that path needs a
+    // pre-compiled component, not a source recompile. We treat any
+    // value outside the offered dropdown options as "keep the existing
+    // language" rather than fail with a confusing compile error.
+    let h = start_with_mock_compiler().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let form_body = format!(
+        "_csrf={csrf}&language=wasm&source={}",
+        urlencoding::encode(UPDATED_SOURCE),
+    );
+    let resp = client
+        .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303);
+    let detail = client
+        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // The route stayed `typescript` (its original language).
+    assert!(
+        detail.contains("typescript"),
+        "language unchanged: {detail}"
+    );
 }
 
 #[tokio::test]

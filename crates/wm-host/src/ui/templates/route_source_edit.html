@@ -40,7 +40,13 @@
   <section class="card">
     <header class="card__header">
       <h2>Handler source</h2>
-      <span class="text-muted">{{ route_language }}</span>
+      <label class="text-muted">
+        Language
+        <select name="language">
+          <option value="typescript"{% if route_language == "typescript" %} selected{% endif %}>TypeScript</option>
+          <option value="javascript"{% if route_language == "javascript" %} selected{% endif %}>JavaScript</option>
+        </select>
+      </label>
     </header>
     <div class="ace-host" data-wm-ace="{{ route_language }}" data-wm-ace-sync="source" aria-label="Handler source"></div>
     <textarea name="source" rows="20" class="source-editor" required aria-hidden="true">{{ source }}</textarea>
@@ -58,4 +64,14 @@
 <script src="/__ui/static/ace/theme-github_light_default.js"></script>
 <script src="/__ui/static/ace/theme-github_dark.js"></script>
 <script src="/__ui/static/wm-ace.js"></script>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const sel = document.querySelector("select[name='language']");
+    const host = document.querySelector("[data-wm-ace]");
+    if (!sel || !host) return;
+    sel.addEventListener("change", () => {
+      window.wmAce.setMode(host, sel.value);
+    });
+  });
+</script>
 {% endblock %}

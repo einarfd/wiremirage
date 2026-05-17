@@ -2016,6 +2016,12 @@ fn render_dry_run(
 struct SourceEditForm {
     _csrf: String,
     source: String,
+    /// New language for the source. Defaults to the route's existing
+    /// language when the form is rendered, but the user can flip TS ↔
+    /// JS without re-creating the route. Switching to `wasm` isn't
+    /// allowed through this surface — pre-compiled wasm uploads come
+    /// via REST.
+    language: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2077,10 +2083,19 @@ async fn route_source_edit_submit(
         );
     }
 
+    // Guard against unexpected form values — the dropdown only offers
+    // typescript/javascript, but a hand-crafted POST could send anything
+    // and we don't want to silently swap to "wasm" (which would need a
+    // separate compiled_wasm upload, not a source recompile).
+    let language = form
+        .language
+        .clone()
+        .filter(|l| matches!(l.as_str(), "typescript" | "javascript"))
+        .unwrap_or_else(|| route.language.clone());
     let body = crate::api::PatchRouteBody {
         methods: None,
         path: None,
-        language: Some(route.language.clone()),
+        language: Some(language),
         bindings_version: None,
         compiled_wasm: None,
         source: Some(form.source.clone()),
