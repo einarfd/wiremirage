@@ -861,6 +861,101 @@ async fn list_recent_unmatched_filters_by_path_pattern() {
     client.cancel().await.expect("cancel");
 }
 
+#[tokio::test]
+async fn list_recent_unmatched_includes_near_misses_projection() {
+    // Backfill of the slice-35 deferral: the MCP UnmatchedSummary
+    // used to drop the near_misses list, forcing agents to re-fetch
+    // via REST `/__api/unmatched/{n}` to see the "Did you mean…?"
+    // candidates. Now it ships them on the list response.
+    let h = start().await;
+
+    h.state
+        .journal()
+        .record_unmatched(wm_host::journal::NewUnmatchedEntry {
+            trace_id: None,
+            request: wm_host::journal::RequestEnvelope {
+                method: "GET".into(),
+                path: "/v1/charges".into(),
+                headers: vec![],
+                body: vec![],
+                body_truncated: false,
+                original_body_size: 0,
+            },
+            near_misses: vec![wm_host::journal::UnmatchedNearMiss {
+                route: "stripe-mock/1".into(),
+                route_path: "/v1/charges".into(),
+                route_methods: vec!["POST".into()],
+                reason: wm_host::journal::UnmatchedNearMissReason::MethodMismatch {
+                    expected_methods: vec!["POST".into()],
+                    got: "GET".into(),
+                },
+            }],
+        })
+        .expect("record unmatched");
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+    let resp = client
+        .call_tool(CallToolRequestParams::new("list_recent_unmatched"))
+        .await
+        .expect("list_recent_unmatched");
+    let body = resp.structured_content.expect("structured");
+    let entries = body["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1);
+    let near = entries[0]["near_misses"]
+        .as_array()
+        .expect("near_misses array present");
+    assert_eq!(near.len(), 1, "the seeded near-miss surfaces");
+    assert_eq!(near[0]["route"], "stripe-mock/1");
+    assert_eq!(near[0]["reason"]["kind"], "method_mismatch");
+    assert_eq!(near[0]["reason"]["got"], "GET");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn list_recent_unmatched_emits_empty_near_misses_when_none() {
+    // The field must be present (as `[]`) even when the dispatcher
+    // found no neighbours, so agent code can rely on its shape.
+    let h = start().await;
+    h.state
+        .journal()
+        .record_unmatched(wm_host::journal::NewUnmatchedEntry {
+            trace_id: None,
+            request: wm_host::journal::RequestEnvelope {
+                method: "GET".into(),
+                path: "/totally/unknown".into(),
+                headers: vec![],
+                body: vec![],
+                body_truncated: false,
+                original_body_size: 0,
+            },
+            near_misses: vec![],
+        })
+        .expect("record unmatched");
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+    let resp = client
+        .call_tool(CallToolRequestParams::new("list_recent_unmatched"))
+        .await
+        .expect("list_recent_unmatched");
+    let body = resp.structured_content.expect("structured");
+    let entries = body["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]["near_misses"].is_array(),
+        "near_misses must be present as an empty array, not omitted"
+    );
+    assert_eq!(entries[0]["near_misses"].as_array().unwrap().len(), 0);
+
+    client.cancel().await.expect("cancel");
+}
+
 // -- Slice 33: dry-run seed state ---------------------------------------------
 
 #[tokio::test]

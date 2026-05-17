@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::api_filters::{glob_match, parse_since, validate_method};
-use crate::journal::UnmatchedCursor;
+use crate::journal::{UnmatchedCursor, UnmatchedNearMiss};
 use crate::mcp::context::auth_from;
 use crate::mcp::error::{
     forbidden, map_filter_error, map_journal_error, map_registry_error, validation,
@@ -87,6 +87,12 @@ pub struct UnmatchedSummary {
     pub path: String,
     pub created_at: String,
     pub trace_id: Option<String>,
+    /// Routes that nearly matched, populated by the dispatcher at
+    /// unmatched-write time (slice 35). Empty when no neighbour was
+    /// close enough — `[]`, not omitted, so agents can rely on the
+    /// field being present.
+    #[serde(default)]
+    pub near_misses: Vec<UnmatchedNearMiss>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -278,6 +284,7 @@ impl WmMcpServer {
                 path: r.request.path,
                 created_at: r.created_at.to_rfc3339(),
                 trace_id: r.trace_id,
+                near_misses: r.near_misses,
             })
             .collect();
         Ok(Json(ListRecentUnmatchedResult {

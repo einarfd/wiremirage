@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–37 landed. The WIT contract is live at
+**Status:** slices 1–38 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -353,9 +353,14 @@ routes show the stored source in a read-only
 `{language}` ({size} component)." Replaces the slice-23
 placeholder paragraph. No new endpoint — the source already
 travels on the Route record after slice 36, and the detail
-page is already owner-or-admin-gated. By design
-(per `mcp-surface.md`) user management is **not** in MCP —
-admins handle it via CLI/UI.
+page is already owner-or-admin-gated. Slice 38 closed the
+slice-35 MCP deferral: `list_recent_unmatched` now ships
+the slim `near_misses` list on every `UnmatchedSummary`
+entry, so agents see the "Did you mean…?" candidates
+without a second REST hop. Empty when no neighbour matched
+(present as `[]`, not omitted, so callers can rely on the
+field shape). By design (per `mcp-surface.md`) user
+management is **not** in MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 

@@ -423,6 +423,28 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## MCP near-miss projection on list_recent_unmatched (slice 38)
+
+Backfill of the slice-35 deferral: `list_recent_unmatched`
+now ships the slim near-miss list on every entry, so agents
+don't need a second REST hop to `/__api/unmatched/{n}` to
+see the "Did you mean…?" candidates.
+
+- **`mcp/tools/discovery.rs`**: `UnmatchedSummary` gains a
+  `pub near_misses: Vec<UnmatchedNearMiss>` field (the
+  host's own type, which already derives `JsonSchema`). The
+  map step propagates `r.near_misses` from the journal
+  record. `#[serde(default)]` so the wire stays
+  forward-compatible if a future record was missing the
+  field for any reason.
+- **Shape**: identical to what `/__api/unmatched/{n}` and
+  the UI already serialise. No new schema. The field is
+  present as `[]` (not omitted) when the dispatcher didn't
+  find a neighbour — agent code can rely on its shape.
+- **Tests:**
+  - `tests/mcp_e2e.rs::list_recent_unmatched_includes_near_misses_projection` — seed an unmatched record with one method-mismatch near-miss via `record_unmatched`, assert the MCP response carries `near_misses[0].route` + `reason.kind == "method_mismatch"`.
+  - `tests/mcp_e2e.rs::list_recent_unmatched_emits_empty_near_misses_when_none` — seed without neighbours, assert `near_misses` is present as `[]`.
+
 ## Source viewer on route detail UI (slice 37)
 
 `/__ui/routes/{group}/{n}` now renders a "Handler source" card
@@ -566,12 +588,12 @@ suggestions.
   `explanation: String` rendered via a `From<&Unmatched
   NearMiss>` impl — keeps the reason-formatting in Rust
   rather than smearing match arms through the template.
-- **MCP**: no schema change required. The richer
-  `UnmatchedRecord` flows through `list_recent_unmatched`
-  unchanged (the MCP `UnmatchedSummary` projection drops
-  near_misses today — agents who want them drop to REST
-  `GET /__api/unmatched/{n}`; could be added to the MCP
-  list response in a follow-up).
+- **MCP**: in slice 35 the `UnmatchedSummary` projection
+  still dropped near_misses (deferred to slice 38). Slice
+  38 backfilled it — `list_recent_unmatched` now returns
+  `near_misses: []` on every entry, populated when the
+  dispatcher found neighbours and present-as-empty
+  otherwise.
 - **Tests:**
   - `tests/api_routes.rs::unmatched_record_carries_near_misses_for_method_mismatch` — register POST /v1/charges, hit GET /v1/charges, verify the unmatched journal record carries a method-mismatch near-miss with `expected_methods` and `got`.
   - `tests/api_routes.rs::unmatched_record_carries_near_misses_for_prefix_typo` — register /v1/refunds, hit /v1/refund, verify the prefix-match near-miss.
