@@ -529,6 +529,16 @@ pub(crate) async fn create_route_core(
         ));
     }
 
+    // Cheap conflict precheck so idempotent retries don't burn a
+    // sidecar compile per attempt — the same scan runs again inside
+    // `registry.create_route()` after we have an artifact, but
+    // surfacing it here means a re-seed of an existing slug fails
+    // in milliseconds instead of seconds.
+    state
+        .routes()
+        .registry()
+        .precheck_create_conflict(&body.methods, &body.path)?;
+
     let (compiled_wasm, language, bindings_version, source) = match body.language.as_str() {
         "wasm" => {
             let encoded = body

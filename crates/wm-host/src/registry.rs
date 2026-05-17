@@ -606,26 +606,8 @@ impl Registry {
             None => self.create_implicit_group(&mut bucket, &params.owner_id)?,
         };
 
-        // Pattern-shape conflict detection per route-model.md: walk all
-        // existing routes, reject if any of them has overlapping methods
-        // and a segment-compatible pattern. The by-method-path exact-match
-        // index isn't sufficient — `GET /users/{id}` vs `GET /users/me`
-        // need to be caught here.
-        for existing in self.list_routes_internal(&mut bucket)? {
-            let existing_pattern = Pattern::parse(&existing.path)?;
-            let existing_methods = Methods(existing.methods.clone());
-            if pattern::routes_conflict(
-                &new_methods,
-                &new_pattern,
-                &existing_methods,
-                &existing_pattern,
-            ) {
-                return Err(RegistryError::Conflict(format!(
-                    "conflicts with {}/{} ({:?} {})",
-                    existing.group_name, existing.number, existing.methods, existing.path
-                )));
-            }
-        }
+        // Pattern-shape conflict detection per route-model.md.
+        self.scan_pattern_conflict(&mut bucket, &new_methods, &new_pattern)?;
 
         // Allocate the route's per-group sequence number.
         let n = bucket.hash_incr(
@@ -708,6 +690,51 @@ impl Registry {
             out.push(self.read_route(bucket, &id)?);
         }
         Ok(out)
+    }
+
+    /// Walk existing routes and reject if any has overlapping methods
+    /// and a segment-compatible pattern. The by-method-path exact-
+    /// match index isn't sufficient — `GET /users/{id}` vs
+    /// `GET /users/me` need this loop to catch them.
+    fn scan_pattern_conflict(
+        &self,
+        bucket: &mut Bucket,
+        new_methods: &Methods,
+        new_pattern: &Pattern,
+    ) -> Result<(), RegistryError> {
+        for existing in self.list_routes_internal(bucket)? {
+            let existing_pattern = Pattern::parse(&existing.path)?;
+            let existing_methods = Methods(existing.methods.clone());
+            if pattern::routes_conflict(
+                new_methods,
+                new_pattern,
+                &existing_methods,
+                &existing_pattern,
+            ) {
+                return Err(RegistryError::Conflict(format!(
+                    "conflicts with {}/{} ({:?} {})",
+                    existing.group_name, existing.number, existing.methods, existing.path
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Cheap conflict probe used by the API layer to short-circuit
+    /// expensive work (e.g. sidecar TS compile) on idempotent retries.
+    /// Returns the same `Conflict` error `create_route` would return.
+    /// `create_route` re-runs this check authoritatively under its
+    /// own bucket; this just lets callers skip burning a slow compile
+    /// only to discover the slot is taken.
+    pub fn precheck_create_conflict(
+        &self,
+        methods: &[String],
+        path: &str,
+    ) -> Result<(), RegistryError> {
+        let new_pattern = Pattern::parse(path)?;
+        let new_methods = validate_methods(methods)?;
+        let mut bucket = self.bucket()?;
+        self.scan_pattern_conflict(&mut bucket, &new_methods, &new_pattern)
     }
 
     #[tracing::instrument(

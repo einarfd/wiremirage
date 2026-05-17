@@ -924,6 +924,41 @@ async fn rejects_pattern_shape_conflict() {
     assert_eq!(body["error"]["code"], "conflict");
 }
 
+#[tokio::test]
+async fn source_create_conflict_is_detected_before_compile() {
+    // Stand up a host with a compiler that *always* fails. Then
+    // register a wasm route at /v1/charges and try to register a
+    // TypeScript-source route at the same path. The precheck in
+    // create_route_core must short-circuit with a 409 conflict
+    // *before* the sidecar is consulted — if the precheck were
+    // missing, the failing compiler would surface a 400
+    // compile_failed instead.
+    let h = Harness::start_with_failing_compiler("unused — precheck must fire first").await;
+    h.create_route_body(json!({
+        "methods": ["POST"],
+        "path": "/v1/charges",
+        "language": "wasm",
+        "bindings_version": "0.1.0",
+        "compiled_wasm": echo_b64(),
+    }))
+    .await;
+
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "typescript",
+            "source": "export function handle() { return { status: 200, headers: [], body: new Uint8Array() }; }",
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 409, "expected 409 conflict");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["error"]["code"], "conflict",
+        "must NOT be compile_failed — precheck should fire first"
+    );
+}
+
 // -- PATCH /__api/routes (slice 15) -----------------------------------------
 
 #[tokio::test]
