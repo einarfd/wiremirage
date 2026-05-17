@@ -40,9 +40,10 @@
   <section class="card">
     <header class="card__header">
       <h2>Handler source</h2>
-      <span class="text-muted">{{ route_language }} · plain textarea · CodeMirror later</span>
+      <span class="text-muted">{{ route_language }}</span>
     </header>
-    <textarea name="source" rows="20" class="source-editor" required aria-label="Handler source">{{ source }}</textarea>
+    <div class="ace-host" data-wm-ace="{{ route_language }}" data-wm-ace-sync="source" aria-label="Handler source"></div>
+    <textarea name="source" rows="20" class="source-editor" required aria-hidden="true">{{ source }}</textarea>
   </section>
 
   <footer class="page-footer">
@@ -50,4 +51,11 @@
     <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Cancel</a>
   </footer>
 </form>
+
+<script src="/__ui/static/ace/ace.js"></script>
+<script src="/__ui/static/ace/mode-javascript.js"></script>
+<script src="/__ui/static/ace/mode-typescript.js"></script>
+<script src="/__ui/static/ace/theme-github_light_default.js"></script>
+<script src="/__ui/static/ace/theme-github_dark.js"></script>
+<script src="/__ui/static/wm-ace.js"></script>
 {% endblock %}

@@ -269,6 +269,42 @@ async fn css_served_unauthenticated_and_correct_mime() {
 }
 
 #[tokio::test]
+async fn ace_editor_assets_served_with_js_mime() {
+    // Slice 41 vendored a fixed list of Ace files under
+    // /__ui/static/ace/. Just spot-check that the core script plus
+    // one mode + one theme + the wm-ace bootstrap come back as JS,
+    // and that an unknown filename under the same prefix still 404s
+    // (the handler is an enum match, not a passthrough to the filesystem).
+    let h = start_with_users("admin:devpassword:admin").await;
+    let client = no_redirect_client();
+    for path in [
+        "/__ui/static/ace/ace.js",
+        "/__ui/static/ace/mode-typescript.js",
+        "/__ui/static/ace/theme-github_light_default.js",
+        "/__ui/static/wm-ace.js",
+    ] {
+        let resp = client.get(url(&h, path)).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "{path} 200");
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.starts_with("application/javascript"),
+            "{path} mime: {ct}"
+        );
+    }
+    let resp = client
+        .get(url(&h, "/__ui/static/ace/mode-cobol.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404, "unknown asset still 404s");
+}
+
+#[tokio::test]
 async fn placeholder_pages_render_with_api_hint() {
     let h = start_with_users("admin:devpassword:admin").await;
     let client = no_redirect_client();

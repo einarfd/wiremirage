@@ -423,6 +423,68 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Ace Editor for source viewer + editor (slice 41)
+
+The slice-37 read-only `<pre>` and the slice-29 / slice-40
+textareas are upgraded to Ace Editor with JS/TS syntax
+highlighting, line numbers, and basic auto-indent. Ace is
+vendored as a script-tag distribution — no JS bundler.
+
+- **`src/ui/static/ace/`**: vendored from `ace-builds@1.43.5`
+  (npm), the `src-min-noconflict` build (UMD-style, no `define`
+  / `require` pollution). Files: `ace.js` (core),
+  `mode-javascript.js`, `mode-typescript.js`,
+  `theme-github_light_default.js`, `theme-github_dark.js`,
+  plus the upstream `LICENSE` (BSD). Workers are NOT vendored
+  — we set `useWorker: false` since async syntax-error
+  checking isn't worth the extra files for our scope.
+- **`src/ui/static/wm-ace.js`**: ~80-line bootstrap. Finds
+  every `<div data-wm-ace="...">` on the page, replaces its
+  content with an Ace instance configured per the data
+  attributes (`data-wm-ace` = mode, `data-wm-ace-readonly`
+  = viewer, `data-wm-ace-sync` = textarea name to mirror).
+  Picks the theme from `prefers-color-scheme` and listens
+  for changes so OS theme toggles flip the editor live.
+- **`src/ui/static_assets.rs`**: enum-match handler grows
+  six new entries (the five Ace files + `wm-ace.js`). The
+  match-arm structure is deliberate — the wildcard route
+  can't be coaxed into serving arbitrary files out of the
+  binary's data segment. Unknown paths under `ace/` still
+  404.
+- **Templates**:
+  - `route_detail.html` swaps `<pre class="source-block">`
+    for `<div class="ace-host ace-host--viewer"
+    data-wm-ace="..." data-wm-ace-readonly>{{ source }}</div>`.
+    The `{% if route.source %}` block is what guards the
+    script-tag include — wasm-uploaded routes never load
+    Ace.
+  - `route_new.html` and `route_source_edit.html` render
+    a `<div class="ace-host" data-wm-ace="..."
+    data-wm-ace-sync="source">` paired with a hidden
+    `<textarea name="source">{{ ... }}</textarea>`.
+    wm-ace.js takes the textarea's value as the initial
+    editor content, hides the textarea via inline style,
+    and re-syncs on every change + on form submit.
+- **CSS**: new `.ace-host` (editor, 24rem) and
+  `.ace-host--viewer` (read-only, 20rem) under
+  `wm.css`. Ace draws its own background; the host
+  border + mono fallback font kick in if the script
+  fails to load.
+- **Why no MCP / CLI affordance change?** This is pure UI
+  polish; the wire surface is unchanged. CLI source
+  editing was already in via `wm routes update
+  --source-file`.
+- **Mode dropdown on `/__ui/routes/new`.** Changing the
+  language `<select>` does NOT live-swap the Ace mode
+  (no in-page bridge). On submit the form ships the
+  selected language and the host compiles accordingly;
+  on a validation re-render the mode picks up from
+  `form.language`. Live-switching the mode in-page is
+  a small follow-up if it becomes annoying.
+- **Tests:**
+  - `tests/ui_smoke.rs::ace_editor_assets_served_with_js_mime` — every vendored script comes back 200 + `application/javascript`; unknown asset under the prefix still 404s.
+  - Existing slice-37/40 assertions updated: `data-wm-ace` replaces `source-block` as the marker the test grep'd for.
+
 ## Source editing on route detail UI (slice 40)
 
 Makes the slice-37 read-only source card editable. New

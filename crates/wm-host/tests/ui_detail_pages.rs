@@ -397,8 +397,8 @@ async fn route_detail_renders_no_source_stored_for_wasm_upload() {
         "empty-state message for wasm route: {body}"
     );
     assert!(
-        !body.contains("source-block"),
-        "no <pre> block for wasm route"
+        !body.contains("data-wm-ace"),
+        "no Ace editor host for wasm route"
     );
 }
 
@@ -461,8 +461,8 @@ async fn route_detail_renders_stored_source_for_source_language_route() {
         .unwrap();
     assert!(body.contains("Handler source"), "header present");
     assert!(
-        body.contains("source-block"),
-        "<pre class=source-block> rendered: {body}"
+        body.contains("data-wm-ace"),
+        "Ace editor host rendered: {body}"
     );
     assert!(
         body.contains("status: 201"),

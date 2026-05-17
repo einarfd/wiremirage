@@ -76,7 +76,7 @@
     <span class="text-muted">{{ route.language }}</span>
   </header>
   {% if route.source %}
-  <pre class="source-block"><code>{{ route.source }}</code></pre>
+  <div class="ace-host ace-host--viewer" data-wm-ace="{{ route.language }}" data-wm-ace-readonly aria-label="Handler source">{{ route.source }}</div>
   <div class="action-row">
     <a class="btn btn--ghost" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/source/edit">Edit source</a>
     <span class="text-muted">
@@ -102,4 +102,13 @@
     <button type="submit" class="btn btn--danger">Delete route</button>
   </form>
 </footer>
+
+{% if route.source %}
+<script src="/__ui/static/ace/ace.js"></script>
+<script src="/__ui/static/ace/mode-javascript.js"></script>
+<script src="/__ui/static/ace/mode-typescript.js"></script>
+<script src="/__ui/static/ace/theme-github_light_default.js"></script>
+<script src="/__ui/static/ace/theme-github_dark.js"></script>
+<script src="/__ui/static/wm-ace.js"></script>
+{% endif %}
 {% endblock %}

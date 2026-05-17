@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–40 landed. The WIT contract is live at
+**Status:** slices 1–41 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -370,7 +370,18 @@ user's edits preserved; success redirects back to the
 detail page. wasm-uploaded routes (`source: None`) 404
 on this page rather than offer a misleading affordance.
 By design (per `mcp-surface.md`) user management is **not**
-in MCP — admins handle it via CLI/UI.
+in MCP — admins handle it via CLI/UI. Slice 41 added Ace
+Editor to the source viewer + editor: `route_detail.html`
+renders read-only, `route_new.html` and
+`route_source_edit.html` give a real editor with line
+numbers, indentation, and JS/TS syntax highlighting. Ace
+is vendored under `src/ui/static/ace/` (core + JS + TS
+modes + light/dark themes) and served through the
+existing `/__ui/static/*` enum-match handler. A small
+`wm-ace.js` bootstrap finds `data-wm-ace` divs, syncs
+into a hidden `<textarea>` for form submit, and flips
+theme on `prefers-color-scheme` changes. No JS bundler;
+script-tag distribution only.
 
 ## Where the design lives
 
