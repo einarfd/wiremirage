@@ -95,6 +95,49 @@ add_route openai-mock-flaky   POST /v1/chat/completions   "$COUNTER_WASM"
 add_route openai-mock-flaky   GET  /v1/models             "$ECHO_WASM"
 add_route pubsub-fixture      POST /webhooks/stripe       "$ECHO_WASM"
 
+# -- TypeScript-source route (optional, needs the sidecar) -----------------
+# `just run-web` is in-memory + no sidecar by default, so this branch
+# is best-effort: probe the sidecar's /health endpoint, skip with a
+# note if it's not up. When it is up, the host can compile inline TS
+# source and the route gets `language: "typescript"` + a `source`
+# field — that's what the slice-37 route-detail source viewer
+# actually renders.
+
+say "TypeScript source route (optional)"
+
+COMPILER_URL="${WM_COMPILER_URL:-http://localhost:9100}"
+
+if curl -fsS -o /dev/null --max-time 2 "$COMPILER_URL/health"; then
+  TS_HANDLER="$(mktemp --suffix=.ts)"
+  trap 'rm -f "$TS_HANDLER"' EXIT
+  cat >"$TS_HANDLER" <<'TS_EOF'
+// Returns a fake session id derived from the request body. Lets the
+// slice-37 source viewer show real handler code on the detail page.
+export function handle(req, _route, _group) {
+  const id = "sess_" + Math.random().toString(36).slice(2, 10);
+  const body = new TextEncoder().encode(
+    JSON.stringify({ id, created_at: new Date().toISOString() }),
+  );
+  return {
+    status: 201,
+    headers: [["content-type", "application/json"]],
+    body,
+  };
+}
+TS_EOF
+  if "${CLI[@]}" routes add \
+    --group stripe-mock --method POST --path /v1/sessions \
+    --source-file "$TS_HANDLER" --language typescript >/dev/null 2>&1; then
+    echo "  + stripe-mock  POST /v1/sessions  (typescript source)"
+  else
+    echo "  · stripe-mock  POST /v1/sessions  (already exists or compile failed)"
+  fi
+else
+  echo "  · skipped — no compiler sidecar reachable at $COMPILER_URL"
+  echo "    (start it with: docker compose up -d compiler-typescript,"
+  echo "     then re-run 'just run-web' with WM_COMPILER_URL set, then re-seed)"
+fi
+
 # -- Drive a bit of traffic ------------------------------------------------
 # So the Live activity / hits_total columns aren't all zeros. Mock
 # traffic doesn't need an Authorization header by design.
@@ -116,6 +159,20 @@ fire POST /v1/customers           5
 fire GET  /v1/charges/ch_abc123   3
 fire POST /v1/chat/completions    8
 fire POST /webhooks/stripe        2
+
+# -- Unmatched + near-miss traffic ----------------------------------------
+# Populates the slice-28 /__ui/unmatched view + the slice-35 "Did you
+# mean…?" near-miss hints. Each request below is intentionally off so
+# the dispatcher writes to the unmatched journal instead of dispatching:
+#  * method mismatch — POST /v1/charges exists but we hit it as GET
+#  * prefix typo     — /v1/refunds exists, /v1/refund is one char off
+#  * fully unmatched — nothing close at all
+
+say "Unmatched traffic (so /__ui/unmatched + near-misses have data)"
+
+fire GET  /v1/charges            2  # method mismatch with the POST route
+fire POST /v1/refund             2  # prefix typo of /v1/refunds
+fire GET  /completely/unknown    1  # no close neighbours
 
 # -- Summary ---------------------------------------------------------------
 
