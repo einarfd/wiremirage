@@ -423,6 +423,53 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Source editing on route detail UI (slice 40)
+
+Makes the slice-37 read-only source card editable. New
+`/__ui/routes/{group}/{n}/source/edit` page renders a
+textarea pre-populated with the route's stored source;
+POST forwards to `api::patch_route_core` which
+recompiles via the sidecar and swaps the artifact in
+place.
+
+- **`api.rs`**: extracted `pub(crate) async fn
+  patch_route_core(state, auth, group, number, body) ->
+  Result<Route, ApiError>` from the inline body of
+  `patch_route`. REST handler is now a thin wrapper that
+  converts the returned `Route` to `RouteResponse`.
+  Same shape as the slice-29 `create_route_core` split.
+  `PatchRouteBody` and its fields become `pub(crate)`.
+- **`ui/mod.rs`**: `route_source_edit_page` (GET) +
+  `route_source_edit_submit` (POST), both owner-or-admin
+  gated. Routes with `source: None` (wasm uploads) 404
+  on both — no source to edit, and recompiling-wasm-from-
+  wasm isn't a thing the sidecar supports. On compile
+  failure, the form re-renders with `SourceEditError {
+  title, message, diagnostics }` and the user's edits
+  intact.
+- **`templates/route_source_edit.html`**: textarea +
+  Save/Cancel + breadcrumb back to route detail. Reuses
+  `.source-editor` from slice 29 and `.card--error`
+  from existing patterns — no new CSS.
+- **`templates/route_detail.html`**: replaces the
+  slice-37 "wm routes update ... --source-file ..."
+  hint with a real "Edit source" button inside the
+  Handler source card's `.action-row`. Button
+  suppressed for wasm-uploaded routes (their card shows
+  the empty-state line instead).
+- **Why no MCP / CLI editing flow?** The CLI already
+  has `wm routes update <slug> --source-file <path>`
+  from slice 15; this slice is purely the UI
+  affordance. MCP `update_route` stays wasm-only per
+  the slice-15 decision.
+- **Tests** (`tests/ui_source_edit.rs`):
+  - `edit_form_renders_with_current_source_for_ts_route`
+  - `edit_form_404s_on_wasm_route_without_stored_source`
+  - `edit_form_403_for_non_owner_non_admin`
+  - `edit_submit_with_new_source_recompiles_and_redirects` — uses the canned-bytes mock compiler trick from `ui_route_new.rs` to exercise the happy path; verifies the updated source renders on the detail page after the redirect.
+  - `edit_submit_without_csrf_is_forbidden`
+  - `edit_submit_without_compiler_reports_compile_failed` — verifies the no-compiler case re-renders with `compile_failed` + the user's edits preserved.
+
 ## MCP near-miss projection on list_recent_unmatched (slice 38)
 
 Backfill of the slice-35 deferral: `list_recent_unmatched`

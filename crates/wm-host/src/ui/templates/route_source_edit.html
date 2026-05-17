@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/groups/{{ route_group_name }}">{{ route_group_name }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}"><code>{{ route_methods }} {{ route_path }}</code></a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">Edit source</span>
+</nav>
+
+<header class="page-header">
+  <h1>Edit handler source</h1>
+  <p class="text-muted">
+    Save recompiles via the compiler sidecar and swaps the artifact in place.
+    Existing per-route kv state is preserved. The route slug stays the same;
+    method and path edits go through <code>wm routes update</code>.
+  </p>
+</header>
+
+{% if error %}
+<section class="card card--error">
+  <header class="card__header"><h2>{{ error.title }}</h2></header>
+  <p>{{ error.message }}</p>
+  {% if error.diagnostics | length > 0 %}
+  <ul>
+    {%- for d in error.diagnostics %}
+    <li><code>{{ d }}</code></li>
+    {%- endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endif %}
+
+<form method="post" action="/__ui/routes/{{ route_group_name }}/{{ route_number }}/source/edit">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+  <section class="card">
+    <header class="card__header">
+      <h2>Handler source</h2>
+      <span class="text-muted">{{ route_language }} · plain textarea · CodeMirror later</span>
+    </header>
+    <textarea name="source" rows="20" class="source-editor" required aria-label="Handler source">{{ source }}</textarea>
+  </section>
+
+  <footer class="page-footer">
+    <button type="submit" class="btn btn--primary">Save</button>
+    <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Cancel</a>
+  </footer>
+</form>
+{% endblock %}

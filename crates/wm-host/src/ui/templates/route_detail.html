@@ -77,10 +77,12 @@
   </header>
   {% if route.source %}
   <pre class="source-block"><code>{{ route.source }}</code></pre>
-  <p class="text-muted">
-    Editing from the UI lands in a later slice. Until then:
-    <code>wm routes update {{ route.group_name }}/{{ route.number }} --source-file ...</code>
-  </p>
+  <div class="action-row">
+    <a class="btn btn--ghost" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/source/edit">Edit source</a>
+    <span class="text-muted">
+      Saving recompiles via the sidecar and swaps the artifact in place.
+    </span>
+  </div>
   {% else %}
   <p class="empty-state">
     No source stored — route was uploaded as pre-compiled <code>{{ route.language }}</code>

@@ -71,6 +71,7 @@ impl UiTemplates {
         tmpl!("group_state.html", "templates/group_state.html");
         tmpl!("route_state.html", "templates/route_state.html");
         tmpl!("route_dry_run.html", "templates/route_dry_run.html");
+        tmpl!("route_source_edit.html", "templates/route_source_edit.html");
         tmpl!("unmatched_list.html", "templates/unmatched_list.html");
         tmpl!("unmatched_detail.html", "templates/unmatched_detail.html");
         tmpl!("not_found.html", "templates/not_found.html");
@@ -132,6 +133,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/__ui/routes/{group}/{number}/dry-run",
             get(route_dry_run_page).post(route_dry_run_submit),
+        )
+        .route(
+            "/__ui/routes/{group}/{number}/source/edit",
+            get(route_source_edit_page).post(route_source_edit_submit),
         )
         .route("/__ui/journal/live", get(live_journal_page))
         .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
@@ -1984,6 +1989,154 @@ fn render_dry_run(
             form => form,
             error => error,
             response => response,
+        },
+    );
+    if had_error {
+        *resp.status_mut() = StatusCode::BAD_REQUEST;
+    }
+    resp
+}
+
+// -- Source editor (slice 40) ------------------------------------------------
+//
+// GET /__ui/routes/{group}/{n}/source/edit renders a textarea pre-
+// populated with the route's stored source. POST submits the new
+// source through `api::patch_route_core`, which recompiles via the
+// sidecar and swaps the artifact atomically. On success we redirect
+// back to the detail page; on failure (most commonly compile_failed
+// with diagnostics) we re-render the form with the error inline and
+// the user's edits intact.
+//
+// Only source-language routes can be edited here. wasm-uploaded
+// routes have `source: None` — the form has no content to start
+// from and the host can't recompile wasm-from-wasm via the sidecar,
+// so we 404 those rather than offer a misleading affordance.
+
+#[derive(Deserialize)]
+struct SourceEditForm {
+    _csrf: String,
+    source: String,
+}
+
+#[derive(Serialize)]
+struct SourceEditError {
+    title: String,
+    message: String,
+    diagnostics: Vec<String>,
+}
+
+async fn route_source_edit_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+) -> Response {
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+    let Some(current) = route.source.clone() else {
+        return ui_not_found(
+            &state,
+            &auth,
+            "Route was uploaded as pre-compiled wasm; nothing to edit here.",
+        );
+    };
+    render_source_edit(&state, &auth, &route, current, None)
+}
+
+async fn route_source_edit_submit(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+    axum::Form(form): axum::Form<SourceEditForm>,
+) -> Response {
+    let _ = form._csrf;
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+    if route.source.is_none() {
+        return ui_not_found(
+            &state,
+            &auth,
+            "Route was uploaded as pre-compiled wasm; nothing to edit here.",
+        );
+    }
+
+    let body = crate::api::PatchRouteBody {
+        methods: None,
+        path: None,
+        language: Some(route.language.clone()),
+        bindings_version: None,
+        compiled_wasm: None,
+        source: Some(form.source.clone()),
+    };
+    match crate::api::patch_route_core(&state, &auth, &group_ref, number, body).await {
+        Ok(_updated) => {
+            let location = format!("/__ui/routes/{group_ref}/{number}");
+            let mut resp = Response::default();
+            *resp.status_mut() = StatusCode::SEE_OTHER;
+            resp.headers_mut().insert(
+                axum::http::header::LOCATION,
+                axum::http::HeaderValue::try_from(location).expect("ascii location"),
+            );
+            resp
+        }
+        Err(api_err) => {
+            let title = match api_err.code() {
+                "compile_failed" => "Compile failed".to_string(),
+                _ => "Couldn't update source".to_string(),
+            };
+            render_source_edit(
+                &state,
+                &auth,
+                &route,
+                form.source,
+                Some(SourceEditError {
+                    title,
+                    message: api_err.message().to_string(),
+                    diagnostics: api_err.diagnostics().to_vec(),
+                }),
+            )
+        }
+    }
+}
+
+fn render_source_edit(
+    state: &AppState,
+    auth: &AuthContext,
+    route: &Route,
+    source: String,
+    error: Option<SourceEditError>,
+) -> Response {
+    let had_error = error.is_some();
+    let mut resp = render(
+        state,
+        "route_source_edit.html",
+        context! {
+            page_title => format!("Edit source: {} {}", route.methods.join(", "), route.path),
+            user => UserBadge::from(auth),
+            route_group_name => &route.group_name,
+            route_number => route.number,
+            route_methods => route.methods.join(", "),
+            route_path => &route.path,
+            route_language => &route.language,
+            source => source,
+            error => error,
         },
     );
     if had_error {

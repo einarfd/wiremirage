@@ -125,17 +125,17 @@ pub(crate) struct CreateRouteBody {
 /// source-or-compiled_wasm, bindings_version) triple is consistent
 /// when the artifact is being replaced.
 #[derive(Debug, Deserialize)]
-struct PatchRouteBody {
-    methods: Option<Vec<String>>,
-    path: Option<String>,
-    language: Option<String>,
-    bindings_version: Option<String>,
+pub(crate) struct PatchRouteBody {
+    pub(crate) methods: Option<Vec<String>>,
+    pub(crate) path: Option<String>,
+    pub(crate) language: Option<String>,
+    pub(crate) bindings_version: Option<String>,
     /// Base64-encoded `.component.wasm` bytes. Pairs with
     /// `language: "wasm"`.
-    compiled_wasm: Option<String>,
+    pub(crate) compiled_wasm: Option<String>,
     /// Source code; forwarded to the compiler sidecar. Pairs with a
     /// source language (e.g. `typescript`).
-    source: Option<String>,
+    pub(crate) source: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -839,12 +839,24 @@ async fn patch_route(
     Path((group, number)): Path<(String, u32)>,
     Json(body): Json<PatchRouteBody>,
 ) -> Result<Json<RouteResponse>, ApiError> {
+    let updated = patch_route_core(&state, &auth, &group, number, body).await?;
+    Ok(Json(RouteResponse::from(&updated)))
+}
+
+/// Shared PATCH pipeline used by both the REST handler above and the
+/// `/__ui/routes/{g}/{n}/source/edit` page handler. Returns the updated
+/// `Route` so callers can decide their own response shape (JSON for
+/// REST, redirect for UI).
+pub(crate) async fn patch_route_core(
+    state: &AppState,
+    auth: &AuthContext,
+    group: &str,
+    number: u32,
+    body: PatchRouteBody,
+) -> Result<crate::registry::Route, ApiError> {
     // Existence + ownership gate. Mirrors the DELETE handler — owner-
     // or-admin per ADR-0014.
-    let existing = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
+    let existing = state.routes().registry().get_route_by_slug(group, number)?;
     if existing.owner_id != auth.user_id && !auth.is_admin {
         return Err(ApiError::forbidden(
             "only the route's owner or an admin may update it",
@@ -947,7 +959,7 @@ async fn patch_route(
     };
 
     let updated = state.routes().registry().update_route(
-        &group,
+        group,
         number,
         PatchRoute {
             methods: body.methods,
@@ -959,7 +971,7 @@ async fn patch_route(
         },
     )?;
     state.routes().refresh_after_update(updated.clone());
-    Ok(Json(RouteResponse::from(&updated)))
+    Ok(updated)
 }
 
 async fn delete_route(

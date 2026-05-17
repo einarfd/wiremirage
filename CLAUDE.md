@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–38 landed. The WIT contract is live at
+**Status:** slices 1–40 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -359,8 +359,18 @@ the slim `near_misses` list on every `UnmatchedSummary`
 entry, so agents see the "Did you mean…?" candidates
 without a second REST hop. Empty when no neighbour matched
 (present as `[]`, not omitted, so callers can rely on the
-field shape). By design (per `mcp-surface.md`) user
-management is **not** in MCP — admins handle it via CLI/UI.
+field shape). Slice 40 added source editing on the
+route-detail UI: a new `/__ui/routes/{group}/{n}/source/edit`
+page renders a textarea pre-populated with the stored
+source; POST forwards to `api::patch_route_core`
+(extracted from the REST handler), which recompiles via
+the sidecar and swaps the artifact in place. Compile
+errors re-render the form with diagnostics and the
+user's edits preserved; success redirects back to the
+detail page. wasm-uploaded routes (`source: None`) 404
+on this page rather than offer a misleading affordance.
+By design (per `mcp-surface.md`) user management is **not**
+in MCP — admins handle it via CLI/UI.
 
 ## Where the design lives
 
