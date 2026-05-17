@@ -1381,10 +1381,17 @@ end-to-end before the detail pages land.
   pages to a single `login.html` render with `local_enabled`,
   `next`, `error` in the context. Honours `?next=` on GET so the
   hidden form input round-trips through the redirect flow.
-- **`just run-web`** convenience target: in-memory storage,
+- **`just run-web`** convenience target: brings up the realistic
+  stack — Valkey + TypeScript sidecar via `docker compose up -d`,
+  waits for both to be reachable, then runs the host locally with
+  `WM_STORAGE=redis://localhost:6379`,
+  `WM_COMPILER_URL=http://localhost:9100`,
   `WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword'`, fixed
-  `SESSION_SECRET`, then `cargo run -p wm-host`. Visit
-  `http://localhost:8080/__ui/` to log in.
+  `SESSION_SECRET`, then `cargo run -p wm-host`. Data persists
+  across host restarts in the Valkey volume (`docker compose down -v`
+  to wipe). Visit `http://localhost:8080/__ui/` and log in.
+  `just run-web-fast` is the in-memory, no-sidecar shortcut for
+  when you don't need persistence or TS compilation.
 - **Stubs:** `placeholder.html` is shared by every "coming in a
   later slice" route. The stub handler names the equivalent API
   path so the user can drop to `wm`/`curl` until the real page

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Seed a freshly-booted `just run-web` host with a small set of
-# groups + routes + traffic so the UI has something to render.
-# Re-runs are idempotent: groups already created get skipped.
+# Seed a running host with a small set of groups + routes +
+# traffic so the UI has something to render. Re-runs are
+# idempotent: groups/routes already created get skipped.
 #
 # Prereqs: a host reachable at $WM_HOST (default localhost:8080)
-# booted with WM_BOOTSTRAP_TOKEN=wmt_dev_local. The bundled
-# `just run-web` target uses exactly those values.
+# booted with WM_BOOTSTRAP_TOKEN=wmt_dev_local. Both `just run-web`
+# and `just run-web-fast` use exactly those values.
 #
-# Storage is in-memory under `just run-web`, so the seeded data
-# disappears when the host is stopped. Re-run this script after
-# a restart to get back to the same starting point.
+# Persistence depends on which run-web target you used:
+#   * `just run-web`        — Valkey-backed, data persists across
+#                             host restarts; this script's idempotent
+#                             re-runs catch up after a restart.
+#   * `just run-web-fast`   — in-memory, data wipes on host stop;
+#                             re-run this script after every restart.
 
 set -euo pipefail
 

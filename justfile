@@ -62,12 +62,41 @@ build:
 run-host:
     cargo run -p wm-host
 
-# Run wm-host with local auth + sessions configured for browser
-# dogfood. After it starts, open http://localhost:8080/__ui/ in a
-# browser, log in as `admin` / `devpassword`, and click around. The
-# `WM_LOCAL_AUTH` setting is for local dev only — never use these
-# credentials on a publicly-reachable host (see ADR-0018).
+# Run wm-host with the full realistic stack: Valkey (Docker) for
+# persistence, the TypeScript compiler sidecar (Docker) for source-
+# language route compiles, and the host locally via cargo with local
+# auth + browser sessions. After it starts, open
+# http://localhost:8080/__ui/ and log in as `admin` / `devpassword`.
+# Data persists across restarts in the Valkey volume —
+# `docker compose down -v` to wipe. The `WM_LOCAL_AUTH` setting is
+# for local dev only — never use these credentials on a publicly-
+# reachable host (see ADR-0018).
 run-web:
+    #!/usr/bin/env bash
+    set -e
+    docker compose up -d valkey compiler-typescript
+    echo "Waiting for Valkey + sidecar to be reachable ..."
+    until docker compose exec -T valkey valkey-cli ping >/dev/null 2>&1; do
+      sleep 0.2
+    done
+    until curl -fsS -o /dev/null --max-time 1 http://localhost:9100/health; do
+      sleep 0.2
+    done
+    echo "Deps ready. Starting host ..."
+    WM_STORAGE=redis://localhost:6379 \
+      WM_COMPILER_URL=http://localhost:9100 \
+      WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+      WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
+      SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
+      cargo run -p wm-host
+
+# Same as `run-web` but with in-memory storage and no compiler
+# sidecar. Faster to start; data wipes on host stop; source-language
+# routes can't compile (pre-compiled `--wasm-file` uploads still
+# work). Use this when iterating on host code where TS compilation
+# + persistence don't matter. UI dogfooding generally wants
+# `run-web` instead.
+run-web-fast:
     WM_STORAGE=memory \
       WM_BOOTSTRAP_TOKEN=wmt_dev_local \
       WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
@@ -75,9 +104,11 @@ run-web:
       cargo run -p wm-host
 
 # Pour a handful of groups + routes + traffic into a running
-# `just run-web` host so the UI has something to render. Wipes
-# happen at host stop (in-memory storage), so re-run this after
-# every restart.
+# `just run-web` (or `run-web-fast`) host so the UI has something
+# to render. Under `run-web`, data persists in Valkey across host
+# restarts — re-running this script is idempotent (already-created
+# groups/routes are detected and skipped). Under `run-web-fast`,
+# everything wipes on host stop; re-run after every restart.
 seed-dev:
     ./scripts/seed-dev.sh
 
