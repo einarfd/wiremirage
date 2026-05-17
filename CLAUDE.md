@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–36 landed. The WIT contract is live at
+**Status:** slices 1–37 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -344,7 +344,16 @@ same as `show_route_source`; the CLI as
 source is never inlined on list/get responses — only the
 dedicated endpoint returns it. Wasm swaps via PATCH clear
 any stored source; source-language swaps overwrite it.
-Sets up the route-source viewer slice on the UI. By design
+Sets up the route-source viewer slice on the UI. Slice 37
+landed that viewer: `/__ui/routes/{group}/{n}` now renders a
+"Handler source" card just above the footer. Source-language
+routes show the stored source in a read-only
+`<pre class="source-block">` block; wasm-uploaded routes show
+"No source stored — route was uploaded as pre-compiled
+`{language}` ({size} component)." Replaces the slice-23
+placeholder paragraph. No new endpoint — the source already
+travels on the Route record after slice 36, and the detail
+page is already owner-or-admin-gated. By design
 (per `mcp-surface.md`) user management is **not** in MCP —
 admins handle it via CLI/UI.
 

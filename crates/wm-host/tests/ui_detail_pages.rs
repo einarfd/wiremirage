@@ -371,6 +371,109 @@ async fn route_detail_lists_recent_journal_entries_after_traffic() {
     assert!(body.contains("3 hits") || body.contains("3 hit"));
 }
 
+// -- Slice 37: source viewer ------------------------------------------------
+
+#[tokio::test]
+async fn route_detail_renders_no_source_stored_for_wasm_upload() {
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+
+    let body = client
+        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("Handler source"),
+        "Handler source card header: {body}"
+    );
+    assert!(
+        body.contains("No source stored"),
+        "empty-state message for wasm route: {body}"
+    );
+    assert!(
+        !body.contains("source-block"),
+        "no <pre> block for wasm route"
+    );
+}
+
+#[tokio::test]
+async fn route_detail_renders_stored_source_for_source_language_route() {
+    // Build a fresh harness so we can register a route with source
+    // stored — the shared start_seeded() only has wasm uploads.
+    let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    let admin = auth.create_user("admin", true).expect("admin");
+
+    let registry = Arc::new(Registry::new(storage.clone()));
+    registry
+        .create_group(NewGroup {
+            name: "ts-mock".into(),
+            owner_id: admin.id.clone(),
+            ttl_seconds: Some(3600),
+            sliding_ttl: Some(true),
+        })
+        .expect("group");
+    let ts_source = "export function handle(req, _r, _g) {\n  return { status: 201, headers: [], body: new Uint8Array() };\n}";
+    registry
+        .create_route(NewRoute {
+            group: Some("ts-mock".into()),
+            methods: vec!["POST".into()],
+            path: "/v1/widgets".into(),
+            language: "typescript".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: echo_wasm(),
+            source: Some(ts_source.into()),
+            owner_id: admin.id.clone(),
+        })
+        .expect("route");
+
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    let journal = Journal::new(storage.clone());
+    let state = AppState::new(runtime, routes, auth, journal)
+        .with_local_auth(LocalAuth::parse("admin:devpassword:admin").expect("auth"))
+        .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
+    let app = router(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let h = Harness { addr, server };
+
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(&h, "/__ui/routes/ts-mock/1"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("Handler source"), "header present");
+    assert!(
+        body.contains("source-block"),
+        "<pre class=source-block> rendered: {body}"
+    );
+    assert!(
+        body.contains("status: 201"),
+        "source content rendered: {body}"
+    );
+    assert!(
+        !body.contains("No source stored"),
+        "empty-state suppressed when source present"
+    );
+}
+
 // -- Bare-`/` redirect ------------------------------------------------------
 
 #[tokio::test]

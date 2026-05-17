@@ -423,6 +423,40 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Source viewer on route detail UI (slice 37)
+
+`/__ui/routes/{group}/{n}` now renders a "Handler source" card
+just above the footer. For source-language routes (where slice
+36's `route.source` is `Some`) the card shows the stored source
+in a read-only `<pre class="source-block"><code>` block. For
+pre-compiled wasm uploads (where source is `None`) the card
+shows an empty-state line: "No source stored — route was
+uploaded as pre-compiled `wasm` (N KiB component)."
+
+- **`ui/mod.rs`**: `RouteDetailRoute` gains
+  `source: Option<String>`, populated from `route.source.clone()`
+  in the handler. No new endpoint — the source travels with the
+  route record we already fetched.
+- **`templates/route_detail.html`**: the slice-23 placeholder
+  paragraph ("Source viewing + editing from the UI land in
+  later slices.") is replaced by the new card. The
+  `wm routes update ... --source-file ...` hint stays under the
+  source block as a temporary CLI fallback for the still-deferred
+  source editor.
+- **`static/wm.css`**: new `.source-block` class — mono font,
+  bordered, horizontally scrollable, `max-height: 32rem` so a
+  long handler doesn't push the rest of the page off-screen.
+  Differs from `.source-editor` (which is for `<textarea>`s on
+  the create/dry-run forms).
+- **Why not a separate GET subroute for the UI?** The source is
+  already on the `Route` record after slice 36, and the detail
+  page is already owner-or-admin-gated, so wedging in a second
+  fetch is pure cost. The dedicated REST/MCP `/source`
+  endpoints stay — they're the contract for non-UI callers.
+- **Tests:**
+  - `tests/ui_detail_pages.rs::route_detail_renders_no_source_stored_for_wasm_upload` — existing wasm-upload route shows the empty-state line and no `<pre class=source-block>`.
+  - `tests/ui_detail_pages.rs::route_detail_renders_stored_source_for_source_language_route` — fresh harness registers a TS route with source; detail page renders the source inline.
+
 ## Source storage on the registry (slice 36)
 
 The `Route` record gains an `Option<String> source` alongside

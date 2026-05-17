@@ -70,10 +70,24 @@
   {% endif %}
 </section>
 
-<p class="text-muted">
-  Source viewing + editing from the UI land in later slices.
-  Until then: <code>wm routes update {{ route.group_name }} {{ route.number }} ...</code> to edit handler source.
-</p>
+<section class="card">
+  <header class="card__header">
+    <h2>Handler source</h2>
+    <span class="text-muted">{{ route.language }}</span>
+  </header>
+  {% if route.source %}
+  <pre class="source-block"><code>{{ route.source }}</code></pre>
+  <p class="text-muted">
+    Editing from the UI lands in a later slice. Until then:
+    <code>wm routes update {{ route.group_name }}/{{ route.number }} --source-file ...</code>
+  </p>
+  {% else %}
+  <p class="empty-state">
+    No source stored — route was uploaded as pre-compiled <code>{{ route.language }}</code>
+    ({{ route.component_size_human }} component).
+  </p>
+  {% endif %}
+</section>
 
 <footer class="page-footer">
   <a class="link" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/state">Route state</a>

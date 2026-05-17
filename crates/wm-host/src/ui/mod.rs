@@ -1087,6 +1087,7 @@ async fn route_detail_page(
         hits_total: route.hits_total,
         last_hit_at: route.last_hit_at.map(|t| t.to_rfc3339()),
         created_at: route.created_at.to_rfc3339(),
+        source: route.source.clone(),
     };
 
     render(
@@ -1116,6 +1117,7 @@ struct RouteDetailRoute {
     hits_total: u64,
     last_hit_at: Option<String>,
     created_at: String,
+    source: Option<String>,
 }
 
 #[derive(Serialize)]
