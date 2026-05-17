@@ -475,12 +475,15 @@ vendored as a script-tag distribution — no JS bundler.
   editing was already in via `wm routes update
   --source-file`.
 - **Mode dropdown on `/__ui/routes/new`.** Changing the
-  language `<select>` does NOT live-swap the Ace mode
-  (no in-page bridge). On submit the form ships the
-  selected language and the host compiles accordingly;
-  on a validation re-render the mode picks up from
-  `form.language`. Live-switching the mode in-page is
-  a small follow-up if it becomes annoying.
+  language `<select>` live-swaps the Ace mode via a tiny
+  `window.wmAce.setMode(host, mode)` helper exposed by
+  `wm-ace.js`. The host div is stashed on a property
+  (`div._wmAceEditor`) at attach time so callers don't
+  need to grovel through Ace internals. An inline
+  script at the bottom of `route_new.html` wires the
+  select's `change` event to that helper. New callers
+  should add named methods to `window.wmAce` rather
+  than reach into `_wmAceEditor` directly.
 - **Tests:**
   - `tests/ui_smoke.rs::ace_editor_assets_served_with_js_mime` — every vendored script comes back 200 + `application/javascript`; unknown asset under the prefix still 404s.
   - Existing slice-37/40 assertions updated: `data-wm-ace` replaces `source-block` as the marker the test grep'd for.

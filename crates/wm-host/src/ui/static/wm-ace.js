@@ -60,6 +60,11 @@
     editor.setTheme(themeFor());
     editor.setValue(initial, -1); // -1 = move cursor to start
 
+    // Stash the editor on the div so the live mode-switch helper and
+    // any future callers can fish it out without grovelling through
+    // Ace internals.
+    div._wmAceEditor = editor;
+
     if (textarea && !readOnly) {
       textarea.style.display = "none";
       editor.session.on("change", () => {
@@ -82,6 +87,17 @@
     const t = themeFor();
     for (const e of editors) e.setTheme(t);
   }
+
+  // Public surface for inline page scripts that need to drive editor
+  // state imperatively — currently just route_new.html's language
+  // dropdown. Kept tiny on purpose; new callers should add a dedicated
+  // method here rather than reach into `_wmAceEditor` directly.
+  window.wmAce = {
+    setMode(host, mode) {
+      const ed = host && host._wmAceEditor;
+      if (ed) ed.session.setMode(`ace/mode/${mode}`);
+    },
+  };
 
   function init() {
     for (const div of document.querySelectorAll("[data-wm-ace]")) {

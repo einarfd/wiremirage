@@ -83,4 +83,19 @@
 <script src="/__ui/static/ace/theme-github_light_default.js"></script>
 <script src="/__ui/static/ace/theme-github_dark.js"></script>
 <script src="/__ui/static/wm-ace.js"></script>
+<script>
+  // Slice 41 follow-up: keep the editor's syntax mode in sync with
+  // the language dropdown so the highlighting matches what the form
+  // will submit. The host div is registered by wm-ace.js on
+  // DOMContentLoaded; this listener fires later (on user change), so
+  // _wmAceEditor is guaranteed to exist by then.
+  document.addEventListener("DOMContentLoaded", () => {
+    const sel = document.querySelector("select[name='language']");
+    const host = document.querySelector("[data-wm-ace]");
+    if (!sel || !host) return;
+    sel.addEventListener("change", () => {
+      window.wmAce.setMode(host, sel.value);
+    });
+  });
+</script>
 {% endblock %}
