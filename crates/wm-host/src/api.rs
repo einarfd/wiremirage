@@ -1144,6 +1144,7 @@ struct TokenRecord {
     expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_used_at: Option<String>,
+    scopes: Vec<String>,
 }
 
 impl From<&Token> for TokenRecord {
@@ -1155,6 +1156,7 @@ impl From<&Token> for TokenRecord {
             created_at: t.created_at.to_rfc3339(),
             expires_at: t.expires_at.map(|ts| ts.to_rfc3339()),
             last_used_at: t.last_used_at.map(|ts| ts.to_rfc3339()),
+            scopes: t.scopes.clone(),
         }
     }
 }

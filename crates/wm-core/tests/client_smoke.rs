@@ -170,7 +170,8 @@ async fn capture_tokens_create(
                 "owner_id": "01HOWNER",
                 "created_at": "2026-05-01T18:00:00+00:00",
                 "expires_at": null,
-                "last_used_at": null
+                "last_used_at": null,
+                "scopes": ["*"]
             }
         })),
     )

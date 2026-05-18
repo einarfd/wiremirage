@@ -493,6 +493,10 @@ pub struct TokenRecord {
     pub created_at: String,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
+    /// Scopes granted to this token. v1 always returns `["*"]` (full
+    /// access of the owner); the field is reserved per ADR-0012 so
+    /// v0.2 can wire up enforcement without a data-shape change.
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

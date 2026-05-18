@@ -58,6 +58,22 @@ pub struct Token {
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Scopes granted to this token. v1 always issues `["*"]` (full
+    /// access of the owner); the field is reserved per ADR-0012 so
+    /// v0.2 can wire up enforcement without a data-shape change.
+    pub scopes: Vec<String>,
+}
+
+/// The scope value granted to every v1 token. Once scope enforcement
+/// lands (v0.2), token creation will accept a narrower set; until then
+/// `["*"]` means "every permission the owner has."
+pub const FULL_ACCESS_SCOPES: &[&str] = &["*"];
+
+fn default_scopes() -> Vec<String> {
+    FULL_ACCESS_SCOPES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 /// Which credential satisfied the auth check. Lets downstream
@@ -336,6 +352,7 @@ impl Auth {
             created_at: now,
             last_used_at: None,
             expires_at: ttl_seconds.map(|s| now + Duration::seconds(s as i64)),
+            scopes: default_scopes(),
         };
         let key = format!("token:{}", token.id);
         bucket.hash_set(&key, "id", token.id.as_bytes().to_vec())?;
@@ -350,6 +367,7 @@ impl Auth {
         if let Some(ts) = token.expires_at {
             bucket.hash_set(&key, "expires_at", ts.to_rfc3339().into_bytes())?;
         }
+        bucket.hash_set(&key, "scopes", token.scopes.join(" ").into_bytes())?;
 
         bucket.set(
             &format!("token:by-hash:{hash}"),
@@ -496,6 +514,7 @@ impl Auth {
             "created_at",
             "expires_at",
             "last_used_at",
+            "scopes",
         ] {
             bucket.hash_delete(&format!("token:{}", token.id), field)?;
         }
@@ -586,6 +605,10 @@ fn decode_token(fields: &std::collections::HashMap<String, Vec<u8>>) -> Result<T
             Some(parse_ts(s)?)
         }
     };
+    let scopes: Vec<String> = utf8(fields, "scopes")?
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
     Ok(Token {
         id: utf8(fields, "id")?,
         name: utf8(fields, "name")?,
@@ -594,6 +617,7 @@ fn decode_token(fields: &std::collections::HashMap<String, Vec<u8>>) -> Result<T
         created_at: parse_ts(&utf8(fields, "created_at")?)?,
         last_used_at,
         expires_at,
+        scopes,
     })
 }
 
@@ -712,6 +736,7 @@ mod tests {
             created_at: Utc::now() - Duration::hours(2),
             last_used_at: None,
             expires_at: Some(Utc::now() - Duration::hours(1)),
+            scopes: default_scopes(),
         };
         // Manually write since create_token won't accept past expires_at.
         let key = format!("token:{}", token.id);
@@ -740,6 +765,9 @@ mod tests {
                 "expires_at",
                 token.expires_at.unwrap().to_rfc3339().into_bytes(),
             )
+            .unwrap();
+        bucket
+            .hash_set(&key, "scopes", token.scopes.join(" ").into_bytes())
             .unwrap();
         bucket
             .set(
@@ -908,6 +936,18 @@ mod tests {
         // All of the user's tokens stop authenticating.
         assert!(auth.authenticate("wmt_alice").unwrap().is_none());
         assert!(auth.authenticate(&t1_plain).unwrap().is_none());
+    }
+
+    #[test]
+    fn new_token_gets_full_access_scopes() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        let user = auth.get_user_by_name("alice").unwrap().unwrap();
+        let (token, _) = auth.create_token(&user.id, "ci", None).unwrap();
+        assert_eq!(token.scopes, vec!["*".to_string()]);
+        // Round-trip through storage preserves the value.
+        let fetched = auth.get_token_by_name(&user.id, "ci").unwrap().unwrap();
+        assert_eq!(fetched.scopes, vec!["*".to_string()]);
     }
 
     #[test]
