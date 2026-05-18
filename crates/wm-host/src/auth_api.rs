@@ -27,15 +27,20 @@ use crate::AppState;
 use crate::local_auth::VerifyError;
 use crate::session::COOKIE_NAME;
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/__auth/login", get(login_page))
         .route("/__auth/login/password", post(password_login))
         .route("/__auth/logout", post(logout))
         // Every form-bearing endpoint in this router is `/__auth/*`,
         // so we can blanket-CSRF the lot. The login GET mints the
-        // cookie; the POSTs (login + logout) validate it.
-        .layer(axum::middleware::from_fn(crate::ui::csrf::csrf_middleware))
+        // cookie; the POSTs (login + logout) validate it. The
+        // middleware reads `state.secure_cookies()` to decide
+        // whether to append `Secure` on the cookie it mints.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::ui::csrf::csrf_middleware,
+        ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,13 +91,14 @@ async fn password_login(
     headers: HeaderMap,
     Form(form): Form<PasswordLoginForm>,
 ) -> Response {
-    // Resolve the caller's IP. We don't wire `ConnectInfo` into the
-    // server (would require updating every test harness), so we lean
-    // on `X-Forwarded-For` when a reverse proxy is in front and fall
-    // back to a loopback placeholder otherwise. The throttle still
-    // works in both cases — direct local-network deployments share
-    // one bucket per actually-distinct external IP.
-    let ip = client_ip(&headers);
+    // Resolve the caller's IP. Slice 44: only honor `X-Forwarded-For`
+    // when `WM_TRUST_FORWARDED_HEADERS=1`. The default (off) ignores
+    // the header and uses a loopback placeholder, collapsing every
+    // caller into one throttle bucket — fine for trusted-network
+    // deployments where the operator owns every consumer, and
+    // mandatory for any deployment where the host is directly
+    // reachable since anyone can spoof the header.
+    let ip = client_ip(&headers, state.trust_forwarded_headers());
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -175,8 +181,12 @@ async fn password_login(
     let mut redirect: Response = Redirect::to(next).into_response();
     redirect.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&format_set_cookie(&cookie_value, sessions.ttl_seconds()))
-            .expect("ascii cookie header"),
+        HeaderValue::from_str(&format_set_cookie(
+            &cookie_value,
+            sessions.ttl_seconds(),
+            state.secure_cookies(),
+        ))
+        .expect("ascii cookie header"),
     );
     redirect
 }
@@ -191,9 +201,14 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         let _ = sessions.delete_by_cookie(&cookie);
     }
     let mut resp = StatusCode::NO_CONTENT.into_response();
+    // The clear-cookie response carries the same attributes as the
+    // mint-cookie response so browsers don't keep a `Secure` cookie
+    // alive thinking it's a different cookie. `Max-Age=0` is what
+    // triggers the delete.
+    let clear = format_clear_cookie(state.secure_cookies());
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static("wm_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+        HeaderValue::from_str(&clear).expect("ascii cookie header"),
     );
     resp
 }
@@ -217,13 +232,13 @@ fn parse_session_cookie(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// Resolve the client's IP. Trusts `X-Forwarded-For` when a reverse
-/// proxy is in front; falls back to a loopback placeholder otherwise.
-/// The throttle keys to this value — the placeholder collapses many
-/// direct-connection callers into a single bucket, which is fine for
-/// the threat model (operator running on localhost).
-fn client_ip(headers: &HeaderMap) -> IpAddr {
-    if let Some(v) = headers.get("x-forwarded-for")
+/// Resolve the client's IP. When `trust_forwarded` is true, honor the
+/// first hop in `X-Forwarded-For`; when false, ignore the header
+/// (which can be set by any caller) and return the loopback
+/// placeholder so the throttle still has *something* to key on.
+fn client_ip(headers: &HeaderMap, trust_forwarded: bool) -> IpAddr {
+    if trust_forwarded
+        && let Some(v) = headers.get("x-forwarded-for")
         && let Ok(raw) = v.to_str()
     {
         // `X-Forwarded-For: client, proxy1, proxy2` — the first hop
@@ -237,10 +252,17 @@ fn client_ip(headers: &HeaderMap) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
 }
 
-fn format_set_cookie(value: &str, max_age: u64) -> String {
-    // `Secure` is conditional in the spec; we omit it here because
-    // bare-HTTP deployments are explicitly supported (per "Open
-    // questions" in auth-and-authz.md). Operators behind TLS can
-    // proxy through a reverse proxy that rewrites the header.
-    format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}",)
+fn format_set_cookie(value: &str, max_age: u64, secure: bool) -> String {
+    // `Secure` is conditional: a plain-HTTP dev deployment would
+    // never get the cookie back if we set it, so we lean on an
+    // operator flag (`WM_SECURE_COOKIES`) rather than emitting it
+    // unconditionally. Deployments behind a TLS edge MUST set the
+    // flag — see the production-hardening section in README.
+    let suffix = if secure { "; Secure" } else { "" };
+    format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{suffix}")
+}
+
+fn format_clear_cookie(secure: bool) -> String {
+    let suffix = if secure { "; Secure" } else { "" };
+    format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{suffix}")
 }

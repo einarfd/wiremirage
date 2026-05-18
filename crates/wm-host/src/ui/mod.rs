@@ -153,7 +153,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/__ui/settings", get(stub_settings))
         .route("/__ui/admin/health", get(stub_admin_health))
-        .layer(middleware::from_fn(csrf::csrf_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            csrf::csrf_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_redirect::require_session,

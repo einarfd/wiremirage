@@ -390,3 +390,182 @@ async fn bearer_token_still_works_when_session_store_is_configured() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
 }
+
+// -- Slice 44: secure cookies + trusted-proxy flag ---------------------------
+
+/// Build a harness with the slice-44 hardening flags set explicitly.
+/// Mirrors `start()` but lets each test pick its own posture.
+async fn start_with_hardening(
+    local_auth_value: &str,
+    secure_cookies: bool,
+    trust_forwarded: bool,
+) -> Harness {
+    let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    let journal = Journal::new(storage.clone());
+
+    let state = AppState::new(runtime, routes, auth, journal)
+        .with_local_auth(LocalAuth::parse(local_auth_value).expect("parse local auth"))
+        .with_sessions(SessionStore::new(storage, SECRET).expect("session store"))
+        .with_secure_cookies(secure_cookies)
+        .with_trust_forwarded_headers(trust_forwarded);
+    let app = router(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr").to_string();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum::serve");
+    });
+    Harness { addr, server }
+}
+
+/// Collect every `Set-Cookie` header value as a single concatenated
+/// string. Saves writing the get_all loop in each test.
+fn set_cookie_blob(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn cookies_have_no_secure_flag_by_default() {
+    let h = start("alice:hunter2").await;
+    let client = no_redirect_client();
+    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    assert_eq!(resp.status().as_u16(), 303, "login redirects");
+    let cookies = set_cookie_blob(&resp);
+    assert!(cookies.contains("wm_session="), "session cookie present");
+    assert!(
+        !cookies.contains("Secure"),
+        "Secure absent by default (dev workflows over HTTP): {cookies}",
+    );
+}
+
+#[tokio::test]
+async fn cookies_carry_secure_flag_when_enabled() {
+    let h = start_with_hardening("alice:hunter2", true, false).await;
+    let client = no_redirect_client();
+
+    // GET the login page first so the CSRF cookie is minted with the
+    // hardening flags in scope.
+    let get = client
+        .get(url(&h, "/__auth/login"))
+        .send()
+        .await
+        .expect("get login");
+    let csrf_cookies = set_cookie_blob(&get);
+    assert!(
+        csrf_cookies.contains("wm_csrf=") && csrf_cookies.contains("Secure"),
+        "CSRF cookie has Secure when WM_SECURE_COOKIES=1: {csrf_cookies}",
+    );
+
+    // Then complete the login and check the session cookie too.
+    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let session_cookies = set_cookie_blob(&resp);
+    assert!(
+        session_cookies.contains("wm_session=") && session_cookies.contains("Secure"),
+        "session cookie has Secure when WM_SECURE_COOKIES=1: {session_cookies}",
+    );
+}
+
+#[tokio::test]
+async fn forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback() {
+    // Fire 5 failed logins from "different" XFF IPs. With XFF-trust
+    // OFF (default), they all share the loopback throttle bucket, so
+    // the sixth attempt — from yet another XFF IP — is locked out.
+    let h = start("alice:hunter2").await;
+    let client = no_redirect_client();
+    for i in 1..=5 {
+        // Burn the CSRF cookie minted per request so each POST has
+        // matching cookie + form value; this is what `post_login`
+        // already does internally.
+        let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+        let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
+        let csrf_value =
+            extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
+        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/__ui/",);
+        let _ = client
+            .post(url(&h, "/__auth/login/password"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("wm_csrf={csrf_cookie}"))
+            .header("x-forwarded-for", format!("203.0.113.{i}"))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+    }
+    // Sixth attempt from yet another claimed IP. If XFF were trusted
+    // we'd see 401 (fresh IP, untouched throttle). With XFF ignored,
+    // the loopback bucket is already at the lockout threshold so we
+    // see 429.
+    let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
+    let csrf_value = extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
+    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/__ui/");
+    let resp = client
+        .post(url(&h, "/__auth/login/password"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
+        .header("x-forwarded-for", "198.51.100.42")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        429,
+        "fresh XFF IP still locked because XFF isn't trusted"
+    );
+}
+
+#[tokio::test]
+async fn forwarded_for_honored_when_explicitly_trusted() {
+    let h = start_with_hardening("alice:hunter2", false, true).await;
+    let client = no_redirect_client();
+    // Five failures from one XFF IP locks THAT IP only.
+    for i in 1..=5 {
+        let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+        let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
+        let csrf_value =
+            extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
+        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/__ui/",);
+        let _ = client
+            .post(url(&h, "/__auth/login/password"))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("wm_csrf={csrf_cookie}"))
+            .header("x-forwarded-for", "203.0.113.5")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+    }
+    // A different XFF IP, with the right password, succeeds (303)
+    // because each XFF IP has its own throttle bucket now.
+    let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
+    let csrf_value = extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
+    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/__ui/");
+    let resp = client
+        .post(url(&h, "/__auth/login/password"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
+        .header("x-forwarded-for", "198.51.100.42")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        303,
+        "fresh XFF IP not locked because the throttle keyed on the previous one"
+    );
+}

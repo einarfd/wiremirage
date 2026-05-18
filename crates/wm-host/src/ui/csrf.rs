@@ -22,13 +22,15 @@
 //! Wired up in `ui::router` and `auth_api::router`.
 
 use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use rand::RngCore;
+
+use crate::AppState;
 
 pub const CSRF_COOKIE_NAME: &str = "wm_csrf";
 
@@ -94,16 +96,19 @@ fn pick_csrf_from_form(body: &[u8]) -> Option<String> {
     None
 }
 
-fn build_set_cookie(value: &str) -> String {
+fn build_set_cookie(value: &str, secure: bool) -> String {
     // 24 h matches the session cookie's max age (slice 20). HttpOnly
     // is fine for double-submit — the form value is server-injected
     // so no JS needs to read the cookie. SameSite=Strict is the real
     // defense; with it, the cookie isn't carried on any cross-site
-    // request, so forged POSTs fail the cookie-presence check.
-    format!("{CSRF_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400")
+    // request, so forged POSTs fail the cookie-presence check. The
+    // `Secure` flag is gated on `WM_SECURE_COOKIES` (slice 44) so
+    // dev workflows over plain HTTP don't lose the cookie.
+    let suffix = if secure { "; Secure" } else { "" };
+    format!("{CSRF_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400{suffix}")
 }
 
-pub async fn csrf_middleware(req: Request, next: Next) -> Response {
+pub async fn csrf_middleware(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let (parts, body) = req.into_parts();
 
@@ -156,7 +161,10 @@ pub async fn csrf_middleware(req: Request, next: Next) -> Response {
         .scope(scope_value, async move { next.run(req).await })
         .await;
     if needs_set_cookie
-        && let Ok(header_val) = HeaderValue::from_str(&build_set_cookie(&token_for_set_cookie))
+        && let Ok(header_val) = HeaderValue::from_str(&build_set_cookie(
+            &token_for_set_cookie,
+            state.secure_cookies(),
+        ))
     {
         response
             .headers_mut()

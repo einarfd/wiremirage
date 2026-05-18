@@ -64,6 +64,19 @@ pub struct AppState {
     /// isn't held open by an idle EventSource on a browser tab.
     /// `None` in tests that don't bother wiring it up.
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    /// When true, append `Secure` to session + CSRF cookies. Set via
+    /// `WM_SECURE_COOKIES=1` in deployments behind an HTTPS edge
+    /// (Caddy, an ALB, etc.). Default off so dev workflows over
+    /// plain HTTP keep working — browsers drop `Secure` cookies on
+    /// non-TLS connections, which would break login.
+    secure_cookies: bool,
+    /// When true, honor `X-Forwarded-For` for the login throttle's
+    /// per-IP key. Default off — the placeholder IP is used in that
+    /// case, which collapses everyone into one throttle bucket but
+    /// makes IP spoofing impossible. Set via
+    /// `WM_TRUST_FORWARDED_HEADERS=1` only when the host is fronted
+    /// by a reverse proxy that populates the header reliably.
+    trust_forwarded_headers: bool,
 }
 
 impl AppState {
@@ -84,7 +97,27 @@ impl AppState {
             login_throttle: Arc::new(crate::login_throttle::LoginThrottle::new()),
             ui_templates: crate::ui::UiTemplates::new(),
             shutdown: None,
+            secure_cookies: false,
+            trust_forwarded_headers: false,
         }
+    }
+
+    pub fn with_secure_cookies(mut self, secure: bool) -> Self {
+        self.secure_cookies = secure;
+        self
+    }
+
+    pub fn with_trust_forwarded_headers(mut self, trust: bool) -> Self {
+        self.trust_forwarded_headers = trust;
+        self
+    }
+
+    pub fn secure_cookies(&self) -> bool {
+        self.secure_cookies
+    }
+
+    pub fn trust_forwarded_headers(&self) -> bool {
+        self.trust_forwarded_headers
     }
 
     pub fn with_shutdown(mut self, rx: tokio::sync::watch::Receiver<bool>) -> Self {
@@ -160,7 +193,7 @@ pub fn router(state: AppState) -> Router {
     let mcp = crate::mcp::router(state.clone());
     let ui = crate::ui::router(state.clone());
     crate::api::router()
-        .merge(crate::auth_api::router())
+        .merge(crate::auth_api::router(state.clone()))
         .route("/__health", get(health))
         .route("/__ready", get(ready))
         .fallback(any(dispatch))

@@ -227,6 +227,42 @@ state into a per-run namespace so the handler can read/write without
 mutating the real store, and discards the snapshot on completion.
 Multi-host pub/sub for the bus lands in a follow-up slice.
 
+## Production hardening
+
+The defaults are tuned for plain-HTTP dev workflows. Before exposing the host
+even on a trusted network behind a TLS edge (Caddy, an ALB, nginx with TLS, …),
+flip these two flags so the cookie + throttle behavior matches the deployment
+shape:
+
+- `WM_SECURE_COOKIES=1` — appends `Secure` to the `wm_session` and `wm_csrf`
+  cookies. Browsers will then refuse to send them on plain HTTP, which is what
+  you want when every legitimate request reaches you over HTTPS. Leave unset
+  for `just run-web-fast` / local-HTTP development.
+- `WM_TRUST_FORWARDED_HEADERS=1` — honors `X-Forwarded-For` for the
+  per-IP login throttle. Default is off because the header is set by any
+  caller and trusting it from a directly-reachable host lets an attacker
+  spoof the throttle bucket. Only enable this when a reverse proxy you control
+  is the **only** thing that can reach the host (e.g. the host binds to
+  `127.0.0.1` and Caddy proxies via `localhost:<port>`).
+
+In addition, the first-deploy checklist:
+
+- **Generate a strong `WM_BOOTSTRAP_TOKEN`** (`openssl rand -hex 32` is fine)
+  and treat it as a credential. After first deploy, log in via the bootstrap
+  token, mint an operator token (`wm tokens create operator/default`), and
+  delete the bootstrap user (`wm users delete bootstrap`) so the literal
+  bootstrap token stops being a valid credential.
+- **Generate a strong `SESSION_SECRET`** of at least 32 bytes (`openssl rand
+  -base64 48`). Rotating it later invalidates every existing session by
+  design — so keep it stable unless you intend a global logout.
+- **At the TLS edge**: turn on HSTS (`Strict-Transport-Security`), set
+  `X-Content-Type-Options: nosniff`, and consider a strict CSP — the UI only
+  loads same-origin scripts (Ace is vendored under `/__ui/static/ace/`).
+- **Bind the host to `127.0.0.1`** in the deployment compose / systemd unit so
+  the only ingress is through the reverse proxy. Combined with
+  `WM_TRUST_FORWARDED_HEADERS=1`, the throttle keys to the proxy-reported
+  client IP correctly and is not spoofable.
+
 ## License
 
 Copyright 2026 Einar Fløystad Dørum. Licensed under the Apache License,

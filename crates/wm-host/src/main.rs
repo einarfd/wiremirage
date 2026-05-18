@@ -46,6 +46,20 @@ async fn main() -> anyhow::Result<()> {
     // in that case if it's missing rather than silently 503ing later.
     state = configure_local_auth(state, storage)?;
 
+    // Slice 44: opt-in hardening flags for deployments behind a TLS
+    // edge + reverse proxy. Defaults stay safe for plain-HTTP dev
+    // workflows (no `Secure` cookies, no `X-Forwarded-For` trust).
+    if parse_env_bool("WM_SECURE_COOKIES") {
+        tracing::info!("WM_SECURE_COOKIES=1; emitting `Secure` on session + CSRF cookies");
+        state = state.with_secure_cookies(true);
+    }
+    if parse_env_bool("WM_TRUST_FORWARDED_HEADERS") {
+        tracing::info!(
+            "WM_TRUST_FORWARDED_HEADERS=1; honoring X-Forwarded-For for the login throttle key"
+        );
+        state = state.with_trust_forwarded_headers(true);
+    }
+
     // Shutdown signal that long-lived handlers (the SSE journal tail,
     // primarily) race against so a browser tab pointed at the live
     // view doesn't pin the host open during graceful shutdown.
@@ -105,6 +119,21 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("received Ctrl-C, shutting down"),
         _ = terminate => tracing::info!("received SIGTERM, shutting down"),
+    }
+}
+
+/// Parse an env var as a boolean flag. Accepts `1`, `true`, `yes`,
+/// `on` (case-insensitive) as true; any other value (including
+/// `0`, `false`, empty, unset) is false. Lets operators write
+/// `WM_SECURE_COOKIES=true` or `=1` interchangeably without
+/// surprising the next reader.
+fn parse_env_bool(name: &str) -> bool {
+    match env::var(name) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
 

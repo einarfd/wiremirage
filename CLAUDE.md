@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–43 landed. The WIT contract is live at
+**Status:** slices 1–44 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -397,6 +397,16 @@ group editing with a new `update_group` MCP tool — agents can
 now flip `ttl_seconds` and `sliding_ttl` on a group they
 own without dropping to the CLI. Owner-or-admin only, same as
 the REST PATCH; rename and owner-transfer remain out of scope.
+Slice 44 wired two pre-deploy hardening flags. `WM_SECURE_COOKIES=1`
+appends `Secure` to the `wm_session` + `wm_csrf` cookies for
+deployments behind a TLS edge; default off keeps plain-HTTP dev
+workflows working. `WM_TRUST_FORWARDED_HEADERS=1` honors
+`X-Forwarded-For` for the per-IP login throttle; default off
+(loopback placeholder) so a directly-reachable host can't be
+IP-spoofed. The CSRF middleware now takes `AppState` via
+`from_fn_with_state`. README gets a "Production hardening" section
+covering the two flags plus bootstrap-token rotation, strong
+`SESSION_SECRET`, edge HSTS/CSP, and binding the host to localhost.
 
 ## Where the design lives
 
@@ -511,6 +521,14 @@ Env vars (no silent fallbacks; missing required → fail-fast):
 - `WM_COMPILER_URL` (optional) — URL of the TypeScript sidecar. If
   unset, source-based POSTs return `compile_failed`; pre-compiled
   uploads still work.
+- `WM_SECURE_COOKIES` (optional, slice 44) — `1`/`true`/`yes`/`on`
+  to append `Secure` to the `wm_session` + `wm_csrf` cookies. Off by
+  default so dev workflows over plain HTTP keep working; required
+  for deployments behind a TLS edge.
+- `WM_TRUST_FORWARDED_HEADERS` (optional, slice 44) — `1` to honor
+  `X-Forwarded-For` for the per-IP login throttle. Off by default
+  so a directly-reachable host can't be spoofed; required for
+  deployments behind a reverse proxy that populates XFF.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (optional) — URL of an OTLP/gRPC
   collector (e.g. `http://localhost:4317`). When unset, the host logs
   to stderr only; when set, spans are exported in addition.

@@ -424,6 +424,72 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Secure cookies + trusted-proxy bool + hardening doc (slice 44)
+
+Closes audit findings F-3, F-4, and F-5 from the
+`.audit/security-audit-2026-05-17.md` report. Two new
+boolean env flags + a production-hardening section in the
+README.
+
+- **`WM_SECURE_COOKIES`** — appends `Secure` to the
+  `wm_session` and `wm_csrf` cookies. Default off so
+  dev workflows over plain HTTP keep minting usable
+  cookies (browsers drop `Secure` cookies on non-TLS).
+  Deployments behind a TLS edge MUST set it.
+- **`WM_TRUST_FORWARDED_HEADERS`** — honors
+  `X-Forwarded-For` for the per-IP login throttle. Default
+  off: when the header isn't trusted, the loopback
+  placeholder is used (the current behavior pre-slice-44
+  for missing-header callers, just now applied
+  uniformly). Only enable when a reverse proxy you
+  control is the only thing that can reach the host —
+  otherwise an attacker can spoof the throttle bucket
+  via header injection.
+- **F-5 doc** — README gains a "Production hardening"
+  section listing both flags, bootstrap-token rotation
+  (`openssl rand -hex 32` → log in, mint operator
+  token, delete bootstrap user), strong
+  `SESSION_SECRET` generation, edge-side headers
+  (HSTS, nosniff, strict CSP feasible since Ace is
+  vendored), and the localhost-bind recommendation.
+
+**Why a bool instead of a CIDR list for F-4?** The audit
+sketched a `WM_TRUSTED_PROXIES` CIDR list, but plumbing
+`ConnectInfo<SocketAddr>` through the router to make
+the CIDR check meaningful would touch every test
+harness — a comment in `auth_api.rs` already calls that
+out as deferred. The bool achieves the same goal (only
+trust XFF when the operator says so) without the
+plumbing churn, and the deployment shape (host binds
+to localhost, Caddy is the only thing that can reach
+it) doesn't need CIDR granularity.
+
+- **`server.rs::AppState`**: gains `secure_cookies: bool`
+  and `trust_forwarded_headers: bool` plus matching
+  `with_*` builders and getters.
+- **`main.rs`**: new `parse_env_bool` helper reads the
+  flags from env at boot.
+- **`auth_api.rs`**: `format_set_cookie` and a new
+  `format_clear_cookie` (for logout) take a `secure:
+  bool` param. `client_ip` takes `trust_forwarded: bool`.
+  Router constructor now takes `AppState` so the CSRF
+  middleware can read the flag.
+- **`ui/csrf.rs`**: `build_set_cookie` takes the flag.
+  `csrf_middleware` signature gains
+  `State<AppState>`. Both router wirings switch from
+  `from_fn` to `from_fn_with_state`.
+- **Tests** (`tests/local_auth_e2e.rs`):
+  - `cookies_have_no_secure_flag_by_default`
+  - `cookies_carry_secure_flag_when_enabled` (both
+    `wm_csrf` and `wm_session`)
+  - `forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback`
+    — five failed logins with rotating XFF IPs still
+    locks the loopback bucket; sixth attempt from a
+    fresh XFF IP returns 429.
+  - `forwarded_for_honored_when_explicitly_trusted` —
+    same setup but with the flag on; sixth attempt from
+    a different XFF IP succeeds with 303.
+
 ## MCP update_group (slice 43)
 
 Closes the MCP/CLI/UI parity gap on group editing. CLI
