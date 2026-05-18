@@ -7,6 +7,60 @@ use crate::bindings::wiremirage::handler::store::{Host as StoreHost, HostBucket}
 use crate::log::{LogCapture, LogLevel, LogRecord};
 use crate::store::Bucket;
 
+/// Wasmtime `ResourceLimiter` impl that caps linear-memory growth and
+/// records the peak byte count for the journal entry. Lives inside
+/// `HostState` so `Store::limiter` can reach it via the closure
+/// passed to `instantiate_with_buckets`.
+#[derive(Debug, Clone, Copy)]
+pub struct HandlerLimits {
+    /// Hard ceiling on per-instance linear-memory bytes. A
+    /// `memory_growing` request above this denies the grow, which
+    /// wasmtime surfaces as a trap.
+    pub max_memory_bytes: usize,
+    /// High-water mark of bytes the handler actually used. Updated
+    /// every time `memory_growing` is allowed; reported via the
+    /// journal entry's `resources.memory_peak_bytes` field.
+    pub peak_memory_bytes: usize,
+}
+
+impl HandlerLimits {
+    pub fn new(max_memory_bytes: usize) -> Self {
+        Self {
+            max_memory_bytes,
+            peak_memory_bytes: 0,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for HandlerLimits {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool> {
+        if desired > self.max_memory_bytes {
+            return Ok(false);
+        }
+        if desired > self.peak_memory_bytes {
+            self.peak_memory_bytes = desired;
+        }
+        Ok(true)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool> {
+        // Function tables are tiny and bounded by component-model
+        // semantics — no cap here. Memory is the only realistic abuse
+        // vector for SpiderMonkey-based handlers.
+        Ok(true)
+    }
+}
+
 /// Per-invocation host state plumbed into the wasmtime `Store`.
 ///
 /// One `HostState` is created per request. It owns the resource table for
@@ -16,13 +70,17 @@ use crate::store::Bucket;
 pub struct HostState {
     table: ResourceTable,
     logs: LogCapture,
+    /// Memory cap + peak tracker. `Store::limiter` returns a `&mut`
+    /// to this field every time wasmtime checks a grow request.
+    pub limits: HandlerLimits,
 }
 
 impl HostState {
-    pub fn new() -> Self {
+    pub fn new(limits: HandlerLimits) -> Self {
         Self {
             table: ResourceTable::new(),
             logs: LogCapture::new(),
+            limits,
         }
     }
 
@@ -47,7 +105,10 @@ impl HostState {
 
 impl Default for HostState {
     fn default() -> Self {
-        Self::new()
+        // A permissive default for tests that don't care about memory
+        // limits. Production code goes through `Runtime`, which
+        // installs the configured cap instead.
+        Self::new(HandlerLimits::new(usize::MAX))
     }
 }
 

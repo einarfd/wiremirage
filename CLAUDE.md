@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–45 landed. The WIT contract is live at
+**Status:** slices 1–46 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -415,7 +415,17 @@ path got its axum default lifted from 2 MiB to 16 MiB so wasm
 uploads on `POST /__api/routes` + `PATCH /__api/routes/{g}/{n}`
 fit comfortably. The auth-gated surface keeps the dispatch cap
 the only public-facing limit; the larger API limit only applies
-to authed callers.
+to authed callers. Slice 46 wired ADR-0002's wasm sandbox
+limits: `Engine` config gets `consume_fuel(true)` +
+`epoch_interruption(true)`, every `Store` is set up with a
+10 B fuel budget, a 100-tick epoch deadline (≈1 s wall via
+the 10 ms epoch ticker spawned at host startup), and a
+`HandlerLimits` resource limiter that caps linear memory at
+64 MiB and tracks the peak for the journal. Whichever limit
+fires first traps the call; the existing handler-error path
+journals it. `ResourceUsage::fuel_consumed` and
+`memory_peak_bytes` go from 0-placeholders to real numbers
+captured from the store before it drops.
 
 ## Where the design lives
 

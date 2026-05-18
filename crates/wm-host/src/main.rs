@@ -74,6 +74,13 @@ async fn main() -> anyhow::Result<()> {
     // it up on process shutdown along with the runtime.
     let _sweeper = Sweeper::new(state.routes().clone()).spawn();
 
+    // Spawn the wasmtime epoch ticker (slice 46 / F-1). Required by
+    // the `epoch_interruption(true)` flag on the engine — without a
+    // ticker advancing the epoch, the per-call deadline configured
+    // on each store would never fire. Handle dropped; the task runs
+    // for the engine's lifetime.
+    let _epoch_ticker = state.runtime().spawn_epoch_ticker();
+
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await
         .with_context(|| format!("bind {listen_addr}"))?;

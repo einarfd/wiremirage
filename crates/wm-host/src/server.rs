@@ -462,7 +462,17 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // logs — we want the logs in the journal even when the handler
     // traps, so propagating an Err the usual way would lose them.
     let parent_span = tracing::Span::current();
-    type Outcome = (Result<WitResponse, wasmtime::Error>, Vec<LogRecord>);
+    // Outcome carries the call result, the captured logs, and the
+    // resource usage. We compute fuel + memory peak inside the
+    // blocking task because the wasmtime `Store` doesn't cross the
+    // await boundary cleanly; the wall-clock number is filled in by
+    // the async caller from its own `Instant::now()` reference.
+    type Outcome = (
+        Result<WitResponse, wasmtime::Error>,
+        Vec<LogRecord>,
+        ResourceUsage,
+    );
+    let fuel_budget = runtime.handler_fuel();
     let outcome: Outcome = tokio::task::spawn_blocking(move || -> Outcome {
         let _enter = parent_span.enter();
         let instantiate_span =
@@ -470,22 +480,30 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         let (handler, mut store, handles) =
             match runtime.instantiate(&component, &group_id, &route_id) {
                 Ok(t) => t,
-                Err(e) => return (Err(e), Vec::new()),
+                Err(e) => return (Err(e), Vec::new(), ResourceUsage::default()),
             };
         drop(instantiate_span);
         let _call = tracing::info_span!("wasmtime.call_handle", route.id = %route_id).entered();
         let result = handler.call_handle(&mut store, &wit_request, handles.route, handles.group);
         let logs = store.data_mut().take_logs();
-        (result, logs)
+        // Capture resource usage before the store drops. `get_fuel`
+        // returns the *remaining* fuel; we subtract from the budget
+        // to get consumed. `peak_memory_bytes` is updated by the
+        // `HandlerLimits` impl every time `memory_growing` is
+        // approved.
+        let fuel_remaining = store.get_fuel().unwrap_or(fuel_budget);
+        let resources = ResourceUsage {
+            fuel_consumed: fuel_budget.saturating_sub(fuel_remaining),
+            memory_peak_bytes: store.data().limits.peak_memory_bytes as u64,
+            wall_clock_ms: 0, // filled in by the async caller below
+        };
+        (result, logs, resources)
     })
     .await?;
 
-    let (call_result, handler_logs) = outcome;
+    let (call_result, handler_logs, mut resources) = outcome;
     let duration_ms = started.elapsed().as_millis() as u64;
-    let resources = ResourceUsage {
-        wall_clock_ms: duration_ms,
-        ..ResourceUsage::default()
-    };
+    resources.wall_clock_ms = duration_ms;
     let handler_log_entries: Vec<HandlerLogEntry> = handler_logs
         .into_iter()
         .map(|r| HandlerLogEntry {

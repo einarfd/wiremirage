@@ -424,6 +424,76 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Wasm sandbox limits (slice 46 / F-1)
+
+Closes audit finding F-1 and unblocks production deploy.
+The wasm `Engine` was previously `Engine::default()` with
+no fuel, no epoch, no memory limiter — a runaway handler
+could pin a `spawn_blocking` worker forever or allocate
+the host into OOM. ADR-0002 mandated these limits; slice
+46 wires them.
+
+- **`runtime.rs`** — new constants:
+  - `HANDLER_FUEL = 10_000_000_000` (~1-2 s of pure CPU
+    on aarch64; componentize-js handlers' SpiderMonkey
+    embed burns ~10⁷-10⁸ units at startup, so the
+    budget is calibrated to that floor).
+  - `HANDLER_MAX_MEMORY_BYTES = 64 MiB` (steady-state
+    componentize-js components sit around 16-32 MiB;
+    the cap gives breathing room without bottomless
+    headroom).
+  - `HANDLER_EPOCH_TICKS = 100` + `EPOCH_TICK_INTERVAL_MS
+    = 10` = ~1 s wall-clock deadline.
+- **`Runtime::new`** uses `Config::new().consume_fuel(true)
+  .epoch_interruption(true)`. `Runtime::with_limits` is the
+  test-only constructor that lets the tier-2 suite drive
+  the trap paths with absurdly low limits.
+- **`Runtime::spawn_epoch_ticker`** spawns the tokio task
+  that calls `engine.increment_epoch()` every 10 ms.
+  Without it the epoch deadline configured on every
+  store would never fire. Main spawns it once at
+  startup; the handle is dropped — the task lives for
+  the engine's lifetime.
+- **`Runtime::instantiate_with_buckets`** sets fuel,
+  epoch deadline, and the memory limiter on every store
+  before the handler runs. Centralised here so callers
+  can't accidentally skip a limit.
+- **`host_state.rs::HandlerLimits`** implements
+  `wasmtime::ResourceLimiter`. `memory_growing` denies
+  any grow that would push past `max_memory_bytes` and
+  tracks the high-water mark in `peak_memory_bytes`.
+  `table_growing` is permissive (tables are tiny and
+  bounded by the component model).
+- **`server.rs`**: the `spawn_blocking` outcome now
+  carries a `ResourceUsage` populated from the store
+  before it drops. `fuel_consumed = budget -
+  store.get_fuel()`, `memory_peak_bytes =
+  store.data().limits.peak_memory_bytes`. Wall-clock
+  is filled in by the async caller as before. The
+  journal entry's `resources.fuel_consumed` /
+  `memory_peak_bytes` go from 0-placeholders (per
+  rest-api.md's longstanding caveat) to real numbers.
+- **`dry_run.rs`** picks up the limits automatically
+  via `instantiate_with_buckets`. Reporting fuel /
+  memory on dry-run responses isn't in slice-16's
+  surface and stays out of scope here — limits are
+  enforced, accounting unchanged.
+- **Tests** (`tests/fixture_call.rs`):
+  - `handler_traps_when_fuel_budget_is_exhausted` — 1
+    unit of fuel; first instruction traps with "all
+    fuel consumed".
+  - `handler_traps_when_memory_cap_denies_grow` — 1 B
+    memory cap; instantiation's first `memory_growing`
+    callback returns false and surfaces a trap.
+  - `successful_handler_call_records_resource_usage` —
+    production limits; verifies fuel_consumed > 0,
+    peak_memory > 0, peak_memory < cap.
+
+**Numbers are constants, not env vars.** When a real
+deployment needs different limits, env-var overrides are
+a small follow-up. The constants live in one file
+(`runtime.rs`) for one-place tuning.
+
 ## Dispatch body limit (slice 45 / F-2)
 
 Closes audit finding F-2: the mock-dispatch path used to call
