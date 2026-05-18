@@ -115,6 +115,8 @@ mod tests {
             "show_route_state",
             // Slice 36
             "show_route_source",
+            // Slice 43
+            "update_group",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");

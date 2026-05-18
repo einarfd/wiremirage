@@ -213,6 +213,8 @@ async fn list_tools_returns_all_expected_tools() {
         "clear_route_state",
         "dry_run_route",
         "show_route_state",
+        // Slice 43
+        "update_group",
     ];
     expected.sort();
     assert_eq!(names, expected);
@@ -328,6 +330,147 @@ async fn delete_group_without_confirm_is_validation_error() {
         "expected validation marker in error, got: {msg}"
     );
 
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn update_group_changes_ttl_and_sliding_flag() {
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Seed a group with the default TTL + sliding=true.
+    client
+        .call_tool(
+            CallToolRequestParams::new("create_group").with_arguments(
+                json!({ "name": "edit-me", "ttl_seconds": 3600, "sliding_ttl": true })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("create_group");
+
+    // Patch both fields in one call.
+    let updated = client
+        .call_tool(
+            CallToolRequestParams::new("update_group").with_arguments(
+                json!({
+                    "group": "edit-me",
+                    "ttl_seconds": 7200,
+                    "sliding_ttl": false,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("update_group");
+    let body = updated.structured_content.expect("structured");
+    assert_eq!(body["ttl_seconds"], 7200);
+    assert_eq!(body["sliding_ttl"], false);
+
+    // Confirm with a follow-up show_group that the change persisted.
+    let shown = client
+        .call_tool(
+            CallToolRequestParams::new("show_group")
+                .with_arguments(json!({ "group": "edit-me" }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("show_group");
+    let shown = shown.structured_content.unwrap();
+    assert_eq!(shown["ttl_seconds"], 7200);
+    assert_eq!(shown["sliding_ttl"], false);
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn update_group_rejects_empty_patch() {
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+    client
+        .call_tool(
+            CallToolRequestParams::new("create_group")
+                .with_arguments(json!({ "name": "no-op" }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("create_group");
+
+    let err = client
+        .call_tool(
+            CallToolRequestParams::new("update_group")
+                .with_arguments(json!({ "group": "no-op" }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect_err("empty patch is a validation error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("validation_failed") || msg.contains("at least one"),
+        "validation surfaces: {msg}"
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn update_group_forbidden_for_non_owner_non_admin() {
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Admin creates a group, then a non-admin user without ownership
+    // tries to update it.
+    client
+        .call_tool(
+            CallToolRequestParams::new("create_group")
+                .with_arguments(json!({ "name": "admin-only" }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("admin creates group");
+
+    let alice = h
+        .state
+        .auth()
+        .create_user("alice", false)
+        .expect("alice user");
+    let (_token, alice_plain) = h
+        .state
+        .auth()
+        .create_token(&alice.id, "default", None)
+        .expect("alice token");
+
+    let alice_client = DummyClient
+        .serve(transport(&h.base_url, Some(&alice_plain)))
+        .await
+        .expect("alice connect");
+    let err = alice_client
+        .call_tool(
+            CallToolRequestParams::new("update_group").with_arguments(
+                json!({ "group": "admin-only", "ttl_seconds": 7200 })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect_err("non-owner can't update");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("forbidden") || msg.contains("not_found"),
+        "owner-or-admin gate fires: {msg}"
+    );
+
+    alice_client.cancel().await.expect("alice cancel");
     client.cancel().await.expect("cancel");
 }
 

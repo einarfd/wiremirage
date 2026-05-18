@@ -115,6 +115,20 @@ pub struct RefreshGroupArgs {
     pub group: String,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct UpdateGroupArgs {
+    /// Group name or ULID.
+    pub group: String,
+    /// New TTL in seconds. Capped at the host's `MAX_GROUP_TTL_SECONDS`
+    /// (30d). Omit to leave the TTL alone. Setting this re-arms the
+    /// Valkey TTL on the group record.
+    pub ttl_seconds: Option<u64>,
+    /// Flip the sliding-TTL flag. `true` = every dispatched request
+    /// bumps the group's expiry; `false` = fixed-window expiry from
+    /// the last refresh. Omit to leave the flag alone.
+    pub sliding_ttl: Option<bool>,
+}
+
 #[tool_router(router = groups_router, vis = "pub(crate)")]
 impl WmMcpServer {
     #[tool(
@@ -284,5 +298,30 @@ impl WmMcpServer {
             .refresh_group(&group.id)
             .map_err(map_registry_error)?;
         Ok(Json(GroupRecord::from(&refreshed)))
+    }
+
+    #[tool(
+        name = "update_group",
+        description = "Update a group's mutable fields by name or ULID: `ttl_seconds` (re-arms the Valkey TTL) and/or `sliding_ttl` (toggle the sliding-expiry flag). Owner-or-admin only. At least one of the two fields must be set. Rename and owner-transfer aren't supported through this tool."
+    )]
+    pub async fn update_group(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<UpdateGroupArgs>,
+    ) -> Result<Json<GroupRecord>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        if args.ttl_seconds.is_none() && args.sliding_ttl.is_none() {
+            return Err(validation(
+                "update_group needs at least one of `ttl_seconds` or `sliding_ttl`",
+            ));
+        }
+        let updated = self
+            .state
+            .routes()
+            .registry()
+            .patch_group(&group.id, args.ttl_seconds, args.sliding_ttl)
+            .map_err(map_registry_error)?;
+        Ok(Json(GroupRecord::from(&updated)))
     }
 }

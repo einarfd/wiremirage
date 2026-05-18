@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–42 landed. The WIT contract is live at
+**Status:** slices 1–43 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -392,7 +392,11 @@ behavior are identical to what REST does. Compile failures
 surface back to MCP as `compile_failed` with diagnostics in
 the `data` payload. The slice-10 wasm-only carve-out is
 retired — agents no longer need a wasm toolchain to register
-TS/JS handlers.
+TS/JS handlers. Slice 43 closed the MCP/CLI/UI parity gap on
+group editing with a new `update_group` MCP tool — agents can
+now flip `ttl_seconds` and `sliding_ttl` on a group they
+own without dropping to the CLI. Owner-or-admin only, same as
+the REST PATCH; rename and owner-transfer remain out of scope.
 
 ## Where the design lives
 

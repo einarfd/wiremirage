@@ -424,6 +424,40 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## MCP update_group (slice 43)
+
+Closes the MCP/CLI/UI parity gap on group editing. CLI
+(`wm groups update`) and UI (group-detail edit-TTL
+disclosure) both supported TTL + sliding-flag changes;
+MCP did not. Adds `update_group` so agents can flip the
+two mutable fields without dropping to the CLI.
+
+- **`mcp/tools/groups.rs`**: new `UpdateGroupArgs { group,
+  ttl_seconds, sliding_ttl }` (both numeric fields
+  optional, at least one required). Handler is a thin
+  wrapper around `Registry::patch_group` — same
+  validation + Valkey-TTL re-arming the REST PATCH does.
+  Owner-or-admin via the shared `ensure_group_owner_or_admin`
+  helper. No need to extract a `patch_group_core` like
+  routes had — `patch_group` is already self-contained.
+- **Tool-list expected counts**: `mcp::tests::server_exposes_all_expected_tools`
+  and `tests/mcp_stdio.rs::list_tools_works_over_stdio_duplex`
+  bumped to 22. The `tests/mcp_e2e.rs::list_tools_returns_all_expected_tools`
+  expected list also grew.
+- **Tests** (`tests/mcp_e2e.rs`):
+  - `update_group_changes_ttl_and_sliding_flag` — happy
+    path, both fields changed in one call, verified via a
+    follow-up `show_group`.
+  - `update_group_rejects_empty_patch` — neither field
+    set → `validation_failed`.
+  - `update_group_forbidden_for_non_owner_non_admin` —
+    non-owner non-admin user can't update an admin's
+    group (same gate the REST PATCH applies).
+- **Not in scope**: rename and owner-transfer. Same
+  carve-out as REST and CLI — comment in
+  `registry::patch_group` calls those out explicitly as
+  "aren't supported in this slice."
+
 ## MCP source-language create + update (slice 42)
 
 The slice-10 / slice-15 wasm-only carve-out on MCP
