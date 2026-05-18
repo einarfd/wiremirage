@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–41 landed. The WIT contract is live at
+**Status:** slices 1–42 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -381,7 +381,18 @@ existing `/__ui/static/*` enum-match handler. A small
 `wm-ace.js` bootstrap finds `data-wm-ace` divs, syncs
 into a hidden `<textarea>` for form submit, and flips
 theme on `prefers-color-scheme` changes. No JS bundler;
-script-tag distribution only.
+script-tag distribution only. Slice 42 unblocked the
+agent-driven deployment shape: MCP `create_route` and
+`update_route` now accept `source` + `language`
+(`typescript` / `javascript`) alongside the existing
+`compiled_wasm_b64` path. Both handlers delegate to
+`api::create_route_core` / `patch_route_core`, so the
+sidecar compile, slug-conflict precheck, and source-storage
+behavior are identical to what REST does. Compile failures
+surface back to MCP as `compile_failed` with diagnostics in
+the `data` payload. The slice-10 wasm-only carve-out is
+retired — agents no longer need a wasm toolchain to register
+TS/JS handlers.
 
 ## Where the design lives
 

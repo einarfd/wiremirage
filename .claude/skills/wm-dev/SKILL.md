@@ -416,12 +416,54 @@ allowing tools to be added/tested in isolation.
   `clear_group_state`.
 - **What's deferred from slice 10.** `find_route`, `update_route`,
   `dry_run_route`, per-route state ops need their REST endpoints to
-  exist first; bundle them with their host additions. `create_route`
+  exist first; bundle them with their host additions. ~~`create_route`
   over MCP currently accepts `language: "wasm"` only; source-based
   TS creation routes through the CLI/REST until we decide whether
-  agents should ever post inline source through MCP. Stdio
+  agents should ever post inline source through MCP.~~ **Closed by
+  slice 42** — MCP create + update accept source-language. Stdio
   production deployment + auth bridge for stdio sessions are out of
   scope.
+
+## MCP source-language create + update (slice 42)
+
+The slice-10 / slice-15 wasm-only carve-out on MCP
+`create_route` and `update_route` is retired. Both tools
+now accept source-language inputs (`typescript` /
+`javascript` with a `source` string) in addition to the
+existing wasm path. Unblocks agent-driven deployments —
+agents no longer need a wasm toolchain to register or
+edit a TS/JS handler.
+
+- **`mcp/tools/routes.rs`**: `CreateRouteArgs` gains
+  `source: Option<String>`; `UpdateRouteArgs` gains
+  `source: Option<String>` plus `language:
+  Option<String>` (required when the artifact is being
+  swapped). Both handler bodies are now thin wrappers
+  that build `CreateRouteBody` / `PatchRouteBody` and
+  delegate to `api::create_route_core` / `patch_route_core`.
+  Compile, sidecar, conflict-precheck, source-storage,
+  and component-validation all live in the shared core
+  helpers — MCP and REST go through the same code path.
+- **`mcp/error.rs`**: new `map_api_error(ApiError) ->
+  ErrorData` propagates `code`, message, and any
+  compile-failed diagnostics into the structured `data`
+  payload. Mirrors the REST error envelope.
+- **Why pub(crate) on the api bodies works**: the MCP
+  module lives inside `wm-host`, so `pub(crate)` on
+  `CreateRouteBody` / `PatchRouteBody` and their fields
+  is enough — no public-API surface change.
+- **Tests** (`tests/mcp_e2e.rs`):
+  - `create_route_accepts_typescript_source` — happy path through the mock-compiler harness.
+  - `create_route_typescript_without_compiler_returns_compile_failed` — no `WM_COMPILER_URL` configured → compile_failed surfaces.
+  - `create_route_rejects_source_and_wasm_together` — validation_failed on the both-fields case.
+  - `update_route_swaps_typescript_source` — verifies the stored source actually changed via a follow-up `show_route_source` call.
+  - `update_route_can_switch_wasm_to_source_and_back` — wasm → TS swap stores source; TS → wasm swap clears it. The same `Some(None)` / `Some(Some(_))` patch semantics the REST PATCH path uses.
+- **Test-harness change**: `mcp_e2e.rs` gains a
+  `start_with_mock_compiler()` helper mirroring the
+  pattern from `ui_source_edit.rs` /  `ui_route_new.rs`
+  — a tiny axum server returns canned echo-wasm bytes
+  for any `/compile` POST, so source-language tests
+  don't need a real componentize-js sidecar.
 
 ## Ace Editor for source viewer + editor (slice 41)
 

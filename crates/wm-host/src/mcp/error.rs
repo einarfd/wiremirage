@@ -74,3 +74,41 @@ pub fn map_journal_error(err: JournalError) -> ErrorData {
         JournalError::Malformed(msg) => internal(format!("malformed journal record: {msg}")),
     }
 }
+
+/// Translate an `ApiError` (the REST-layer error type) to MCP's
+/// `ErrorData`. Used by tools that delegate to `api::create_route_core`
+/// / `api::patch_route_core` so the compile-failed → diagnostics
+/// propagation matches what the REST surface returns. The structured
+/// `data` payload carries the same `code` strings ApiError uses
+/// (`validation_failed`, `conflict`, `compile_failed`, …) plus a
+/// `diagnostics` array when present.
+pub fn map_api_error(err: crate::api::ApiError) -> ErrorData {
+    let code = err.code();
+    let message = err.message().to_string();
+    let diagnostics = err.diagnostics().to_vec();
+    let mut data_obj = serde_json::Map::new();
+    data_obj.insert("code".into(), serde_json::Value::String(code.into()));
+    if !diagnostics.is_empty() {
+        data_obj.insert(
+            "diagnostics".into(),
+            serde_json::Value::Array(
+                diagnostics
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    let data = Some(serde_json::Value::Object(data_obj));
+    // Map ApiError codes to the closest rmcp error variant. The JSON-
+    // RPC code on the wire follows rmcp's pick; clients should branch
+    // on `data.code` instead since that's the contract WireMirage owns.
+    match code {
+        "not_found" => ErrorData::resource_not_found(message, data),
+        "unauthorized" | "forbidden" => ErrorData::invalid_params(message, data),
+        "compile_failed" | "validation_failed" | "conflict" => {
+            ErrorData::invalid_params(message, data)
+        }
+        _ => ErrorData::internal_error(message, data),
+    }
+}

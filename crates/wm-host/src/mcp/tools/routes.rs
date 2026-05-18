@@ -1,8 +1,6 @@
 //! Route tools — `list_routes`, `show_route`, `create_route`,
 //! `delete_route`.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::ErrorData;
 use rmcp::Json;
 use rmcp::handler::server::common::Extension;
@@ -12,7 +10,6 @@ use rmcp::tool_router;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::SUPPORTED_BINDINGS_VERSION;
 use crate::api::{
     parse_pagination, parse_route_sort, route_matches_q, route_matches_since_until, slice_for_page,
     sort_routes,
@@ -21,7 +18,7 @@ use crate::api_filters::{FilterParseError, SortDir, glob_match, parse_since, val
 use crate::mcp::context::{auth_from, ensure_route_owner_or_admin};
 use crate::mcp::error::{forbidden, map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
-use crate::registry::{NewRoute, PatchRoute, Route, render_slug};
+use crate::registry::{Route, render_slug};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RouteRecord {
@@ -137,13 +134,19 @@ pub struct CreateRouteArgs {
     pub methods: Vec<String>,
     /// Path pattern. May contain `{param}` segments.
     pub path: String,
-    /// Source language. `typescript` or `wasm`.
+    /// Source language: `typescript`, `javascript`, or `wasm`.
     pub language: String,
+    /// Handler source as a string. Required when `language` is a
+    /// source language (e.g. `typescript`). The host forwards it to
+    /// the compiler sidecar; surface `compile_failed` with
+    /// diagnostics back to the caller on failure.
+    pub source: Option<String>,
     /// Required when `language: "wasm"`. Pre-compiled component
-    /// bytes, base64-encoded.
+    /// bytes, base64-encoded. Mutually exclusive with `source`.
     pub compiled_wasm_b64: Option<String>,
-    /// Bindings version the upload was built against. Defaults to
-    /// the host's supported version.
+    /// Bindings version the upload was built against. Required for
+    /// wasm uploads. For source-language routes the sidecar sets
+    /// this; the field is ignored.
     pub bindings_version: Option<String>,
 }
 
@@ -155,12 +158,19 @@ pub struct UpdateRouteArgs {
     pub methods: Option<Vec<String>>,
     /// Replace the path pattern. Omit to leave it unchanged.
     pub path: Option<String>,
+    /// New language for the artifact. Required when changing the
+    /// artifact (i.e. when `source` or `compiled_wasm_b64` is set).
+    /// `typescript`, `javascript`, or `wasm`. Omit to leave the
+    /// artifact unchanged.
+    pub language: Option<String>,
+    /// Replace the handler with this source string. Forwarded to the
+    /// compiler sidecar. Mutually exclusive with `compiled_wasm_b64`.
+    pub source: Option<String>,
     /// Replace the compiled wasm. Base64-encoded component bytes.
-    /// Source-based updates go through REST / `wm routes update
-    /// --source-file` — MCP stays wasm-only, matching `create_route`.
+    /// Mutually exclusive with `source`.
     pub compiled_wasm_b64: Option<String>,
-    /// Bindings version of the new wasm. Required when
-    /// `compiled_wasm_b64` is set.
+    /// Bindings version of the new wasm. Required for wasm uploads;
+    /// ignored for source-language (the sidecar sets it).
     pub bindings_version: Option<String>,
 }
 
@@ -325,7 +335,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "create_route",
-        description = "Create a new route. Slice 10 supports pre-compiled wasm uploads only (`language: \"wasm\"` with `compiled_wasm_b64`). Source-based TypeScript creation is intentionally CLI/REST-side for now (the agent flow is to author with files, not inline strings)."
+        description = "Create a new route. Accepts either a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source`, compiled via the host's sidecar) or a pre-compiled component (`language: \"wasm\"` plus `compiled_wasm_b64`). Returns `compile_failed` with diagnostics if the source doesn't compile."
     )]
     pub async fn create_route(
         &self,
@@ -333,46 +343,24 @@ impl WmMcpServer {
         Parameters(args): Parameters<CreateRouteArgs>,
     ) -> Result<Json<RouteRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
-        if args.language != "wasm" {
-            return Err(validation(
-                "MCP create_route currently supports `language: \"wasm\"` only — \
-                 use the REST endpoint or `wm routes add --source-file` for \
-                 source-based handlers in slice 10",
-            ));
-        }
-        let b64 = args.compiled_wasm_b64.ok_or_else(|| {
-            validation("`compiled_wasm_b64` is required when language is \"wasm\"")
-        })?;
-        let bytes = B64
-            .decode(&b64)
-            .map_err(|e| validation(format!("compiled_wasm_b64 is not valid base64: {e}")))?;
-        let route = self
-            .state
-            .routes()
-            .registry()
-            .create_route(NewRoute {
-                group: args.group,
-                methods: args.methods,
-                path: args.path,
-                language: args.language,
-                bindings_version: args
-                    .bindings_version
-                    .unwrap_or_else(|| SUPPORTED_BINDINGS_VERSION.into()),
-                compiled_wasm: bytes,
-                // MCP is wasm-only on create, so no source ever flows
-                // through this surface.
-                source: None,
-                owner_id: auth.user_id,
-            })
-            .map_err(map_registry_error)?;
-        // Keep the in-memory route table coherent.
-        self.state.routes().refresh_after_create(route.clone());
+        let body = crate::api::CreateRouteBody {
+            group: args.group,
+            methods: args.methods,
+            path: args.path,
+            language: args.language,
+            bindings_version: args.bindings_version,
+            compiled_wasm: args.compiled_wasm_b64,
+            source: args.source,
+        };
+        let route = crate::api::create_route_core(&self.state, &auth, body)
+            .await
+            .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(RouteRecord::from(&route)))
     }
 
     #[tool(
         name = "update_route",
-        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, or `compiled_wasm_b64`. MCP stays wasm-only for the artifact (source-based updates use REST or `wm routes update --source-file`)."
+        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, `source` (with `language`), or `compiled_wasm_b64` (with `language: \"wasm\"`). Source swaps recompile via the sidecar; wasm swaps clear any previously-stored source."
     )]
     pub async fn update_route(
         &self,
@@ -381,65 +369,17 @@ impl WmMcpServer {
     ) -> Result<Json<RouteRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_slug(&args.route)?;
-        let existing = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
-        if !auth.is_admin && existing.owner_id != auth.user_id {
-            return Err(forbidden(
-                "only the route's owner or an admin may update it",
-            ));
-        }
-
-        let (compiled_wasm, language, bindings_version) = match args.compiled_wasm_b64 {
-            Some(b64) => {
-                let bytes = B64.decode(&b64).map_err(|e| {
-                    validation(format!("compiled_wasm_b64 is not valid base64: {e}"))
-                })?;
-                let bv = args
-                    .bindings_version
-                    .unwrap_or_else(|| SUPPORTED_BINDINGS_VERSION.into());
-                if bv != SUPPORTED_BINDINGS_VERSION {
-                    return Err(validation(format!(
-                        "bindings_version {bv:?} is not supported (expected {:?})",
-                        SUPPORTED_BINDINGS_VERSION
-                    )));
-                }
-                wasmtime::component::Component::from_binary(self.state.runtime().engine(), &bytes)
-                    .map_err(|e| validation(format!("component validation: {e}")))?;
-                (Some(bytes), Some("wasm".to_string()), Some(bv))
-            }
-            None => (None, None, None),
+        let body = crate::api::PatchRouteBody {
+            methods: args.methods,
+            path: args.path,
+            language: args.language,
+            bindings_version: args.bindings_version,
+            compiled_wasm: args.compiled_wasm_b64,
+            source: args.source,
         };
-
-        if args.methods.is_none() && args.path.is_none() && compiled_wasm.is_none() {
-            return Err(validation(
-                "update_route needs at least one of `methods`, `path`, `compiled_wasm_b64`",
-            ));
-        }
-
-        let updated = self
-            .state
-            .routes()
-            .registry()
-            .update_route(
-                &group_ref,
-                number,
-                PatchRoute {
-                    methods: args.methods,
-                    path: args.path,
-                    language,
-                    bindings_version,
-                    // MCP is wasm-only on update — a wasm swap always
-                    // clears any prior source (Some(None)); a no-op
-                    // artifact keeps source alone (None).
-                    source: if compiled_wasm.is_some() {
-                        Some(None)
-                    } else {
-                        None
-                    },
-                    compiled_wasm,
-                },
-            )
-            .map_err(map_registry_error)?;
-        self.state.routes().refresh_after_update(updated.clone());
+        let updated = crate::api::patch_route_core(&self.state, &auth, &group_ref, number, body)
+            .await
+            .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(RouteRecord::from(&updated)))
     }
 

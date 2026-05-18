@@ -8,12 +8,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
+use axum::extract::State;
+use axum::routing::post;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, ClientInfo};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use serde_json::json;
 use wm_host::auth::Auth;
+use wm_host::compiler::CompilerClient;
 use wm_host::journal::{
     HandlerLogEntry, Journal, NewJournalEntry, RequestEnvelope, ResourceUsage, ResponseEnvelope,
 };
@@ -23,9 +30,14 @@ use wm_host::{AppState, Runtime, Storage, router};
 
 const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
 const COUNTER_COMPONENT_PATH: &str = env!("WM_FIXTURE_COUNTER_HANDLER_COMPONENT");
+const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
 
 fn counter_wasm() -> Vec<u8> {
     std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture")
+}
+
+fn echo_wasm() -> Vec<u8> {
+    std::fs::read(ECHO_COMPONENT_PATH).expect("read echo fixture")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +52,7 @@ struct Harness {
     base_url: String,
     state: AppState,
     server: tokio::task::JoinHandle<()>,
+    _mock_compiler: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Harness {
@@ -49,6 +62,10 @@ impl Drop for Harness {
 }
 
 async fn start() -> Harness {
+    start_with_compiler(None).await
+}
+
+async fn start_with_compiler(compiler: Option<CompilerClient>) -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
@@ -57,7 +74,10 @@ async fn start() -> Harness {
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage);
-    let state = AppState::new(runtime, routes, auth, journal);
+    let mut state = AppState::new(runtime, routes, auth, journal);
+    if let Some(c) = compiler {
+        state = state.with_compiler(c);
+    }
     let app = router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -71,7 +91,41 @@ async fn start() -> Harness {
         base_url: format!("http://{addr}"),
         state,
         server,
+        _mock_compiler: None,
     }
+}
+
+/// Start the host wired to a canned-bytes mock compiler that returns
+/// the echo fixture's wasm for any `/compile` POST. Exercises the real
+/// source-language pipeline through `api::create_route_core` /
+/// `patch_route_core` without needing a real componentize-js sidecar.
+async fn start_with_mock_compiler() -> Harness {
+    let canned_b64 = B64.encode(echo_wasm());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind compiler");
+    let mock_addr = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(
+            "/compile",
+            post(move |State(state): State<Arc<String>>| {
+                let body = (*state).clone();
+                async move {
+                    axum::Json(json!({
+                        "compiled_wasm": body,
+                        "bindings_version": "0.1.0",
+                    }))
+                }
+            }),
+        )
+        .with_state(Arc::new(canned_b64));
+    let mock = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum::serve");
+    });
+    let compiler_url = format!("http://{mock_addr}");
+    let mut h = start_with_compiler(Some(CompilerClient::new(compiler_url))).await;
+    h._mock_compiler = Some(mock);
+    h
 }
 
 fn sample_handled(group_id: &str, group_name: &str, status: u16) -> NewJournalEntry {
@@ -1035,6 +1089,303 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
         )
         .await;
     assert!(bad.is_err(), "bad base64 in override is rejected");
+
+    client.cancel().await.expect("cancel");
+}
+
+// -- Slice 42: MCP source-language create + update --------------------------
+
+#[tokio::test]
+async fn create_route_accepts_typescript_source() {
+    let h = start_with_mock_compiler().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let resp = client
+        .call_tool(
+            CallToolRequestParams::new("create_route").with_arguments(
+                json!({
+                    "methods": ["POST"],
+                    "path": "/v1/charges",
+                    "language": "typescript",
+                    "source": "export function handle() { return { status: 200, headers: [], body: new Uint8Array() }; }",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("create_route ts source");
+    let body = resp.structured_content.expect("structured");
+    assert_eq!(body["language"], "typescript");
+    assert!(body["number"].is_number(), "route assigned a number");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn create_route_typescript_without_compiler_returns_compile_failed() {
+    let h = start().await; // no compiler configured
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let err = client
+        .call_tool(
+            CallToolRequestParams::new("create_route").with_arguments(
+                json!({
+                    "methods": ["POST"],
+                    "path": "/v1/charges",
+                    "language": "typescript",
+                    "source": "export function handle() {}",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await;
+    let err = err.expect_err("no compiler → compile_failed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("compiler sidecar not configured") || msg.contains("compile_failed"),
+        "compile_failed surfaces from MCP: {msg}",
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn create_route_rejects_source_and_wasm_together() {
+    let h = start_with_mock_compiler().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let err = client
+        .call_tool(
+            CallToolRequestParams::new("create_route").with_arguments(
+                json!({
+                    "methods": ["POST"],
+                    "path": "/v1/either-or",
+                    "language": "typescript",
+                    "source": "export function handle() {}",
+                    "compiled_wasm_b64": B64.encode(echo_wasm()),
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await;
+    let err = err.expect_err("either source or wasm, not both");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not both") || msg.contains("validation_failed"),
+        "validation surfaces: {msg}",
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn update_route_swaps_typescript_source() {
+    let h = start_with_mock_compiler().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Seed a TS route via MCP.
+    let created = client
+        .call_tool(
+            CallToolRequestParams::new("create_route").with_arguments(
+                json!({
+                    "methods": ["POST"],
+                    "path": "/v1/swap-src",
+                    "language": "typescript",
+                    "source": "export function handle() { return { status: 200, headers: [], body: new Uint8Array() }; }",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("seed");
+    let group = created.structured_content.as_ref().unwrap()["group"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let number = created.structured_content.as_ref().unwrap()["number"]
+        .as_u64()
+        .unwrap();
+
+    // Update its source through MCP.
+    let updated = client
+        .call_tool(
+            CallToolRequestParams::new("update_route").with_arguments(
+                json!({
+                    "route": format!("{group}/{number}"),
+                    "language": "typescript",
+                    "source": "export function handle() { return { status: 201, headers: [], body: new Uint8Array() }; }",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("update_route ts source");
+    let body = updated.structured_content.expect("structured");
+    assert_eq!(body["language"], "typescript");
+
+    // Verify the stored source actually changed by fetching it.
+    let src = client
+        .call_tool(
+            CallToolRequestParams::new("show_route_source").with_arguments(
+                json!({ "route": format!("{group}/{number}") })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("show_route_source");
+    let src_body = src.structured_content.expect("structured");
+    assert!(
+        src_body["source"]
+            .as_str()
+            .unwrap_or("")
+            .contains("status: 201"),
+        "updated source visible: {src_body:?}",
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn update_route_can_switch_wasm_to_source_and_back() {
+    // Start wasm, swap to TS, swap back to wasm. Each transition must
+    // recompute the artifact cleanly: TS swap stores source + sets
+    // language=typescript; wasm swap clears stored source +
+    // sets language=wasm.
+    let h = start_with_mock_compiler().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Wasm create.
+    let created = client
+        .call_tool(
+            CallToolRequestParams::new("create_route").with_arguments(
+                json!({
+                    "methods": ["POST"],
+                    "path": "/v1/flip",
+                    "language": "wasm",
+                    "bindings_version": "0.1.0",
+                    "compiled_wasm_b64": B64.encode(echo_wasm()),
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("wasm create");
+    let group = created.structured_content.as_ref().unwrap()["group"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let number = created.structured_content.as_ref().unwrap()["number"]
+        .as_u64()
+        .unwrap();
+    let slug = format!("{group}/{number}");
+
+    // Swap to TS source.
+    let ts = client
+        .call_tool(
+            CallToolRequestParams::new("update_route").with_arguments(
+                json!({
+                    "route": &slug,
+                    "language": "typescript",
+                    "source": "export function handle() {}",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("swap to ts");
+    assert_eq!(
+        ts.structured_content.as_ref().unwrap()["language"],
+        "typescript"
+    );
+
+    // Confirm source is stored.
+    let src = client
+        .call_tool(
+            CallToolRequestParams::new("show_route_source")
+                .with_arguments(json!({ "route": &slug }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("show after ts");
+    assert!(
+        src.structured_content
+            .as_ref()
+            .unwrap()
+            .get("source")
+            .map(|v| v.is_string())
+            .unwrap_or(false),
+        "source present after TS swap"
+    );
+
+    // Swap back to wasm.
+    let back = client
+        .call_tool(
+            CallToolRequestParams::new("update_route").with_arguments(
+                json!({
+                    "route": &slug,
+                    "language": "wasm",
+                    "bindings_version": "0.1.0",
+                    "compiled_wasm_b64": B64.encode(echo_wasm()),
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("swap back to wasm");
+    assert_eq!(
+        back.structured_content.as_ref().unwrap()["language"],
+        "wasm"
+    );
+
+    // Confirm source was cleared.
+    let src2 = client
+        .call_tool(
+            CallToolRequestParams::new("show_route_source")
+                .with_arguments(json!({ "route": &slug }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("show after wasm");
+    assert!(
+        src2.structured_content
+            .as_ref()
+            .unwrap()
+            .get("source")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
+        "source cleared after wasm swap"
+    );
 
     client.cancel().await.expect("cancel");
 }
