@@ -326,7 +326,25 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let trace_id = extract_trace_id(&parent_cx);
     let _ = span.set_parent(parent_cx);
 
-    let body_bytes = read_body(req.into_body()).await?;
+    let body_bytes = match read_body(req.into_body(), MAX_DISPATCH_BODY_BYTES).await {
+        BodyReadOutcome::Ok(b) => b,
+        BodyReadOutcome::TooLarge => {
+            // Refuse before touching the handler. Mock dispatch is
+            // unauthenticated, so an unbounded body would be a trivial
+            // OOM vector. We deliberately don't journal here — a
+            // junk-flood shouldn't pollute the unmatched/handled
+            // journals — but the trace ID lands on the response so a
+            // legitimate consumer with a too-big body can correlate
+            // their failure in OTel/stderr logs.
+            span.record("outcome", "body_too_large");
+            let mut resp = error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("request body exceeds {MAX_DISPATCH_BODY_BYTES} byte limit"),
+            );
+            inject_response_trace_id(&trace_id, resp.headers_mut());
+            return Ok(resp);
+        }
+    };
 
     let path = uri.path();
 
@@ -685,10 +703,32 @@ fn summarize_response(
     )
 }
 
-async fn read_body(body: Body) -> anyhow::Result<Vec<u8>> {
-    use http_body_util::BodyExt;
-    let collected = body.collect().await?;
-    Ok(collected.to_bytes().to_vec())
+/// Maximum size of a mock-dispatch request body. Per storage-model.md's
+/// `limits.request_body_size: 10MiB`. Anything larger gets rejected
+/// with 413 *before* the handler is touched — protects the host from
+/// OOM-by-curl. Path /__api/* uses its own (larger) limit so wasm
+/// uploads still fit.
+pub(crate) const MAX_DISPATCH_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Outcome of reading a request body. `TooLarge` is the typed
+/// signal `dispatch_inner` needs so it can return 413 with a trace
+/// header instead of bubbling a generic 500.
+pub(crate) enum BodyReadOutcome {
+    Ok(Vec<u8>),
+    TooLarge,
+}
+
+async fn read_body(body: Body, max_bytes: usize) -> BodyReadOutcome {
+    // `axum::body::to_bytes` enforces the cap by accumulating up to
+    // `max_bytes` and erroring once a chunk would push past it. Any
+    // error here (length-limit OR underlying IO failure) we map to
+    // TooLarge for the dispatch path's purposes — the trace ID still
+    // lands on the response so the operator can find the failed
+    // request in logs.
+    match axum::body::to_bytes(body, max_bytes).await {
+        Ok(b) => BodyReadOutcome::Ok(b.to_vec()),
+        Err(_) => BodyReadOutcome::TooLarge,
+    }
 }
 
 fn build_wit_request(

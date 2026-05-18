@@ -189,3 +189,48 @@ async fn matched_pattern_reaches_handler() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn dispatch_rejects_body_above_limit_with_413() {
+    // Slice 45 / F-2: an unauthenticated mock-dispatch POST with a
+    // body bigger than the configured limit should be rejected
+    // before the handler runs. 12 MiB is comfortably over the 10 MiB
+    // limit and below anything an actual mock-test body would carry.
+    let (addr, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
+    let body = vec![b'x'; 12 * 1024 * 1024];
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/charges"))
+        .body(body)
+        .send()
+        .await
+        .expect("dispatch send");
+    assert_eq!(resp.status().as_u16(), 413, "payload too large");
+    let text = resp.text().await.unwrap_or_default();
+    assert!(
+        text.contains("exceeds") || text.contains("limit"),
+        "body cites the limit: {text}",
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn dispatch_accepts_body_below_limit() {
+    // Sibling to the rejection test: a body just under the cap should
+    // still go through. Echo's response repeats the body size, so we
+    // can assert the round-trip worked.
+    let (addr, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
+    // 1 MiB — well under the 10 MiB dispatch cap.
+    let body = vec![b'x'; 1024 * 1024];
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/charges"))
+        .body(body)
+        .send()
+        .await
+        .expect("dispatch send");
+    assert!(
+        resp.status().is_success(),
+        "1 MiB body accepted: {}",
+        resp.status()
+    );
+    server.abort();
+}

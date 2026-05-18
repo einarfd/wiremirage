@@ -424,6 +424,37 @@ allowing tools to be added/tested in isolation.
   production deployment + auth bridge for stdio sessions are out of
   scope.
 
+## Dispatch body limit (slice 45 / F-2)
+
+Closes audit finding F-2: the mock-dispatch path used to call
+`body.collect()` with no size limit, letting any unauthenticated
+caller buffer arbitrary bytes into host memory.
+
+- **`server.rs`**: new `MAX_DISPATCH_BODY_BYTES = 10 *
+  1024 * 1024` (10 MiB) per
+  `storage-model.md::limits.request_body_size`.
+  `read_body` now takes a max-bytes arg and returns a
+  `BodyReadOutcome` enum (`Ok(Vec<u8>)` or `TooLarge`).
+  `dispatch_inner` maps `TooLarge` to a 413 response
+  with the trace ID stamped on the headers. The 413
+  path deliberately doesn't write to the unmatched
+  journal — a junk flood shouldn't pollute logs.
+- **`api.rs`**: new `MAX_API_BODY_BYTES = 16 * 1024 *
+  1024` (16 MiB) applied as a
+  `DefaultBodyLimit::max(...)` layer on the
+  `/__api/*` router. Lifts axum's 2 MiB default so
+  wasm uploads on `POST /__api/routes` + `PATCH
+  /__api/routes/{g}/{n}` aren't artificially cut off.
+  Base64 expansion (~33%) means ~12 MiB of raw wasm
+  fits — comfortably above componentize-js's typical
+  1-3 MiB output. Auth-gated, so the higher limit
+  doesn't expose a public DoS surface.
+- **Tests** (`tests/http_smoke.rs`):
+  - `dispatch_rejects_body_above_limit_with_413` — 12
+    MiB POST → 413 with a body that mentions the limit.
+  - `dispatch_accepts_body_below_limit` — 1 MiB POST
+    succeeds via the echo handler.
+
 ## Secure cookies + trusted-proxy bool + hardening doc (slice 44)
 
 Closes audit findings F-3, F-4, and F-5 from the

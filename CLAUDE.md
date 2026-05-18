@@ -9,7 +9,7 @@ code (TypeScript first), compiled to Wasm components, executed inside a Rust
 host (`wasmtime`). Per-route isolated KV state; groups as TTL-bounded
 lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 
-**Status:** slices 1–44 landed. The WIT contract is live at
+**Status:** slices 1–45 landed. The WIT contract is live at
 `wit/wiremirage.wit`, the host (`wm-host`) instantiates components
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
@@ -407,6 +407,15 @@ IP-spoofed. The CSRF middleware now takes `AppState` via
 `from_fn_with_state`. README gets a "Production hardening" section
 covering the two flags plus bootstrap-token rotation, strong
 `SESSION_SECRET`, edge HSTS/CSP, and binding the host to localhost.
+Slice 45 capped the mock-dispatch request body at the design value
+of 10 MiB (`storage-model.md::limits.request_body_size`). Above the
+cap returns 413 *before* the handler runs and *without* writing to
+the journal — junk floods don't pollute logs. The `/__api/*` JSON
+path got its axum default lifted from 2 MiB to 16 MiB so wasm
+uploads on `POST /__api/routes` + `PATCH /__api/routes/{g}/{n}`
+fit comfortably. The auth-gated surface keeps the dispatch cap
+the only public-facing limit; the larger API limit only applies
+to authed callers.
 
 ## Where the design lives
 

@@ -17,7 +17,7 @@
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -35,6 +35,15 @@ use crate::registry::{
 };
 use crate::server::is_reserved_path;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
+
+/// Maximum size of a `/__api/*` JSON body. axum's default is 2 MiB,
+/// which is fine for everything except `POST /__api/routes` and
+/// `PATCH /__api/routes/{group}/{n}` — both can carry base64-encoded
+/// wasm component bytes, and componentize-js output can exceed 2 MiB
+/// for non-trivial handlers. 16 MiB gives ~12 MiB of raw wasm after
+/// base64 expansion. Smaller than the dispatch limit (10 MiB on a
+/// public surface; this one is auth-gated).
+pub(crate) const MAX_API_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -101,6 +110,12 @@ pub fn router() -> Router<AppState> {
             "/__api/groups/{group}/journal",
             axum::routing::delete(delete_group_journal),
         )
+        // Lift axum's 2 MiB default so wasm uploads on POST/PATCH
+        // /__api/routes aren't artificially cut off. The lifted limit
+        // covers every /__api/* endpoint uniformly — overkill for the
+        // endpoints that take small JSON, but the limit is a ceiling,
+        // not a target, and uniform is simpler than per-route.
+        .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
 }
 
 // -- Request / response shapes ------------------------------------------------
