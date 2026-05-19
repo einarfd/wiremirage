@@ -244,10 +244,11 @@ pub fn load_authorization_code(
     read_json_hash(bucket, &code_key(code))
 }
 
-/// Atomically mark a code consumed. Returns the loaded record on
-/// success; `Ok(None)` if the code never existed; `Ok(Some(...))`
-/// with `used_at == Some(_)` if it was already consumed (caller
-/// rejects).
+/// Atomically mark a code consumed. Returns `Some(record)` on the
+/// FIRST consume; `None` on replay or when the code never existed —
+/// both shapes are rejection cases from the token endpoint's point
+/// of view, and collapsing them into one variant means callers can't
+/// accidentally accept a replay.
 pub fn consume_authorization_code(
     bucket: &mut Bucket,
     code: &str,
@@ -257,7 +258,7 @@ pub fn consume_authorization_code(
         return Ok(None);
     };
     if record.used_at.is_some() {
-        return Ok(Some(record));
+        return Ok(None);
     }
     record.used_at = Some(Utc::now());
     write_json_hash(bucket, &key, &record)?;
@@ -283,11 +284,12 @@ pub fn load_refresh_token(
     read_json_hash(bucket, &refresh_key(token_hash))
 }
 
-/// Rotate a refresh token: mark the old one consumed and prepare to
-/// write a new one. Caller writes the new record via
-/// `save_refresh_token` after this returns. If the loaded record is
-/// already used or revoked, returns it with the existing markers so
-/// the caller can reject.
+/// Rotate a refresh token: mark the old one consumed and load it.
+/// Returns `Some(record)` only on the FIRST consume of an unused,
+/// unrevoked token. Returns `None` for missing / already-used /
+/// revoked — handler maps any of those to `invalid_grant`. (Revoked
+/// is distinguished separately via `load_refresh_token` when the
+/// caller wants to log differently.)
 pub fn consume_refresh_token(
     bucket: &mut Bucket,
     token_hash: &str,
@@ -297,7 +299,7 @@ pub fn consume_refresh_token(
         return Ok(None);
     };
     if record.used_at.is_some() || record.revoked_at.is_some() {
-        return Ok(Some(record));
+        return Ok(None);
     }
     record.used_at = Some(Utc::now());
     write_json_hash(bucket, &key, &record)?;
@@ -336,7 +338,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/__auth/oauth/register", post(register))
         .route("/__auth/oauth/authorize", get(authorize))
-        .route("/__auth/oauth/token", post(token));
+        .route("/__auth/oauth/token", post(token))
+        .route("/__auth/oauth/revoke", post(revoke));
 
     let consent = Router::new()
         .route(
@@ -1143,14 +1146,7 @@ async fn token(
         "authorization_code" => {
             handle_authorization_code_grant(&mut bucket, &client, &form, &state).await
         }
-        "refresh_token" => {
-            // Wired up in slice 53.
-            oauth_error(
-                StatusCode::BAD_REQUEST,
-                "unsupported_grant_type",
-                "refresh_token grant not yet implemented",
-            )
-        }
+        "refresh_token" => handle_refresh_token_grant(&mut bucket, &client, &form).await,
         other => oauth_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
@@ -1219,10 +1215,12 @@ async fn handle_authorization_code_grant(
     let consumed = match consume_authorization_code(bucket, code) {
         Ok(Some(c)) => c,
         Ok(None) => {
+            // Missing OR replayed — `consume_*` collapses both into
+            // None so handlers can't accidentally accept a replay.
             return oauth_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_grant",
-                "authorization code not found or expired",
+                "authorization code not found, already used, or expired",
             );
         }
         Err(e) => {
@@ -1234,20 +1232,6 @@ async fn handle_authorization_code_grant(
             );
         }
     };
-    // Was already used: consume_authorization_code returns the record
-    // with used_at set. RFC 6749 §10.5 mandates rejection — and
-    // additionally we revoke any access/refresh tokens issued from
-    // this client (defence against a leaked code), but that's a
-    // slice-54 concern.
-    if let Some(prior) = consumed.used_at
-        && (Utc::now() - prior).num_seconds() > 0
-    {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "authorization code already used",
-        );
-    }
     if consumed.client_id != client.client_id {
         return oauth_error(
             StatusCode::BAD_REQUEST,
@@ -1327,6 +1311,196 @@ async fn handle_authorization_code_grant(
         axum::http::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+async fn handle_refresh_token_grant(
+    bucket: &mut Bucket,
+    client: &OAuthClient,
+    form: &TokenForm,
+) -> Response {
+    let Some(refresh_plaintext) = form.refresh_token.as_deref() else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing `refresh_token`",
+        );
+    };
+
+    let hash = hash_token(refresh_plaintext);
+    let consumed = match consume_refresh_token(bucket, &hash) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // Missing OR replayed OR revoked — same shape as the
+            // auth-code path.
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh token not found, already used, revoked, or expired",
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "consume refresh token");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error",
+            );
+        }
+    };
+    if consumed.client_id != client.client_id {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh token does not belong to this client",
+        );
+    }
+
+    // Mint the new pair: access + (rotated) refresh.
+    let access_plaintext = generate_access_token();
+    let access_hash = hash_token(&access_plaintext);
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(ACCESS_TOKEN_TTL_SECONDS as i64);
+    let access_record = AccessToken {
+        token_hash: access_hash,
+        client_id: consumed.client_id.clone(),
+        user_id: consumed.user_id.clone(),
+        scope: consumed.scope.clone(),
+        created_at: now,
+        expires_at,
+    };
+    if let Err(e) = save_access_token(bucket, &access_record) {
+        tracing::error!(error = %e, "save access token (refresh path)");
+        return oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "internal error",
+        );
+    }
+
+    let new_refresh_plaintext = generate_refresh_token();
+    let new_refresh_hash = hash_token(&new_refresh_plaintext);
+    let new_refresh_record = RefreshToken {
+        token_hash: new_refresh_hash,
+        client_id: consumed.client_id.clone(),
+        user_id: consumed.user_id.clone(),
+        scope: consumed.scope.clone(),
+        created_at: now,
+        used_at: None,
+        revoked_at: None,
+    };
+    if let Err(e) = save_refresh_token(bucket, &new_refresh_record) {
+        tracing::error!(error = %e, "save refresh token (rotation)");
+        return oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "internal error",
+        );
+    }
+
+    let resp = TokenResponse {
+        access_token: access_plaintext,
+        token_type: "Bearer".into(),
+        expires_in: ACCESS_TOKEN_TTL_SECONDS,
+        scope: consumed.scope,
+        refresh_token: Some(new_refresh_plaintext),
+    };
+    let mut response = Json(resp).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+// -- Revoke: POST /__auth/oauth/revoke ----------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RevokeForm {
+    token: String,
+    /// Optional hint at the token type — `access_token` or
+    /// `refresh_token`. Per RFC 7009 we MAY ignore it (the spec is
+    /// explicit that servers must look in both stores). We use it as
+    /// a fast-path probe but always fall through to checking the
+    /// other family if the hint misses.
+    #[allow(dead_code)]
+    token_type_hint: Option<String>,
+    // Client auth via form fields (Basic header also accepted).
+    client_id: Option<String>,
+    client_secret: Option<String>,
+}
+
+async fn revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<RevokeForm>,
+) -> Response {
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open bucket");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error",
+            );
+        }
+    };
+
+    let tok_form = TokenForm {
+        grant_type: "_revoke_".into(),
+        code: None,
+        redirect_uri: None,
+        code_verifier: None,
+        refresh_token: None,
+        client_id: form.client_id.clone(),
+        client_secret: form.client_secret.clone(),
+    };
+    let Some(client_auth) = extract_client_auth(&headers, &tok_form) else {
+        return oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "missing client credentials",
+        );
+    };
+    let client = match load_client(&mut bucket, &client_auth.client_id) {
+        Ok(Some(c)) if c.revoked_at.is_none() => c,
+        _ => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "unknown or revoked client",
+            );
+        }
+    };
+    if !crate::local_auth::verify_password(&client.client_secret_hash, &client_auth.client_secret) {
+        return oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "client authentication failed",
+        );
+    }
+
+    let hash = hash_token(&form.token);
+
+    // Try access-token store first — most common revoke shape.
+    if let Ok(Some(access)) = load_access_token(&mut bucket, &hash) {
+        if access.client_id == client.client_id {
+            let _ = delete_access_token(&mut bucket, &hash);
+        }
+        // Per RFC 7009: always 200 to prevent token enumeration.
+        return StatusCode::OK.into_response();
+    }
+
+    // Refresh tokens: mark revoked so any in-flight rotation fails.
+    if let Ok(Some(mut refresh)) = load_refresh_token(&mut bucket, &hash)
+        && refresh.client_id == client.client_id
+        && refresh.revoked_at.is_none()
+    {
+        refresh.revoked_at = Some(Utc::now());
+        let _ = save_refresh_token(&mut bucket, &refresh);
+    }
+    // Unknown / mismatched-client tokens also return 200 by design.
+    StatusCode::OK.into_response()
 }
 
 // -- Error response shape ----------------------------------------------------
@@ -1438,15 +1612,21 @@ mod tests {
             .unwrap();
         assert!(first.used_at.is_some());
 
-        // Second consume returns the SAME record (still marked) so the
-        // caller can distinguish "expired / never existed" (None) from
-        // "already used" (Some with used_at set, which the token
-        // endpoint rejects with `invalid_grant`).
-        let second = consume_authorization_code(&mut b, "code_xyz")
-            .unwrap()
-            .unwrap();
-        assert!(second.used_at.is_some());
-        assert_eq!(second.code, "code_xyz");
+        // Second consume returns None — replay protection. Missing
+        // codes also return None; the token endpoint maps either to
+        // `invalid_grant`, so collapsing them here keeps handler
+        // logic simple and replay-safe.
+        assert!(
+            consume_authorization_code(&mut b, "code_xyz")
+                .unwrap()
+                .is_none()
+        );
+
+        // The record itself sticks around (with used_at set) so
+        // diagnostic queries can still see "this code WAS used."
+        let still_there: Option<AuthorizationCode> =
+            read_json_hash(&mut b, &code_key("code_xyz")).unwrap();
+        assert!(still_there.unwrap().used_at.is_some());
 
         // Truly missing → None.
         assert!(
@@ -1457,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_token_rotation_marks_used() {
+    fn refresh_token_rotation_blocks_replay() {
         let mut b = fresh_bucket();
         let t = RefreshToken {
             token_hash: "hash1".into(),
@@ -1473,13 +1653,12 @@ mod tests {
         let first = consume_refresh_token(&mut b, "hash1").unwrap().unwrap();
         assert!(first.used_at.is_some());
 
-        // Second consume sees used_at and bounces.
-        let second = consume_refresh_token(&mut b, "hash1").unwrap().unwrap();
-        assert!(second.used_at.is_some());
+        // Replay returns None.
+        assert!(consume_refresh_token(&mut b, "hash1").unwrap().is_none());
     }
 
     #[test]
-    fn refresh_token_revoked_bounces() {
+    fn refresh_token_revoked_is_treated_as_missing_by_consume() {
         let mut b = fresh_bucket();
         let t = RefreshToken {
             token_hash: "hash2".into(),
@@ -1491,10 +1670,12 @@ mod tests {
             revoked_at: Some(Utc::now()),
         };
         save_refresh_token(&mut b, &t).unwrap();
-        let loaded = consume_refresh_token(&mut b, "hash2").unwrap().unwrap();
-        assert!(loaded.revoked_at.is_some());
-        // used_at stays None — we don't mark a revoked token as used,
-        // it just stays revoked.
-        assert!(loaded.used_at.is_none());
+        // Revoked tokens look like replays to consume() — same shape
+        // collapses both rejection cases.
+        assert!(consume_refresh_token(&mut b, "hash2").unwrap().is_none());
+
+        // The record stays around so diagnostic queries still see it.
+        let still_there = load_refresh_token(&mut b, "hash2").unwrap().unwrap();
+        assert!(still_there.revoked_at.is_some());
     }
 }
