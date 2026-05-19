@@ -510,3 +510,300 @@ async fn loopback_port_wildcard_matches_registered_uri() {
 /// even if the test set shrinks during refactoring.
 #[allow(dead_code)]
 fn _unused_headers_marker(_: HeaderMap) {}
+
+/// Walk the happy path to the point where the test has an
+/// access_token + refresh_token + client credentials in hand. Used by
+/// the refresh/revoke tests so they don't all re-implement steps 1-5.
+async fn obtain_token_pair(h: &Harness, client: &Client) -> TokenPair {
+    let reg = client
+        .post(url(h, "/__auth/oauth/register"))
+        .json(&json!({
+            "client_name": "tester",
+            "redirect_uris": ["http://127.0.0.1:54321/cb"],
+        }))
+        .send()
+        .await
+        .expect("register");
+    let reg_json: Value = reg.json().await.unwrap();
+    let client_id = reg_json["client_id"].as_str().unwrap().to_string();
+    let client_secret = reg_json["client_secret"].as_str().unwrap().to_string();
+
+    let session_cookie = login_as_alice(h, client).await;
+    let (verifier, challenge) = pkce_pair();
+    let auth_query = format!(
+        "response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256",
+        urlencode(&client_id),
+        urlencode("http://127.0.0.1:54321/cb"),
+        urlencode(&challenge),
+    );
+    let authz = client
+        .get(url(h, &format!("/__auth/oauth/authorize?{auth_query}")))
+        .header("cookie", format!("wm_session={session_cookie}"))
+        .send()
+        .await
+        .expect("authorize");
+    let consent_path = authz
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let internal_state = percent_decode(consent_path.split('=').nth(1).unwrap());
+
+    let consent_get = client
+        .get(url(h, &consent_path))
+        .header("cookie", format!("wm_session={session_cookie}"))
+        .send()
+        .await
+        .expect("consent get");
+    let csrf_cookie = pick_cookie(&consent_get, "wm_csrf").expect("csrf");
+    let html = consent_get.text().await.unwrap();
+    let csrf_form = extract_csrf_form_value(&html).expect("csrf form");
+    let approve = client
+        .post(url(h, "/__ui/oauth/consent"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "cookie",
+            format!("wm_session={session_cookie}; wm_csrf={csrf_cookie}"),
+        )
+        .body(format!(
+            "_csrf={}&state={}&action=approve",
+            urlencode(&csrf_form),
+            urlencode(&internal_state),
+        ))
+        .send()
+        .await
+        .expect("consent post");
+    let redirect = approve
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let parsed = reqwest::Url::parse(&redirect).unwrap();
+    let code = parsed
+        .query_pairs()
+        .find_map(|(k, v)| (k == "code").then(|| v.into_owned()))
+        .expect("code");
+
+    let tok = client
+        .post(url(h, "/__auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=authorization_code&code={}&redirect_uri={}&code_verifier={}&client_id={}&client_secret={}",
+            urlencode(&code),
+            urlencode("http://127.0.0.1:54321/cb"),
+            urlencode(&verifier),
+            urlencode(&client_id),
+            urlencode(&client_secret),
+        ))
+        .send()
+        .await
+        .expect("token");
+    let tj: Value = tok.json().await.unwrap();
+    TokenPair {
+        access_token: tj["access_token"].as_str().unwrap().to_string(),
+        refresh_token: tj["refresh_token"].as_str().unwrap().to_string(),
+        client_id,
+        client_secret,
+    }
+}
+
+struct TokenPair {
+    access_token: String,
+    refresh_token: String,
+    client_id: String,
+    client_secret: String,
+}
+
+#[tokio::test]
+async fn refresh_token_grant_rotates_and_yields_a_working_access_token() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let pair = obtain_token_pair(&h, &client).await;
+
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
+        urlencode(&pair.refresh_token),
+        urlencode(&pair.client_id),
+        urlencode(&pair.client_secret),
+    );
+    let resp = client
+        .post(url(&h, "/__auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("refresh");
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let new_access = body["access_token"].as_str().unwrap();
+    let new_refresh = body["refresh_token"].as_str().unwrap();
+    assert!(new_access.starts_with("wmm_"));
+    assert!(new_refresh.starts_with("wmr_"));
+    assert_ne!(new_refresh, pair.refresh_token, "refresh must rotate");
+
+    // The new access token authenticates /__api/*.
+    let me = client
+        .get(url(&h, "/__api/users/me"))
+        .header("authorization", format!("Bearer {new_access}"))
+        .send()
+        .await
+        .expect("me");
+    assert_eq!(me.status(), 200);
+}
+
+#[tokio::test]
+async fn refresh_token_replay_is_rejected() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let pair = obtain_token_pair(&h, &client).await;
+
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
+        urlencode(&pair.refresh_token),
+        urlencode(&pair.client_id),
+        urlencode(&pair.client_secret),
+    );
+
+    // First exchange succeeds.
+    let r1 = client
+        .post(url(&h, "/__auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("first refresh");
+    assert_eq!(r1.status(), 200);
+
+    // Replay with the same refresh_token rejects.
+    let r2 = client
+        .post(url(&h, "/__auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("replay refresh");
+    assert_eq!(r2.status(), 400);
+    let body: Value = r2.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn revoke_invalidates_an_access_token() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let pair = obtain_token_pair(&h, &client).await;
+
+    // Confirm it works first.
+    let me_before = client
+        .get(url(&h, "/__api/users/me"))
+        .header("authorization", format!("Bearer {}", pair.access_token))
+        .send()
+        .await
+        .expect("me before");
+    assert_eq!(me_before.status(), 200);
+
+    // Revoke.
+    let body = format!(
+        "token={}&client_id={}&client_secret={}",
+        urlencode(&pair.access_token),
+        urlencode(&pair.client_id),
+        urlencode(&pair.client_secret),
+    );
+    let rv = client
+        .post(url(&h, "/__auth/oauth/revoke"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(rv.status(), 200, "revoke always 200 per RFC 7009");
+
+    // Token no longer authenticates.
+    let me_after = client
+        .get(url(&h, "/__api/users/me"))
+        .header("authorization", format!("Bearer {}", pair.access_token))
+        .send()
+        .await
+        .expect("me after");
+    assert_eq!(me_after.status(), 401);
+}
+
+#[tokio::test]
+async fn revoke_marks_refresh_token_as_revoked() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let pair = obtain_token_pair(&h, &client).await;
+
+    let body = format!(
+        "token={}&token_type_hint=refresh_token&client_id={}&client_secret={}",
+        urlencode(&pair.refresh_token),
+        urlencode(&pair.client_id),
+        urlencode(&pair.client_secret),
+    );
+    let rv = client
+        .post(url(&h, "/__auth/oauth/revoke"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(rv.status(), 200);
+
+    // Subsequent refresh exchange fails.
+    let refresh_body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
+        urlencode(&pair.refresh_token),
+        urlencode(&pair.client_id),
+        urlencode(&pair.client_secret),
+    );
+    let resp = client
+        .post(url(&h, "/__auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(refresh_body)
+        .send()
+        .await
+        .expect("refresh");
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn revoke_with_unknown_token_still_returns_200() {
+    // RFC 7009 §2.2: response is identical for known/unknown tokens
+    // to prevent enumeration. We register a client and use it to
+    // authenticate the revoke call, but the token itself is garbage.
+    let h = start().await;
+    let client = no_redirect_client();
+
+    let reg = client
+        .post(url(&h, "/__auth/oauth/register"))
+        .json(&json!({
+            "client_name": "t",
+            "redirect_uris": ["http://127.0.0.1:0/cb"],
+        }))
+        .send()
+        .await
+        .expect("register");
+    let rj: Value = reg.json().await.unwrap();
+    let cid = rj["client_id"].as_str().unwrap();
+    let csec = rj["client_secret"].as_str().unwrap();
+
+    let body = format!(
+        "token=wmm_nonsense&client_id={}&client_secret={}",
+        urlencode(cid),
+        urlencode(csec),
+    );
+    let resp = client
+        .post(url(&h, "/__auth/oauth/revoke"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(resp.status(), 200);
+}
