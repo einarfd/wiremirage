@@ -511,6 +511,105 @@ async fn loopback_port_wildcard_matches_registered_uri() {
 #[allow(dead_code)]
 fn _unused_headers_marker(_: HeaderMap) {}
 
+#[tokio::test]
+async fn tokens_page_lists_active_mcp_grant_after_authorization() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let _pair = obtain_token_pair(&h, &client).await;
+
+    // The session cookie from `obtain_token_pair` is consumed inside;
+    // mint a fresh one for the tokens-page GET.
+    let session = login_as_alice(&h, &client).await;
+    let resp = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", format!("wm_session={session}"))
+        .send()
+        .await
+        .expect("tokens page");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("MCP applications"),
+        "tokens page renders the MCP applications section"
+    );
+    // Client_name from the obtain_token_pair helper.
+    assert!(
+        body.contains("tester"),
+        "tokens page lists the granted application's name"
+    );
+    assert!(
+        body.contains("/__ui/me/tokens/oauth/"),
+        "tokens page carries a per-grant revoke form"
+    );
+}
+
+#[tokio::test]
+async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let pair = obtain_token_pair(&h, &client).await;
+
+    // Get a session + the csrf cookie/form value for the revoke POST.
+    let session = login_as_alice(&h, &client).await;
+    let get = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", format!("wm_session={session}"))
+        .send()
+        .await
+        .expect("get tokens");
+    let csrf_cookie = pick_cookie(&get, "wm_csrf").expect("csrf cookie");
+    let html = get.text().await.unwrap();
+    let csrf_form = extract_csrf_form_value(&html).expect("csrf form");
+
+    // Click "Revoke" on the row.
+    let revoke = client
+        .post(url(
+            &h,
+            &format!("/__ui/me/tokens/oauth/{}/revoke", pair.client_id),
+        ))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "cookie",
+            format!("wm_session={session}; wm_csrf={csrf_cookie}"),
+        )
+        .body(format!("_csrf={}", urlencode(&csrf_form)))
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(revoke.status(), 303, "revoke 303s back to tokens page");
+
+    // The grant row is gone.
+    let after = client
+        .get(url(&h, "/__ui/me/tokens"))
+        .header("cookie", format!("wm_session={session}"))
+        .send()
+        .await
+        .expect("tokens page after revoke");
+    let body = after.text().await.unwrap();
+    assert!(
+        !body.contains(&pair.client_id),
+        "client_id no longer appears in the tokens page after revoke"
+    );
+
+    // And the refresh token actually can't be exchanged anymore.
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
+        urlencode(&pair.refresh_token),
+        urlencode(&pair.client_id),
+        urlencode(&pair.client_secret),
+    );
+    let resp = client
+        .post(url(&h, "/__auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("refresh after ui revoke");
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_grant");
+}
+
 /// Walk the happy path to the point where the test has an
 /// access_token + refresh_token + client credentials in hand. Used by
 /// the refresh/revoke tests so they don't all re-implement steps 1-5.

@@ -152,6 +152,10 @@ pub fn router(state: AppState) -> Router {
             "/__ui/me/tokens/{name}/rename",
             axum::routing::post(rename_token_form),
         )
+        .route(
+            "/__ui/me/tokens/oauth/{client_id}/revoke",
+            axum::routing::post(revoke_oauth_grant_form),
+        )
         .route("/__ui/settings", get(stub_settings))
         .route("/__ui/admin/health", get(stub_admin_health))
         .layer(middleware::from_fn_with_state(
@@ -2332,7 +2336,8 @@ async fn tokens_page(
     };
     let (sort, dir) = resolve_token_sort(q.sort.as_deref(), q.dir.as_deref());
     sort_tokens(&mut tokens, sort, dir);
-    let data = TokensPageData::list_with_sort(&tokens, sort, dir);
+    let grants = load_oauth_grants(&state, &auth);
+    let data = TokensPageData::list_with_sort(&tokens, grants, sort, dir);
     render_tokens_page(&state, &auth, data)
 }
 
@@ -2421,10 +2426,11 @@ async fn create_token_form(
             ts
         })
         .unwrap_or_default();
+    let grants = load_oauth_grants(&state, &auth);
     render_tokens_page(
         &state,
         &auth,
-        TokensPageData::after_create(&tokens, &plaintext, name),
+        TokensPageData::after_create(&tokens, grants, &plaintext, name),
     )
 }
 
@@ -2443,6 +2449,28 @@ async fn revoke_token_form(
     }
     // 303 See Other so a browser refresh after revoke doesn't replay
     // the POST.
+    axum::response::Redirect::to("/__ui/me/tokens").into_response()
+}
+
+/// Revoke every active OAuth grant for `(caller, client_id)`. Marks
+/// the matching refresh tokens revoked so they can't be rotated;
+/// existing access tokens keep working until their TTL expires
+/// (1 hour worst-case) — there's no per-user index on access tokens
+/// today, so we rely on TTL rather than enumerate.
+async fn revoke_oauth_grant_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(client_id): Path<String>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => return ui_error_500(&state, &auth, format!("open bucket: {e}")),
+    };
+    match crate::mcp_oauth::revoke_grants_for_client(&mut bucket, &auth.user_id, &client_id) {
+        Ok(_n) => {}
+        Err(e) => return ui_error_500(&state, &auth, format!("revoke oauth grant: {e}")),
+    }
     axum::response::Redirect::to("/__ui/me/tokens").into_response()
 }
 
@@ -2483,6 +2511,7 @@ async fn rename_token_form(
 #[derive(Serialize)]
 struct TokensPageData {
     tokens: Vec<TokenRow>,
+    oauth_grants: Vec<OAuthGrantRow>,
     plaintext: Option<String>,
     plaintext_name: Option<String>,
     error: Option<String>,
@@ -2493,9 +2522,15 @@ struct TokensPageData {
 }
 
 impl TokensPageData {
-    fn list_with_sort(tokens: &[crate::auth::Token], sort: &str, dir: &str) -> Self {
+    fn list_with_sort(
+        tokens: &[crate::auth::Token],
+        grants: Vec<OAuthGrantRow>,
+        sort: &str,
+        dir: &str,
+    ) -> Self {
         Self {
             tokens: tokens.iter().map(TokenRow::from).collect(),
+            oauth_grants: grants,
             plaintext: None,
             plaintext_name: None,
             error: None,
@@ -2505,19 +2540,65 @@ impl TokensPageData {
             sort_links: TokensSortLinks::build(sort, dir),
         }
     }
-    fn list(tokens: &[crate::auth::Token]) -> Self {
-        Self::list_with_sort(tokens, "created", "desc")
+    fn list(tokens: &[crate::auth::Token], grants: Vec<OAuthGrantRow>) -> Self {
+        Self::list_with_sort(tokens, grants, "created", "desc")
     }
-    fn after_create(tokens: &[crate::auth::Token], plaintext: &str, name: &str) -> Self {
-        let mut data = Self::list(tokens);
+    fn after_create(
+        tokens: &[crate::auth::Token],
+        grants: Vec<OAuthGrantRow>,
+        plaintext: &str,
+        name: &str,
+    ) -> Self {
+        let mut data = Self::list(tokens, grants);
         data.plaintext = Some(plaintext.to_string());
         data.plaintext_name = Some(name.to_string());
         data
     }
-    fn with_error(tokens: &[crate::auth::Token], msg: &str) -> Self {
-        let mut data = Self::list(tokens);
+    fn with_error(tokens: &[crate::auth::Token], grants: Vec<OAuthGrantRow>, msg: &str) -> Self {
+        let mut data = Self::list(tokens, grants);
         data.error = Some(msg.to_string());
         data
+    }
+}
+
+#[derive(Serialize)]
+struct OAuthGrantRow {
+    client_id: String,
+    client_name: String,
+    scope: String,
+    granted_at: String,
+    expires_at: String,
+}
+
+impl From<crate::mcp_oauth::OAuthGrantSummary> for OAuthGrantRow {
+    fn from(g: crate::mcp_oauth::OAuthGrantSummary) -> Self {
+        Self {
+            client_id: g.client_id,
+            client_name: g.client_name,
+            scope: g.scope,
+            granted_at: g.granted_at.to_rfc3339(),
+            expires_at: g.expires_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Best-effort load of the caller's active OAuth grants. Failures
+/// surface as an empty list — the tokens page is more useful with
+/// missing grants than a 500.
+fn load_oauth_grants(state: &AppState, auth: &AuthContext) -> Vec<OAuthGrantRow> {
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "open admin bucket for oauth grants");
+            return Vec::new();
+        }
+    };
+    match crate::mcp_oauth::list_active_oauth_grants(&mut bucket, &auth.user_id) {
+        Ok(grants) => grants.into_iter().map(OAuthGrantRow::from).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "list oauth grants");
+            Vec::new()
+        }
     }
 }
 
@@ -2584,7 +2665,8 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
         .auth()
         .list_tokens_for(&auth.user_id)
         .unwrap_or_default();
-    let data = TokensPageData::with_error(&tokens, error);
+    let grants = load_oauth_grants(state, auth);
+    let data = TokensPageData::with_error(&tokens, grants, error);
     let mut resp = render_tokens_page(state, auth, data);
     *resp.status_mut() = StatusCode::BAD_REQUEST;
     resp

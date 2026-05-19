@@ -96,4 +96,52 @@
   </table>
   {% endif %}
 </section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>MCP applications <span class="text-muted">({{ data.oauth_grants | length }})</span></h2>
+  </header>
+  <p class="text-muted">
+    Native MCP clients (Claude Desktop, Cursor, the MCP Inspector) that
+    you authorised through OAuth. Revoking a row marks every refresh
+    token for that application as revoked — its existing access tokens
+    keep working until they expire (within 1 hour), but it cannot
+    rotate or mint new ones.
+  </p>
+  {% if data.oauth_grants | length == 0 %}
+  <p class="empty-state">No applications connected. Authorise one from your MCP client.</p>
+  {% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">Application</th>
+        <th scope="col">Scope</th>
+        <th scope="col">Granted</th>
+        <th scope="col">Refresh expires</th>
+        <th scope="col" class="text-muted">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for g in data.oauth_grants %}
+      <tr>
+        <td>
+          <strong>{{ g.client_name }}</strong>
+          <div class="text-muted"><code>{{ g.client_id }}</code></div>
+        </td>
+        <td><code>{{ g.scope }}</code></td>
+        <td class="text-muted">{{ g.granted_at }}</td>
+        <td class="text-muted">{{ g.expires_at }}</td>
+        <td class="token-actions">
+          <form method="post" action="/__ui/me/tokens/oauth/{{ g.client_id }}/revoke" class="inline-form"
+                onsubmit="return confirm('Revoke access for {{ g.client_name }}? This can\'t be undone.');">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn--ghost">Revoke</button>
+          </form>
+        </td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
 {% endblock %}

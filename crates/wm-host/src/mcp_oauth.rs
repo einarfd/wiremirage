@@ -274,6 +274,14 @@ pub fn save_refresh_token(
     let key = refresh_key(&token.token_hash);
     write_json_hash(bucket, &key, token)?;
     bucket.set_ttl(&key, REFRESH_TOKEN_TTL_SECONDS)?;
+    // Per-user index so the tokens page can enumerate active grants
+    // without scanning every refresh-token record in the host. The
+    // index accumulates hashes (rotation adds, revoke marks the
+    // record but doesn't delete from the index); list_*_by_user
+    // filters on used_at/revoked_at at read time. Stale entries cost
+    // a small per-read overhead and a Valkey hash lookup — fine for
+    // the per-user-per-client volume we're aiming for.
+    bucket.set_add(&refresh_user_index_key(&token.user_id), &token.token_hash)?;
     Ok(())
 }
 
@@ -453,6 +461,99 @@ pub fn delete_access_token(bucket: &mut Bucket, token_hash: &str) -> Result<(), 
     Ok(())
 }
 
+// -- Per-user grant listing ---------------------------------------------------
+
+/// A flattened summary of one (user, client) OAuth grant — what the
+/// tokens page renders. Pulled together from a refresh-token record
+/// plus the corresponding client record; deduplicated by client_id
+/// at the call site so refresh-token rotation doesn't surface as
+/// duplicate rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthGrantSummary {
+    pub client_id: String,
+    pub client_name: String,
+    pub scope: String,
+    pub granted_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// List the user's active OAuth grants. Walks the per-user refresh-
+/// token index, filters out used/revoked entries (rotation leaves
+/// the old entry in the index but used_at gets set on it), looks up
+/// the matching client record, and deduplicates by client_id —
+/// returning the most recent grant per client.
+pub fn list_active_oauth_grants(
+    bucket: &mut Bucket,
+    user_id: &str,
+) -> Result<Vec<OAuthGrantSummary>, OAuthStoreError> {
+    let hashes = bucket.set_members(&refresh_user_index_key(user_id))?;
+    let ttl = chrono::Duration::seconds(REFRESH_TOKEN_TTL_SECONDS as i64);
+
+    let mut by_client: std::collections::HashMap<String, OAuthGrantSummary> =
+        std::collections::HashMap::new();
+
+    for hash in hashes {
+        let Some(refresh): Option<RefreshToken> = read_json_hash(bucket, &refresh_key(&hash))?
+        else {
+            continue;
+        };
+        if refresh.used_at.is_some() || refresh.revoked_at.is_some() {
+            continue;
+        }
+        let Some(client) = load_client(bucket, &refresh.client_id)? else {
+            continue;
+        };
+        let summary = OAuthGrantSummary {
+            client_id: refresh.client_id.clone(),
+            client_name: client.client_name,
+            scope: refresh.scope.clone(),
+            granted_at: refresh.created_at,
+            expires_at: refresh.created_at + ttl,
+        };
+        by_client
+            .entry(refresh.client_id)
+            .and_modify(|existing| {
+                if summary.granted_at > existing.granted_at {
+                    *existing = summary.clone();
+                }
+            })
+            .or_insert(summary);
+    }
+
+    let mut out: Vec<OAuthGrantSummary> = by_client.into_values().collect();
+    out.sort_by_key(|g| std::cmp::Reverse(g.granted_at));
+    Ok(out)
+}
+
+/// Revoke every refresh token the user has for `client_id`. Returns
+/// the number of refresh tokens marked revoked. Access tokens are
+/// not enumerated — their 1-hour TTL covers the post-revoke window,
+/// and there's no per-user index on them today.
+pub fn revoke_grants_for_client(
+    bucket: &mut Bucket,
+    user_id: &str,
+    client_id: &str,
+) -> Result<u32, OAuthStoreError> {
+    let hashes = bucket.set_members(&refresh_user_index_key(user_id))?;
+    let mut revoked = 0u32;
+    for hash in hashes {
+        let Some(mut refresh): Option<RefreshToken> = read_json_hash(bucket, &refresh_key(&hash))?
+        else {
+            continue;
+        };
+        if refresh.client_id != client_id {
+            continue;
+        }
+        if refresh.revoked_at.is_some() {
+            continue;
+        }
+        refresh.revoked_at = Some(Utc::now());
+        save_refresh_token(bucket, &refresh)?;
+        revoked += 1;
+    }
+    Ok(revoked)
+}
+
 // -- Key helpers --------------------------------------------------------------
 
 fn client_key(client_id: &str) -> String {
@@ -469,6 +570,10 @@ fn code_key(code: &str) -> String {
 
 fn refresh_key(hash: &str) -> String {
     format!("oauth:refresh:{hash}")
+}
+
+fn refresh_user_index_key(user_id: &str) -> String {
+    format!("oauth:refresh:by-user:{user_id}")
 }
 
 fn access_key(hash: &str) -> String {
