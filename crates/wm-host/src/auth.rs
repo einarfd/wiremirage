@@ -591,11 +591,25 @@ impl Auth {
 
     /// Resolve a plaintext token to an `AuthContext`. Returns `Ok(None)`
     /// if the token doesn't exist or has expired.
+    ///
+    /// Two prefix families are accepted:
+    /// * `wmt_<random>` — user-minted, long-lived; resolves via
+    ///   `token:by-hash:{sha256}` to the `Token` record.
+    /// * `wmm_<random>` — OAuth-flow-minted (ADR-0019); resolves via
+    ///   `oauth:access:{sha256}` to the `mcp_oauth::AccessToken` record.
+    ///   Both look up to the same `User` shape downstream.
     #[tracing::instrument(name = "auth.authenticate", skip_all)]
     pub fn authenticate(&self, plaintext: &str) -> Result<Option<AuthContext>, AuthError> {
-        if !plaintext.starts_with("wmt_") {
-            return Ok(None);
+        if plaintext.starts_with("wmt_") {
+            return self.authenticate_wmt(plaintext);
         }
+        if plaintext.starts_with("wmm_") {
+            return self.authenticate_wmm(plaintext);
+        }
+        Ok(None)
+    }
+
+    fn authenticate_wmt(&self, plaintext: &str) -> Result<Option<AuthContext>, AuthError> {
         let mut bucket = self.bucket()?;
         let hash = sha256_hex(plaintext);
         let Some(token_id_bytes) = bucket.get(&format!("token:by-hash:{hash}"))? else {
@@ -627,6 +641,37 @@ impl Auth {
             is_admin: user.is_admin,
             credential_kind: CredentialKind::Token,
             credential_id: token.id,
+        }))
+    }
+
+    fn authenticate_wmm(&self, plaintext: &str) -> Result<Option<AuthContext>, AuthError> {
+        let mut bucket = self.bucket()?;
+        let hash = sha256_hex(plaintext);
+        let access = match crate::mcp_oauth::load_access_token(&mut bucket, &hash) {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(None),
+            Err(crate::mcp_oauth::OAuthStoreError::Storage(e)) => return Err(AuthError::from(e)),
+            Err(crate::mcp_oauth::OAuthStoreError::Malformed(s)) => {
+                return Err(AuthError::Malformed(s));
+            }
+            Err(crate::mcp_oauth::OAuthStoreError::NotFound) => return Ok(None),
+        };
+        if access.expires_at < Utc::now() {
+            // The Valkey TTL should make this branch unreachable on
+            // a healthy backend, but the in-memory store doesn't
+            // expire records — explicit check keeps both behaviour-
+            // identical.
+            return Ok(None);
+        }
+        let Some(user) = self.read_user_by_id(&mut bucket, &access.user_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(AuthContext {
+            user_id: user.id,
+            user_name: user.name,
+            is_admin: user.is_admin,
+            credential_kind: CredentialKind::Token,
+            credential_id: access.token_hash,
         }))
     }
 }

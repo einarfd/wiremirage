@@ -225,10 +225,28 @@ fn parse_role(raw: &str) -> Option<LocalRole> {
 
 /// argon2id hash of `password` with library defaults. PHC-encoded so
 /// the verifier can pull the parameters out at check time.
-fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+///
+/// Pub so the OAuth dynamic-client-registration flow can hash the
+/// client_secret using the same parameters as user passwords.
+pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = fresh_salt();
     let hash = Argon2::default().hash_password(password.as_bytes(), &salt)?;
     Ok(hash.to_string())
+}
+
+/// Verify a plaintext value against a PHC-encoded argon2 hash.
+/// Returns `true` on match, `false` on either mismatch or malformed
+/// hash — callers that need to distinguish should parse the hash
+/// themselves before calling. Used by the OAuth token endpoint to
+/// authenticate registered clients (same shape as `LocalAuth::verify`,
+/// minus the username lookup).
+pub fn verify_password(stored_hash: &str, plaintext: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(stored_hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(plaintext.as_bytes(), &parsed)
+        .is_ok()
 }
 
 #[cfg(test)]

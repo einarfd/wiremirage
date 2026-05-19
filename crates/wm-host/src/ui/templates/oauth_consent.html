@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card oauth-consent">
+  <header class="card__header">
+    <h1>Authorize <code>{{ client_name }}</code>?</h1>
+  </header>
+
+  <p>
+    <strong>{{ client_name }}</strong> wants to access your WireMirage
+    account. Approving will let it call <code>/__api/mcp</code> on your
+    behalf for the next hour (and refresh that access until you revoke
+    it from the tokens page).
+  </p>
+
+  <dl class="meta-grid">
+    <dt>Scope</dt>
+    <dd><code>{{ scope }}</code></dd>
+    <dt>Redirect</dt>
+    <dd><code class="truncate">{{ redirect_uri }}</code></dd>
+  </dl>
+
+  <p class="text-muted">
+    If you didn't start this flow from your MCP client, deny — the
+    request will be cancelled without issuing any tokens.
+  </p>
+
+  <form method="post" action="/__ui/oauth/consent" class="action-row">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="state" value="{{ state }}">
+    <button type="submit" name="action" value="approve" class="btn btn--primary">
+      Approve
+    </button>
+    <button type="submit" name="action" value="deny" class="btn btn--ghost">
+      Deny
+    </button>
+  </form>
+</section>
+{% endblock %}

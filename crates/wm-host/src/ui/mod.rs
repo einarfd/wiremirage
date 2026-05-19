@@ -75,6 +75,7 @@ impl UiTemplates {
         tmpl!("unmatched_list.html", "templates/unmatched_list.html");
         tmpl!("unmatched_detail.html", "templates/unmatched_detail.html");
         tmpl!("not_found.html", "templates/not_found.html");
+        tmpl!("oauth_consent.html", "templates/oauth_consent.html");
         tmpl!("placeholder.html", "templates/placeholder.html");
         Self { env: Arc::new(env) }
     }
