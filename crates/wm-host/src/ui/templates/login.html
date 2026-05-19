@@ -10,6 +10,17 @@
 <main class="auth-card">
 <h1 class="auth-title">Sign in to WireMirage</h1>
 
+{% if github_enabled %}
+<a class="btn btn--primary auth-oauth-btn"
+   href="/__auth/start/github{% if next %}?next={{ next }}{% endif %}">
+  Continue with GitHub
+</a>
+{%- endif %}
+
+{% if github_enabled and local_enabled %}
+<p class="auth-divider"><span>or</span></p>
+{%- endif %}
+
 {% if local_enabled %}
 <form method="post" action="/__auth/login/password" class="auth-form">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -30,16 +41,13 @@
   <button type="submit" class="btn btn--primary">Sign in</button>
 </form>
 <p class="auth-hint">Local-account login. Configured users only.</p>
-{%- else %}
+{%- elif not github_enabled %}
 <p class="auth-error">
-  No login methods configured. Set <code>WM_LOCAL_AUTH</code> and
-  <code>SESSION_SECRET</code> to enable local password login.
+  No login methods configured. Set <code>WM_GITHUB_CLIENT_ID</code>
+  (with allow rules) or <code>WM_LOCAL_AUTH</code> plus
+  <code>SESSION_SECRET</code> to enable login.
 </p>
 {%- endif %}
-
-{# OAuth provider buttons land in slice 27. The login template
-   already accommodates them — they'll render above the password
-   form per web-ui-design.md's Login screen. #}
 </main>
 </body>
 </html>

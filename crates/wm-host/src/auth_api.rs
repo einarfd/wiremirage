@@ -21,6 +21,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use minijinja::context;
+use rand::RngCore;
 use serde::Deserialize;
 
 use crate::AppState;
@@ -32,11 +33,22 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/__auth/login", get(login_page))
         .route("/__auth/login/password", post(password_login))
         .route("/__auth/logout", post(logout))
+        // GitHub OAuth (slice 50). Both are GETs — the browser does
+        // navigation, GitHub posts back via 302 with the code in the
+        // query string. No CSRF token needed because the `state`
+        // parameter on the OAuth callback IS our CSRF defence (we
+        // generate and validate it ourselves).
+        .route("/__auth/start/github", get(start_github))
+        .route("/__auth/callback", get(github_callback))
         // Every form-bearing endpoint in this router is `/__auth/*`,
         // so we can blanket-CSRF the lot. The login GET mints the
         // cookie; the POSTs (login + logout) validate it. The
         // middleware reads `state.secure_cookies()` to decide
-        // whether to append `Secure` on the cookie it mints.
+        // whether to append `Secure` on the cookie it mints. The
+        // OAuth start/callback routes are also under `/__auth/*` —
+        // they don't carry form bodies but the middleware mints the
+        // CSRF cookie on safe methods, which is fine to share with
+        // the password login form.
         .layer(axum::middleware::from_fn_with_state(
             state,
             crate::ui::csrf::csrf_middleware,
@@ -58,6 +70,7 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
     // middleware wraps this handler so `csrf_token` is in scope and
     // gets injected into the template context by `ui::render`.
     let local_enabled = !state.local_auth().is_empty();
+    let github_enabled = state.github_oauth().is_some();
     let next = q
         .next
         .filter(|n| n.starts_with('/') && !n.starts_with("//"));
@@ -66,6 +79,7 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
         "login.html",
         context! {
             local_enabled => local_enabled,
+            github_enabled => github_enabled,
             next => next,
             error => Option::<String>::None,
         },
@@ -265,4 +279,286 @@ fn format_set_cookie(value: &str, max_age: u64, secure: bool) -> String {
 fn format_clear_cookie(secure: bool) -> String {
     let suffix = if secure { "; Secure" } else { "" };
     format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{suffix}")
+}
+
+// -- GitHub OAuth ------------------------------------------------------------
+//
+// Two-step flow:
+//   GET /__auth/start/github   → 302 to github.com/login/oauth/authorize
+//   GET /__auth/callback       → exchange code, mint session, 302 to next
+//
+// CSRF is handled inside the OAuth protocol itself: we generate a
+// random `state` nonce at start, stash it (with the post-login `next`
+// path) in Valkey at `oauth_state:{nonce}` with a 10-minute TTL, and
+// validate the round-trip on callback. A request to /__auth/callback
+// without a matching state is rejected.
+//
+// The state record is one-shot: the callback handler deletes it
+// before exchanging the code so a replay can't reuse it.
+
+const OAUTH_STATE_TTL_SECONDS: u64 = 600;
+
+#[derive(Debug, Deserialize)]
+struct StartGithubQuery {
+    next: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    /// GitHub puts the error in the query string when the user
+    /// rejects the authorization. We render it nicely.
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+async fn start_github(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StartGithubQuery>,
+) -> Response {
+    let Some(github) = state.github_oauth() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub login not configured; set WM_GITHUB_CLIENT_ID and WM_GITHUB_CLIENT_SECRET",
+        )
+            .into_response();
+    };
+
+    let next = q
+        .next
+        .as_deref()
+        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+        .unwrap_or("/__ui/")
+        .to_string();
+
+    // 32 random bytes encoded urlsafe-base64 ≈ 43 chars; collision-safe.
+    use base64::Engine as _;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open admin bucket for oauth state");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+    let key = format!("oauth_state:{nonce}");
+    if let Err(e) = bucket.set(&key, next.into_bytes()) {
+        tracing::error!(error = %e, "persist oauth state");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+    }
+    // Best-effort TTL — if Valkey errors here the stale state would
+    // hang around but it can't actually be used to log in (the
+    // session-mint step needs a valid GitHub code anyway).
+    let _ = bucket.set_ttl(&key, OAUTH_STATE_TTL_SECONDS);
+
+    let redirect_uri = derive_redirect_uri(&headers, state.trust_forwarded_headers());
+    let authorize = github.authorize_url(&redirect_uri, &nonce);
+    Redirect::to(&authorize).into_response()
+}
+
+async fn github_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<GithubCallbackQuery>,
+) -> Response {
+    let Some(github) = state.github_oauth() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub login not configured",
+        )
+            .into_response();
+    };
+
+    if let Some(err) = q.error {
+        // User denied authorization at GitHub, or GitHub rejected the
+        // app. Bounce back to /__auth/login with a human-readable
+        // error. The description is GitHub-supplied; we surface it
+        // verbatim because operators benefit from knowing whether it
+        // was "access_denied" vs "redirect_uri_mismatch" vs other.
+        let desc = q.error_description.unwrap_or_default();
+        tracing::warn!(error = %err, description = %desc, "GitHub callback returned error");
+        return (
+            StatusCode::UNAUTHORIZED,
+            format!("GitHub login failed: {err} ({desc})"),
+        )
+            .into_response();
+    }
+
+    let Some(code) = q.code else {
+        return (StatusCode::BAD_REQUEST, "missing `code` parameter").into_response();
+    };
+    let Some(state_nonce) = q.state else {
+        return (StatusCode::BAD_REQUEST, "missing `state` parameter").into_response();
+    };
+
+    // Validate state + consume one-shot.
+    let next = match consume_oauth_state(&state, &state_nonce) {
+        Ok(next) => next,
+        Err(StateError::NotFound) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid or expired `state` parameter; restart the login flow",
+            )
+                .into_response();
+        }
+        Err(StateError::Storage(e)) => {
+            tracing::error!(error = %e, "load oauth state");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+
+    // SESSION_SECRET is required to mint cookies. The startup checker
+    // already refuses to start without it when GitHub is configured,
+    // but defend in depth.
+    let Some(sessions) = state.sessions() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session store not configured; set SESSION_SECRET",
+        )
+            .into_response();
+    };
+
+    let redirect_uri = derive_redirect_uri(&headers, state.trust_forwarded_headers());
+    let access_token = match github.exchange_code(&code, &redirect_uri).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "github code exchange failed");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "GitHub login failed (code exchange)",
+            )
+                .into_response();
+        }
+    };
+    let identity = match github.fetch_identity(&access_token).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(error = %e, "github identity fetch failed");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "GitHub login failed (identity fetch)",
+            )
+                .into_response();
+        }
+    };
+    if let Err(deny) = github.check_allow(&identity) {
+        tracing::warn!(login = %identity.login, "github login denied by allow-rules");
+        return (StatusCode::FORBIDDEN, format!("{deny}")).into_response();
+    }
+
+    let is_admin = github.is_admin(&identity.login);
+    let user = match state.auth().upsert_oauth_user(
+        "github",
+        &identity.id.to_string(),
+        &identity.login,
+        is_admin,
+    ) {
+        Ok(u) => u,
+        Err(crate::auth::AuthError::NameTaken(n)) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "GitHub login {n:?} collides with an existing local user. \
+                     Rename or delete the local user, then re-try login."
+                ),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "upsert oauth user");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error (user upsert)",
+            )
+                .into_response();
+        }
+    };
+
+    let ip_str = client_ip(&headers, state.trust_forwarded_headers()).to_string();
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let (_session, cookie_value) = match sessions.create(&user.id, "github", &ip_str, &user_agent) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!(error = %e, "session create");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error (session mint)",
+            )
+                .into_response();
+        }
+    };
+
+    let mut redirect: Response = Redirect::to(&next).into_response();
+    redirect.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format_set_cookie(
+            &cookie_value,
+            sessions.ttl_seconds(),
+            state.secure_cookies(),
+        ))
+        .expect("ascii cookie header"),
+    );
+    redirect
+}
+
+enum StateError {
+    NotFound,
+    Storage(crate::store::StoreError),
+}
+
+fn consume_oauth_state(state: &AppState, nonce: &str) -> Result<String, StateError> {
+    let mut bucket = state
+        .auth()
+        .storage()
+        .admin_bucket()
+        .map_err(StateError::Storage)?;
+    let key = format!("oauth_state:{nonce}");
+    let Some(bytes) = bucket.get(&key).map_err(StateError::Storage)? else {
+        return Err(StateError::NotFound);
+    };
+    let next = String::from_utf8(bytes).unwrap_or_else(|_| "/__ui/".to_string());
+    // One-shot — delete before we exchange the code so a parallel
+    // attempt with the same state can't ride along.
+    let _ = bucket.delete(&key);
+    // Re-validate the `next` path the same way `start_github` did.
+    let safe_next = if next.starts_with('/') && !next.starts_with("//") {
+        next
+    } else {
+        "/__ui/".to_string()
+    };
+    Ok(safe_next)
+}
+
+/// Build the redirect_uri we tell GitHub to send the user back to.
+/// MUST match what's registered on the GitHub OAuth app's settings
+/// page (within the loopback-port wildcard described in RFC 8252,
+/// which GitHub honors for `http://localhost:<port>` URLs).
+fn derive_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:8080");
+    // Default to http for the loopback dev case. When the host runs
+    // behind a TLS edge, `WM_TRUST_FORWARDED_HEADERS=1` lets us read
+    // `X-Forwarded-Proto`; the GitHub OAuth app's registered
+    // callback URL must use the same scheme.
+    let scheme = if trust_forwarded
+        && let Some(v) = headers.get("x-forwarded-proto")
+        && let Ok(s) = v.to_str()
+        && !s.is_empty()
+    {
+        s.to_string()
+    } else {
+        "http".to_string()
+    };
+    format!("{scheme}://{host}/__auth/callback")
 }

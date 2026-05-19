@@ -108,6 +108,14 @@ impl Auth {
         Self { storage }
     }
 
+    /// Borrow the underlying storage. Callers that need to write
+    /// auxiliary auth-scoped state (OAuth flow nonces, etc.) use
+    /// this to reach `admin_bucket()` without going through every
+    /// `Auth::method` shape.
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
     fn bucket(&self) -> Result<Bucket, AuthError> {
         Ok(self.storage.admin_bucket()?)
     }
@@ -205,6 +213,64 @@ impl Auth {
             &format!("user:by-identity:local:{username}"),
             user.id.as_bytes().to_vec(),
         )?;
+        Ok(user)
+    }
+
+    /// Upsert a user keyed on an external identity (e.g. a GitHub
+    /// numeric ID). Returning users are looked up via
+    /// `user:by-identity:{provider}:{subject}` so the user's display
+    /// name and admin flag survive renames on the provider side.
+    ///
+    /// `name_hint` is the GitHub login (or equivalent). It's used as
+    /// the user record's `name` on first sight. If a user with that
+    /// name already exists and isn't linked to this `(provider,
+    /// subject)`, returns `NameTaken` — operator resolves manually
+    /// (rename the colliding user, or delete it). In single-operator
+    /// deployments this is rare; the bootstrap user is "bootstrap"
+    /// and most GitHub logins don't collide.
+    pub fn upsert_oauth_user(
+        &self,
+        provider: &str,
+        subject: &str,
+        name_hint: &str,
+        is_admin: bool,
+    ) -> Result<User, AuthError> {
+        let mut bucket = self.bucket()?;
+        let identity_key = format!("user:by-identity:{provider}:{subject}");
+
+        // Already-linked path: returning user. Sync `is_admin` from
+        // the latest env-var config so removing someone from the
+        // admin list at boot-time strips their admin role on next
+        // login, matching the local-auth contract.
+        if let Some(bytes) = bucket.get(&identity_key)? {
+            let id = String::from_utf8(bytes)
+                .map_err(|_| AuthError::Malformed("identity index value".into()))?;
+            if let Some(mut user) = self.read_user_by_id(&mut bucket, &id)? {
+                if user.is_admin != is_admin {
+                    bucket.hash_set(
+                        &format!("user:{}", user.id),
+                        "is_admin",
+                        if is_admin { b"1" } else { b"0" }.to_vec(),
+                    )?;
+                    user.is_admin = is_admin;
+                }
+                return Ok(user);
+            }
+            // Stale identity index pointing at a deleted user record.
+            // Drop the stale entry and fall through to create.
+            bucket.delete(&identity_key)?;
+        }
+
+        // First-login path: must not collide with an existing user
+        // record (which would be e.g. the bootstrap user or a
+        // local-auth user). Surface as NameTaken — the operator can
+        // delete or rename to resolve.
+        if let Some(_existing) = self.read_user_by_name(&mut bucket, name_hint)? {
+            return Err(AuthError::NameTaken(name_hint.to_string()));
+        }
+
+        let user = self.write_new_user(&mut bucket, name_hint, is_admin)?;
+        bucket.set(&identity_key, user.id.as_bytes().to_vec())?;
         Ok(user)
     }
 
@@ -948,6 +1014,55 @@ mod tests {
         // Round-trip through storage preserves the value.
         let fetched = auth.get_token_by_name(&user.id, "ci").unwrap().unwrap();
         assert_eq!(fetched.scopes, vec!["*".to_string()]);
+    }
+
+    #[test]
+    fn upsert_oauth_user_creates_then_returns_same_record() {
+        let auth = fresh();
+        let first = auth
+            .upsert_oauth_user("github", "12345", "einarw", false)
+            .unwrap();
+        assert_eq!(first.name, "einarw");
+        assert!(!first.is_admin);
+
+        // Second call with the same identity returns the same user.
+        let second = auth
+            .upsert_oauth_user("github", "12345", "einarw", false)
+            .unwrap();
+        assert_eq!(second.id, first.id);
+    }
+
+    #[test]
+    fn upsert_oauth_user_syncs_admin_flag() {
+        let auth = fresh();
+        let u = auth
+            .upsert_oauth_user("github", "1", "alice", false)
+            .unwrap();
+        assert!(!u.is_admin);
+        let u = auth
+            .upsert_oauth_user("github", "1", "alice", true)
+            .unwrap();
+        assert!(u.is_admin);
+        // Persisted.
+        assert!(auth.get_user_by_id(&u.id).unwrap().is_admin);
+        // And demote works.
+        let u = auth
+            .upsert_oauth_user("github", "1", "alice", false)
+            .unwrap();
+        assert!(!u.is_admin);
+    }
+
+    #[test]
+    fn upsert_oauth_user_errors_on_name_collision() {
+        let auth = fresh();
+        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        // A fresh github identity using the same login as an existing
+        // user must not silently take over that record — operator
+        // resolves manually.
+        let err = auth
+            .upsert_oauth_user("github", "999", "alice", false)
+            .unwrap_err();
+        assert!(matches!(err, AuthError::NameTaken(n) if n == "alice"));
     }
 
     #[test]

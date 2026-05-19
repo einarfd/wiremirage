@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use wm_host::auth::Auth;
 use wm_host::compiler::CompilerClient;
+use wm_host::github_oauth::GitHubConfig;
 use wm_host::journal::Journal;
 use wm_host::lifecycle::Sweeper;
 use wm_host::local_auth::LocalAuth;
@@ -45,6 +46,34 @@ async fn main() -> anyhow::Result<()> {
     // required so the login flow can mint cookies; we refuse to start
     // in that case if it's missing rather than silently 503ing later.
     state = configure_local_auth(state, storage)?;
+
+    // GitHub OAuth (slice 50, ADR-0010). Optional. When configured,
+    // the login page shows a "Continue with GitHub" button and the
+    // `/__auth/start/github` + `/__auth/callback` routes are live.
+    // SESSION_SECRET is required when GitHub login is enabled — the
+    // callback flow can't mint a cookie otherwise. Errors at parse
+    // time (partial credentials, missing allow rules) bubble up here
+    // so misconfiguration surfaces at startup.
+    if let Some(gh) = GitHubConfig::from_env().context("parse GitHub OAuth config")? {
+        if state.sessions().is_none() {
+            return Err(anyhow!(
+                "WM_GITHUB_CLIENT_ID is set but SESSION_SECRET is missing. \
+                 GitHub login can't mint cookies without a signing key — \
+                 set SESSION_SECRET to at least 32 bytes of secret material."
+            ));
+        }
+        tracing::info!(
+            allow_users = gh.allow_users.len(),
+            allow_orgs = gh.allow_orgs.len(),
+            admin_users = gh.admin_users.len(),
+            "GitHub OAuth configured"
+        );
+        state = state.with_github_oauth(gh);
+    } else {
+        tracing::info!(
+            "WM_GITHUB_CLIENT_ID is not set; the login page will not offer GitHub login"
+        );
+    }
 
     // Slice 44: opt-in hardening flags for deployments behind a TLS
     // edge + reverse proxy. Defaults stay safe for plain-HTTP dev
