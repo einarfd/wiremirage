@@ -168,3 +168,37 @@ async fn forwarded_proto_is_honored_when_trust_flag_is_set() {
         "issuer should honor X-Forwarded-Proto when trust flag on, got: {issuer}"
     );
 }
+
+#[tokio::test]
+async fn mcp_endpoint_401_carries_www_authenticate_discovery_hint() {
+    // ADR-0019 slice D: an unauth'd request to /__api/mcp gets a
+    // 401 with `WWW-Authenticate: Bearer resource_metadata="..."` so
+    // native MCP clients can run discovery against the AS without
+    // pre-configuration.
+    let h = start(false).await;
+    let resp = client()
+        .post(format!("http://{}/__api/mcp", h.addr))
+        // No Authorization header — should trigger the discovery hint.
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 401);
+    let www = resp
+        .headers()
+        .get("www-authenticate")
+        .expect("WWW-Authenticate header present")
+        .to_str()
+        .expect("header is ascii");
+    assert!(
+        www.starts_with("Bearer"),
+        "WWW-Authenticate should start with Bearer: {www}"
+    );
+    assert!(
+        www.contains("resource_metadata="),
+        "WWW-Authenticate should carry resource_metadata: {www}"
+    );
+    assert!(
+        www.contains("/.well-known/oauth-protected-resource"),
+        "resource_metadata URL should point at the well-known: {www}"
+    );
+}
