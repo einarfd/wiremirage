@@ -69,21 +69,31 @@ impl GitHubConfig {
     /// credentials are set (operator hasn't opted into the flow);
     /// `Err` when partially configured so a typo surfaces fast.
     pub fn from_env() -> Result<Option<Self>> {
-        let client_id = env::var("WM_GITHUB_CLIENT_ID")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let client_secret = env::var("WM_GITHUB_CLIENT_SECRET")
-            .ok()
-            .filter(|s| !s.is_empty());
+        Self::from_env_values(EnvValues {
+            client_id: env::var("WM_GITHUB_CLIENT_ID").ok(),
+            client_secret: env::var("WM_GITHUB_CLIENT_SECRET").ok(),
+            allow_users: env::var("WM_GITHUB_ALLOW_USERS").unwrap_or_default(),
+            allow_orgs: env::var("WM_GITHUB_ALLOW_ORGS").unwrap_or_default(),
+            admin_users: env::var("WM_GITHUB_ADMIN_USERS").unwrap_or_default(),
+        })
+    }
+
+    /// Pure-function variant of `from_env` that takes the
+    /// already-resolved values. Lets unit tests cover the parsing
+    /// rules without poking the process environment (which would
+    /// race against other parallel tests).
+    fn from_env_values(values: EnvValues) -> Result<Option<Self>> {
+        let client_id = values.client_id.filter(|s| !s.is_empty());
+        let client_secret = values.client_secret.filter(|s| !s.is_empty());
         match (client_id, client_secret) {
             (None, None) => Ok(None),
             (Some(_), None) | (None, Some(_)) => Err(anyhow!(
                 "WM_GITHUB_CLIENT_ID and WM_GITHUB_CLIENT_SECRET must both be set, or neither"
             )),
             (Some(client_id), Some(client_secret)) => {
-                let allow_users = parse_csv(&env::var("WM_GITHUB_ALLOW_USERS").unwrap_or_default());
-                let allow_orgs = parse_csv(&env::var("WM_GITHUB_ALLOW_ORGS").unwrap_or_default());
-                let admin_users = parse_csv(&env::var("WM_GITHUB_ADMIN_USERS").unwrap_or_default());
+                let allow_users = parse_csv(&values.allow_users);
+                let allow_orgs = parse_csv(&values.allow_orgs);
+                let admin_users = parse_csv(&values.admin_users);
                 if allow_users.is_empty() && allow_orgs.is_empty() {
                     return Err(anyhow!(
                         "GitHub login is configured but no allow rules are set. \
@@ -243,6 +253,18 @@ impl GitHubConfig {
             .iter()
             .any(|u| u.to_ascii_lowercase() == lc)
     }
+}
+
+/// Pre-resolved env values fed into the pure-function `from_env_values`.
+/// Kept out of `pub`-API land — only the env-reading path and the
+/// tests construct one.
+#[derive(Default)]
+struct EnvValues {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    allow_users: String,
+    allow_orgs: String,
+    admin_users: String,
 }
 
 #[derive(Debug, Clone)]
@@ -484,51 +506,69 @@ mod tests {
         assert!(!cfg.is_admin("alice"));
     }
 
+    // Pure-function tests on `from_env_values`. Don't touch the
+    // process env, so parallel test execution is safe.
+
     #[test]
     fn from_env_returns_none_when_unconfigured() {
-        // Unsetting via SAFETY: each var; the parent shell may have
-        // set leftover values from a previous boot. Using the
-        // serial_test crate would be heavier than is warranted here.
-        // SAFETY: tests in this module aren't run in parallel against
-        // overlapping env keys.
-        unsafe {
-            env::remove_var("WM_GITHUB_CLIENT_ID");
-            env::remove_var("WM_GITHUB_CLIENT_SECRET");
-        }
-        assert!(GitHubConfig::from_env().unwrap().is_none());
+        assert!(
+            GitHubConfig::from_env_values(EnvValues::default())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn from_env_rejects_partial_config() {
-        unsafe {
-            env::set_var("WM_GITHUB_CLIENT_ID", "x");
-            env::remove_var("WM_GITHUB_CLIENT_SECRET");
-        }
-        let err = GitHubConfig::from_env().unwrap_err();
+        let err = GitHubConfig::from_env_values(EnvValues {
+            client_id: Some("x".into()),
+            client_secret: None,
+            ..EnvValues::default()
+        })
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("CLIENT_SECRET"));
-        unsafe {
-            env::remove_var("WM_GITHUB_CLIENT_ID");
-        }
     }
 
     #[test]
     fn from_env_rejects_when_no_allow_rules() {
-        unsafe {
-            env::set_var("WM_GITHUB_CLIENT_ID", "x");
-            env::set_var("WM_GITHUB_CLIENT_SECRET", "y");
-            env::remove_var("WM_GITHUB_ALLOW_USERS");
-            env::remove_var("WM_GITHUB_ALLOW_ORGS");
-        }
-        let err = GitHubConfig::from_env().unwrap_err();
+        let err = GitHubConfig::from_env_values(EnvValues {
+            client_id: Some("x".into()),
+            client_secret: Some("y".into()),
+            allow_users: String::new(),
+            allow_orgs: String::new(),
+            ..EnvValues::default()
+        })
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("WM_GITHUB_ALLOW_USERS") || msg.contains("WM_GITHUB_ALLOW_ORGS"),
             "names the missing env vars: {msg}"
         );
-        unsafe {
-            env::remove_var("WM_GITHUB_CLIENT_ID");
-            env::remove_var("WM_GITHUB_CLIENT_SECRET");
-        }
+    }
+
+    #[test]
+    fn from_env_accepts_either_allow_users_or_allow_orgs() {
+        let just_users = GitHubConfig::from_env_values(EnvValues {
+            client_id: Some("cid".into()),
+            client_secret: Some("csec".into()),
+            allow_users: "alice".into(),
+            ..EnvValues::default()
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(just_users.allow_users, vec!["alice"]);
+        assert!(just_users.allow_orgs.is_empty());
+
+        let just_orgs = GitHubConfig::from_env_values(EnvValues {
+            client_id: Some("cid".into()),
+            client_secret: Some("csec".into()),
+            allow_orgs: "acme-inc".into(),
+            ..EnvValues::default()
+        })
+        .unwrap()
+        .unwrap();
+        assert!(just_orgs.allow_users.is_empty());
+        assert_eq!(just_orgs.allow_orgs, vec!["acme-inc"]);
     }
 }
