@@ -22,11 +22,13 @@ use wm_core::{
 };
 
 use crate::cli::{
-    AddRouteArgs, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, GroupsListArgs,
-    JournalCommand, JournalListArgs, RoutesCommand, RoutesListArgs, TestRouteArgs, TokensCommand,
-    UnmatchedCommand, UnmatchedListArgs, UpdateRouteArgs, UpdateUserArgs, UsersCommand,
+    AddRouteArgs, Command, CreateGroupArgs, CreateTokenArgs, CreateUserArgs, ExportGroupArgs,
+    GroupsCommand, GroupsListArgs, JournalCommand, JournalListArgs, RoutesCommand, RoutesListArgs,
+    TestRouteArgs, TokensCommand, UnmatchedCommand, UnmatchedListArgs, UpdateRouteArgs,
+    UpdateUserArgs, UsersCommand,
 };
 use crate::format::{self, Format};
+use crate::spec::{self, LoadedSpec, SpecFormat};
 
 /// Top-level dispatcher. Returns an `ExitCode` so the binary's `main`
 /// can propagate. `Err(anyhow::Error)` is reserved for truly
@@ -179,13 +181,10 @@ async fn handle_groups(
             format::render_group_list(&list, format);
         }
         GroupsCommand::Create(args) => {
-            let body = CreateGroupBody {
-                name: args.name,
-                ttl_seconds: args.ttl_seconds,
-                sliding_ttl: sliding_flag(args.sliding, args.no_sliding),
-            };
-            let g = client.create_group(&body).await?;
-            format::render_group(&g, format);
+            handle_groups_create(client, args, format).await?;
+        }
+        GroupsCommand::Export(args) => {
+            handle_groups_export(client, args).await?;
         }
         GroupsCommand::Show { name } => {
             let g = client.get_group(&name).await?;
@@ -251,6 +250,183 @@ fn sliding_flag(sliding: bool, no_sliding: bool) -> Option<bool> {
         (_, true) => Some(false),
         _ => None,
     }
+}
+
+/// Top-level `wm groups create` dispatch. Branches on whether the
+/// caller passed `--from-file` — without it, the existing
+/// flag-driven flow runs; with it, the spec file is the source of
+/// truth and ad-hoc flags like `--ttl-seconds` are ignored.
+async fn handle_groups_create(
+    client: &Client,
+    args: CreateGroupArgs,
+    format: Format,
+) -> Result<(), ClientError> {
+    match (args.from_file.as_deref(), args.name.as_deref()) {
+        (Some(_), Some(_)) => Err(ClientError::Validation(
+            "pass either <name> or --from-file FILE, not both".into(),
+        )),
+        (None, None) => Err(ClientError::Validation(
+            "missing group name: pass <name> or use --from-file FILE".into(),
+        )),
+        (None, Some(name)) => {
+            let body = CreateGroupBody {
+                name: name.to_string(),
+                ttl_seconds: args.ttl_seconds,
+                sliding_ttl: sliding_flag(args.sliding, args.no_sliding),
+            };
+            let g = client.create_group(&body).await?;
+            format::render_group(&g, format);
+            Ok(())
+        }
+        (Some(from_file), None) => {
+            let loaded = load_spec_from_arg(from_file, args.format.into())
+                .map_err(|e| ClientError::Validation(format!("{e:#}")))?;
+            create_group_from_spec(client, &loaded, format).await
+        }
+    }
+}
+
+/// Read the spec file from disk, or from stdin if path is "-".
+fn load_spec_from_arg(path: &str, stdin_format: SpecFormat) -> anyhow::Result<LoadedSpec> {
+    if path == "-" {
+        use std::io::Read;
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        spec::load_spec_from_str(&text, stdin_format, None)
+    } else {
+        spec::load_spec_from_path(std::path::Path::new(path))
+    }
+}
+
+/// Create a group + all its routes atomically from the spec. On any
+/// failure mid-way through, the partially-created group is deleted
+/// so the user is never left with a half-applied spec.
+async fn create_group_from_spec(
+    client: &Client,
+    loaded: &LoadedSpec,
+    format: Format,
+) -> Result<(), ClientError> {
+    let group_name = loaded.spec.name.clone();
+    let create_body = CreateGroupBody {
+        name: group_name.clone(),
+        ttl_seconds: loaded.ttl_seconds,
+        sliding_ttl: loaded.spec.sliding,
+    };
+    let group = client.create_group(&create_body).await?;
+
+    for (idx, route) in loaded.normalized_routes.iter().enumerate() {
+        let route_body = CreateRouteBody {
+            group: Some(group_name.clone()),
+            methods: route.methods.clone(),
+            path: route.path.clone(),
+            language: route.language.clone(),
+            bindings_version: None,
+            compiled_wasm: None,
+            source: Some(route.source.clone()),
+        };
+        if let Err(e) = client.create_route(&route_body).await {
+            // Best-effort rollback: delete the group we just made so
+            // the user can re-run after fixing the spec. If the
+            // rollback itself fails (network blip), surface both
+            // errors so it's obvious.
+            let rollback = client.delete_group(&group_name).await;
+            let primary = format!(
+                "route #{idx} ({path}) failed to create: {e}",
+                path = route.path
+            );
+            let msg = match rollback {
+                Ok(()) => format!(
+                    "{primary}\n         group {group_name:?} was rolled back; re-run after fixing the spec"
+                ),
+                Err(rerr) => format!(
+                    "{primary}\n         additionally, rollback failed: {rerr}; \
+                     the group may exist with partial routes, delete it manually"
+                ),
+            };
+            return Err(ClientError::Validation(msg));
+        }
+    }
+
+    format::render_group(&group, format);
+    if matches!(format, Format::Human) {
+        println!(
+            "created group {group_name:?} with {n} route(s) from spec",
+            n = loaded.normalized_routes.len()
+        );
+    }
+    Ok(())
+}
+
+/// `wm groups export` — read the group + routes + per-route source,
+/// assemble a spec, render in the requested format. Wasm-uploaded
+/// routes can't be represented (no source to put in the spec) and
+/// fail the export so the user isn't surprised by a silent drop.
+async fn handle_groups_export(client: &Client, args: ExportGroupArgs) -> Result<(), ClientError> {
+    let group = client.get_group(&args.name).await?;
+
+    // Fetch every route in this group. Bypassing pagination by
+    // setting a high limit is fine — groups don't carry thousands
+    // of routes in practice.
+    let params = ListRoutesParams {
+        group: Some(group.name.clone()),
+        limit: Some(1000),
+        ..Default::default()
+    };
+    let routes = client.list_routes_with(&params).await?;
+
+    let mut route_specs = Vec::with_capacity(routes.routes.len());
+    for route in &routes.routes {
+        let slug = format!("{}/{}", route.group.name, route.number);
+        let source_resp = client.get_route_source(&slug).await?;
+        let Some(source) = source_resp.source else {
+            return Err(ClientError::Validation(format!(
+                "route {slug} was uploaded as pre-compiled {lang}; spec format requires source. \
+                 Either replace the route with a source-uploaded version, or skip exporting this group.",
+                lang = source_resp.language
+            )));
+        };
+
+        let (method, methods) = match route.methods.as_slice() {
+            [only] => (Some(only.clone()), Vec::new()),
+            _ => (None, route.methods.clone()),
+        };
+        route_specs.push(spec::RouteSpec {
+            method,
+            methods,
+            path: route.path.clone(),
+            language: Some(route.language.clone()),
+            source: Some(source),
+            source_file: None,
+        });
+    }
+
+    // Render with the TTL formatted as plain seconds; round-tripping
+    // a parsed "24h" back as "86400" is correct but loses the human
+    // form. We accept that trade-off rather than try to guess the
+    // user's intended unit.
+    let group_spec = spec::GroupSpec {
+        name: group.name.clone(),
+        description: None,
+        ttl: Some(group.ttl_seconds.to_string()),
+        sliding: Some(group.sliding_ttl),
+        routes: route_specs,
+    };
+
+    let format: SpecFormat = args.format.into();
+    let rendered = spec::render(&group_spec, format)
+        .map_err(|e| ClientError::Validation(format!("render spec: {e:#}")))?;
+
+    match args.output.as_deref() {
+        Some(path) => std::fs::write(path, &rendered)
+            .map_err(|e| ClientError::Validation(format!("write spec to {path}: {e}")))?,
+        None => {
+            print!("{rendered}");
+            if !rendered.ends_with('\n') {
+                println!();
+            }
+        }
+    }
+    Ok(())
 }
 
 // -- Routes ------------------------------------------------------------------

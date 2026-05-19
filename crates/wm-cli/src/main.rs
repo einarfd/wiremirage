@@ -9,6 +9,7 @@ mod cli;
 mod config;
 mod format;
 mod handlers;
+mod spec;
 
 use std::process::ExitCode;
 

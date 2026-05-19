@@ -131,14 +131,34 @@ pub enum GroupsCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Export a group as a YAML or JSON spec file. Round-trips with
+    /// `wm groups create --from-file`. Wasm-uploaded routes are
+    /// rejected — only source-language routes can be represented
+    /// in the spec format.
+    Export(ExportGroupArgs),
 }
 
 #[derive(Debug, clap::Args)]
 pub struct CreateGroupArgs {
-    /// Group name (canonical external identifier).
-    pub name: String,
+    /// Group name (canonical external identifier). Omit when using
+    /// `--from-file` — the name comes from the spec file in that
+    /// case.
+    pub name: Option<String>,
+    /// Create the group and every route it contains from a YAML/JSON
+    /// spec file. Format is detected from the extension (`.yaml`,
+    /// `.yml`, `.json`); pass `-` to read from stdin and use
+    /// `--format` to disambiguate. On any failure, partial state is
+    /// rolled back — either the whole group lands or nothing does.
+    #[arg(long, value_name = "FILE")]
+    pub from_file: Option<String>,
+    /// Spec format for `--from-file -` (stdin). Ignored when
+    /// `--from-file` points at a real file.
+    #[arg(long, value_enum, default_value = "yaml")]
+    pub format: SpecFormatArg,
     /// TTL in seconds. Default is the host's `default_group_ttl`
     /// (24h). Must not exceed the configured maximum (30d).
+    /// Ignored when `--from-file` is supplied — the spec's `ttl`
+    /// field wins there.
     #[arg(long)]
     pub ttl_seconds: Option<u64>,
     /// Disable sliding TTL — the group expires after `ttl_seconds`
@@ -151,6 +171,35 @@ pub struct CreateGroupArgs {
     /// thing to type.)
     #[arg(long)]
     pub sliding: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ExportGroupArgs {
+    /// Group name or ULID.
+    pub name: String,
+    /// Output format. Default `yaml`.
+    #[arg(long, value_enum, default_value = "yaml")]
+    pub format: SpecFormatArg,
+    /// Write the rendered spec to FILE instead of stdout.
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<String>,
+}
+
+/// CLI-facing alias for `spec::SpecFormat` so we can derive
+/// `ValueEnum` without polluting the cross-format type.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum SpecFormatArg {
+    Yaml,
+    Json,
+}
+
+impl From<SpecFormatArg> for crate::spec::SpecFormat {
+    fn from(a: SpecFormatArg) -> Self {
+        match a {
+            SpecFormatArg::Yaml => crate::spec::SpecFormat::Yaml,
+            SpecFormatArg::Json => crate::spec::SpecFormat::Json,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
