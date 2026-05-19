@@ -210,7 +210,7 @@ pub fn router(state: AppState) -> Router {
     let ui = crate::ui::router(state.clone());
     crate::api::router()
         .merge(crate::auth_api::router(state.clone()))
-        .merge(crate::mcp_oauth::router())
+        .merge(crate::mcp_oauth::router(state.clone()))
         .route("/__health", get(health))
         .route("/__ready", get(ready))
         .fallback(any(dispatch))

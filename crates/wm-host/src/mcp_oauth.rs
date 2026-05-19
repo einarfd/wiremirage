@@ -29,14 +29,23 @@
 //! storage operation — the in-memory backend and Valkey both treat
 //! each write independently, which is fine for our shapes).
 
+use std::collections::HashMap;
+
+use axum::Form;
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
-use axum::http::{HeaderMap, header};
-use axum::routing::get;
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use chrono::{DateTime, Utc};
+use minijinja::context;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::AppState;
@@ -137,6 +146,21 @@ pub struct RefreshToken {
     pub created_at: DateTime<Utc>,
     pub used_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// An issued access token (`wmm_<random>`). Only the hash is stored;
+/// the plaintext lives in the client and on the auth header. Auth
+/// extractor looks up by SHA-256 hash, the same shape as the existing
+/// `wmt_` path. TTL on the Valkey key (1 hour by default) is the
+/// source of truth for expiry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccessToken {
+    pub token_hash: String,
+    pub client_id: String,
+    pub user_id: String,
+    pub scope: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 // -- Client CRUD --------------------------------------------------------------
@@ -290,11 +314,18 @@ pub fn consume_refresh_token(
 // trusts it) so deployments behind a TLS edge advertise the public
 // URL rather than the loopback the host listens on.
 
-/// MCP-OAuth discovery router. Mounted at the root from
+/// MCP-OAuth discovery + flow router. Mounted at the root from
 /// `server::router()` so the well-known paths land as
-/// `https://host/.well-known/...`.
-pub fn router() -> Router<AppState> {
-    Router::new()
+/// `https://host/.well-known/...` and the flow endpoints as
+/// `/__auth/oauth/...` / `/__ui/oauth/...`.
+///
+/// CSRF is layered onto the consent UI only — `/register` and
+/// `/token` are called by external MCP clients and can't carry a
+/// `_csrf` form field; their CSRF defence is the OAuth `state`
+/// parameter plus `client_secret` authentication. `/authorize` is a
+/// GET, so CSRF doesn't apply there either.
+pub fn router(state: AppState) -> Router<AppState> {
+    let public = Router::new()
         .route(
             "/.well-known/oauth-protected-resource",
             get(protected_resource_metadata),
@@ -303,6 +334,21 @@ pub fn router() -> Router<AppState> {
             "/.well-known/oauth-authorization-server",
             get(authorization_server_metadata),
         )
+        .route("/__auth/oauth/register", post(register))
+        .route("/__auth/oauth/authorize", get(authorize))
+        .route("/__auth/oauth/token", post(token));
+
+    let consent = Router::new()
+        .route(
+            "/__ui/oauth/consent",
+            get(consent_page).post(consent_submit),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::ui::csrf::csrf_middleware,
+        ));
+
+    public.merge(consent)
 }
 
 /// RFC 9728 — Protected Resource Metadata. Names the AS and the
@@ -377,6 +423,33 @@ fn derive_public_base(headers: &HeaderMap, trust_forwarded: bool) -> String {
     format!("{scheme}://{host}")
 }
 
+// -- Access token CRUD --------------------------------------------------------
+
+pub fn save_access_token(bucket: &mut Bucket, token: &AccessToken) -> Result<(), OAuthStoreError> {
+    let key = access_key(&token.token_hash);
+    write_json_hash(bucket, &key, token)?;
+    // TTL aligns with `expires_at`. We compute it from the record so
+    // a token written close to expiry still gets a sensible TTL.
+    let ttl = (token.expires_at - Utc::now()).num_seconds().max(1) as u64;
+    bucket.set_ttl(&key, ttl)?;
+    Ok(())
+}
+
+pub fn load_access_token(
+    bucket: &mut Bucket,
+    token_hash: &str,
+) -> Result<Option<AccessToken>, OAuthStoreError> {
+    read_json_hash(bucket, &access_key(token_hash))
+}
+
+/// Delete an access token by hash (used by the revoke endpoint in
+/// slice 53). The TTL would expire it anyway; this is for instant
+/// revocation.
+pub fn delete_access_token(bucket: &mut Bucket, token_hash: &str) -> Result<(), OAuthStoreError> {
+    bucket.delete(&access_key(token_hash))?;
+    Ok(())
+}
+
 // -- Key helpers --------------------------------------------------------------
 
 fn client_key(client_id: &str) -> String {
@@ -393,6 +466,10 @@ fn code_key(code: &str) -> String {
 
 fn refresh_key(hash: &str) -> String {
     format!("oauth:refresh:{hash}")
+}
+
+fn access_key(hash: &str) -> String {
+    format!("oauth:access:{hash}")
 }
 
 // -- Hash-of-JSON encoding ---------------------------------------------------
@@ -426,6 +503,839 @@ fn read_json_hash<T: serde::de::DeserializeOwned>(
     let value = serde_json::from_slice(&bytes)
         .map_err(|e| OAuthStoreError::Malformed(format!("decode JSON: {e}")))?;
     Ok(Some(value))
+}
+
+// -- Token-generation helpers -------------------------------------------------
+
+/// Generate a `wmc_<random>` client id. 16 random bytes encoded
+/// url-safe-base64 — collision-safe for any realistic number of
+/// registered clients.
+pub fn generate_client_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    format!("wmc_{}", B64URL.encode(bytes))
+}
+
+/// Generate a `wmcs_<random>` client secret. 32 random bytes —
+/// strong enough to survive any brute-force attempt against the
+/// argon2id-hashed form persisted in storage.
+pub fn generate_client_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    format!("wmcs_{}", B64URL.encode(bytes))
+}
+
+/// Random 32-byte url-safe-base64 string. Used for auth codes and
+/// internal-state nonces — neither needs a typing prefix.
+pub fn generate_random_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    B64URL.encode(bytes)
+}
+
+/// Generate a `wmm_<random>` access token. The plaintext is returned
+/// to the client exactly once; storage holds only the SHA-256 hash.
+pub fn generate_access_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    format!("wmm_{}", B64URL.encode(bytes))
+}
+
+/// Generate a `wmr_<random>` refresh token. Longer than the access
+/// token (48 bytes) since it's directly exchangeable for new access
+/// tokens — collision/guess resistance matters more.
+pub fn generate_refresh_token() -> String {
+    let mut bytes = [0u8; 48];
+    rand::rng().fill_bytes(&mut bytes);
+    format!("wmr_{}", B64URL.encode(bytes))
+}
+
+pub fn hash_token(plaintext: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(plaintext.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Verify a PKCE code_verifier against a stored code_challenge. v1
+/// only accepts S256 (matching the discovery advertisement); `plain`
+/// is rejected at request parse time. Compares with constant-time
+/// equality so a slow attacker can't time-attack the challenge.
+fn verify_pkce(challenge: &str, verifier: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let mut h = Sha256::new();
+    h.update(verifier.as_bytes());
+    let computed = B64URL.encode(h.finalize());
+    computed.as_bytes().ct_eq(challenge.as_bytes()).into()
+}
+
+// -- Redirect-URI validation --------------------------------------------------
+
+/// Whether `provided` matches any of `registered` under RFC 8252
+/// rules: exact match, EXCEPT loopback addresses (`http://127.0.0.1`
+/// and `http://[::1]`) match registered loopback URIs ignoring the
+/// port. Required because native MCP clients bind a random local
+/// port per session.
+fn redirect_uri_matches(registered: &[String], provided: &str) -> bool {
+    for reg in registered {
+        if reg == provided {
+            return true;
+        }
+        if let (Some(reg_lb), Some(prov_lb)) =
+            (loopback_normalize(reg), loopback_normalize(provided))
+            && reg_lb == prov_lb
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strip the port from a loopback URI (`http://127.0.0.1:1234/cb` →
+/// `Some("http://127.0.0.1/cb")`). Returns `None` for any URI that
+/// isn't loopback; non-loopback URIs only match on exact equality.
+fn loopback_normalize(uri: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(uri).ok()?;
+    if parsed.scheme() != "http" {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if host != "127.0.0.1" && host != "[::1]" && host != "::1" {
+        return None;
+    }
+    let path = parsed.path();
+    Some(format!("http://{host}{path}"))
+}
+
+// -- DCR: POST /__auth/oauth/register -----------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RegisterBody {
+    client_name: Option<String>,
+    redirect_uris: Vec<String>,
+    grant_types: Option<Vec<String>>,
+    response_types: Option<Vec<String>>,
+    token_endpoint_auth_method: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RegisterResponse {
+    client_id: String,
+    client_secret: String,
+    client_name: String,
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    token_endpoint_auth_method: String,
+    client_id_issued_at: i64,
+}
+
+async fn register(State(state): State<AppState>, Json(body): Json<RegisterBody>) -> Response {
+    if body.redirect_uris.is_empty() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_redirect_uri",
+            "at least one redirect_uri is required",
+        );
+    }
+    for uri in &body.redirect_uris {
+        if let Err(msg) = validate_redirect_uri_at_registration(uri) {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_redirect_uri", &msg);
+        }
+    }
+
+    let client_id = generate_client_id();
+    let plaintext_secret = generate_client_secret();
+    // Reuse the argon2id config from local_auth so registered-client
+    // secrets get the same strength treatment as user passwords.
+    let secret_hash = match crate::local_auth::hash_password(&plaintext_secret) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, "hash client secret");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error hashing secret",
+            );
+        }
+    };
+
+    let grant_types = body
+        .grant_types
+        .unwrap_or_else(|| vec!["authorization_code".into(), "refresh_token".into()]);
+    let response_types = body.response_types.unwrap_or_else(|| vec!["code".into()]);
+    let token_endpoint_auth_method = body
+        .token_endpoint_auth_method
+        .unwrap_or_else(|| "client_secret_post".into());
+
+    let client = OAuthClient {
+        client_id: client_id.clone(),
+        client_secret_hash: secret_hash,
+        client_name: body.client_name.unwrap_or_else(|| "Unnamed Client".into()),
+        redirect_uris: body.redirect_uris.clone(),
+        grant_types: grant_types.clone(),
+        response_types: response_types.clone(),
+        token_endpoint_auth_method: token_endpoint_auth_method.clone(),
+        created_at: Utc::now(),
+        last_used_at: None,
+        revoked_at: None,
+    };
+
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open admin bucket");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error",
+            );
+        }
+    };
+    if let Err(e) = save_client(&mut bucket, &client) {
+        tracing::error!(error = %e, "save oauth client");
+        return oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "internal error",
+        );
+    }
+
+    let resp = RegisterResponse {
+        client_id,
+        client_secret: plaintext_secret,
+        client_name: client.client_name,
+        redirect_uris: client.redirect_uris,
+        grant_types,
+        response_types,
+        token_endpoint_auth_method,
+        client_id_issued_at: client.created_at.timestamp(),
+    };
+    (StatusCode::CREATED, Json(resp)).into_response()
+}
+
+fn validate_redirect_uri_at_registration(uri: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(uri).map_err(|e| format!("malformed URI {uri:?}: {e}"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            // Allow http only for loopback addresses (RFC 8252).
+            let host = parsed.host_str().unwrap_or("");
+            if host == "127.0.0.1" || host == "[::1]" || host == "::1" || host == "localhost" {
+                Ok(())
+            } else {
+                Err(format!(
+                    "http redirect_uri must be loopback (127.0.0.1, [::1], or localhost), got {uri:?}"
+                ))
+            }
+        }
+        other => Err(format!(
+            "redirect_uri scheme must be http (loopback) or https, got {other:?}"
+        )),
+    }
+}
+
+// -- Authorize: GET /__auth/oauth/authorize -----------------------------------
+
+#[derive(Debug, Deserialize)]
+struct AuthorizeQuery {
+    response_type: Option<String>,
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    state: Option<String>,
+    scope: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+}
+
+async fn authorize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AuthorizeQuery>,
+    raw_uri: axum::http::Uri,
+) -> Response {
+    // Parameter validation — anything client-facing returns a
+    // structured `?error=...` redirect to the registered URI; pre-
+    // client-lookup failures return a plain 400 so the user can see
+    // the message.
+    let response_type = match q.response_type.as_deref() {
+        Some("code") => "code",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing or unsupported response_type (must be \"code\")",
+            )
+                .into_response();
+        }
+    };
+    let Some(client_id) = q.client_id else {
+        return (StatusCode::BAD_REQUEST, "missing client_id").into_response();
+    };
+    let Some(redirect_uri) = q.redirect_uri else {
+        return (StatusCode::BAD_REQUEST, "missing redirect_uri").into_response();
+    };
+    let Some(code_challenge) = q.code_challenge else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "PKCE code_challenge is required (S256 only)",
+        )
+            .into_response();
+    };
+    let code_challenge_method = q.code_challenge_method.as_deref().unwrap_or("S256");
+    if code_challenge_method != "S256" {
+        return (
+            StatusCode::BAD_REQUEST,
+            "code_challenge_method must be S256",
+        )
+            .into_response();
+    }
+
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open admin bucket");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+    let client = match load_client(&mut bucket, &client_id) {
+        Ok(Some(c)) if c.revoked_at.is_none() => c,
+        Ok(Some(_)) => {
+            return (StatusCode::UNAUTHORIZED, "client is revoked").into_response();
+        }
+        Ok(None) => {
+            return (StatusCode::UNAUTHORIZED, "unknown client_id").into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "load oauth client");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+
+    if !redirect_uri_matches(&client.redirect_uris, &redirect_uri) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "redirect_uri does not match any registered URI",
+        )
+            .into_response();
+    }
+
+    if response_type != "code" {
+        return (StatusCode::BAD_REQUEST, "internal: response_type drift").into_response();
+    }
+
+    // Session check. Without a logged-in UI user we can't bind the
+    // pending authorization to anyone, so we punt to the login page
+    // and resume after.
+    if !session_is_valid(&state, &headers) {
+        let next = raw_uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("");
+        let login_url = format!("/__auth/login?next={}", percent_encode(next));
+        return Redirect::to(&login_url).into_response();
+    }
+
+    // Stash a pending authorization keyed by an internal nonce and
+    // hand the user off to the consent page. The nonce is what we
+    // pass through the consent UI — the client's original `state`
+    // lives inside the pending record and only comes back out when
+    // we redirect to the client's redirect_uri.
+    let internal_state = generate_random_token();
+    let pending = PendingAuthorization {
+        client_id: client.client_id.clone(),
+        redirect_uri,
+        code_challenge,
+        code_challenge_method: code_challenge_method.into(),
+        scope: q.scope.unwrap_or_else(|| "*".into()),
+        original_state: q.state,
+        created_at: Utc::now(),
+    };
+    if let Err(e) = save_pending(&mut bucket, &internal_state, &pending) {
+        tracing::error!(error = %e, "save pending oauth");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+    }
+
+    let target = format!(
+        "/__ui/oauth/consent?state={state}",
+        state = percent_encode(&internal_state)
+    );
+    Redirect::to(&target).into_response()
+}
+
+/// Percent-encode for embedding into a query parameter. Keeps the
+/// query-safe alphabet untouched; everything else gets `%XX`.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(*b as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+fn session_is_valid(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(sessions) = state.sessions() else {
+        return false;
+    };
+    let Some(cookie) = pick_session_cookie(headers) else {
+        return false;
+    };
+    sessions.touch(&cookie).is_ok()
+}
+
+fn pick_session_cookie(headers: &HeaderMap) -> Option<String> {
+    for value in headers.get_all(header::COOKIE).iter() {
+        let Ok(raw) = value.to_str() else { continue };
+        for pair in raw.split(';') {
+            let pair = pair.trim();
+            if let Some(v) = pair.strip_prefix(&format!("{}=", crate::session::COOKIE_NAME)) {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn resolve_session_user(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let sessions = state.sessions()?;
+    let cookie = pick_session_cookie(headers)?;
+    let session = sessions.touch(&cookie).ok()?;
+    Some(session.user_id)
+}
+
+// -- Consent: GET/POST /__ui/oauth/consent -----------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ConsentQuery {
+    state: Option<String>,
+}
+
+async fn consent_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ConsentQuery>,
+) -> Response {
+    if !session_is_valid(&state, &headers) {
+        return Redirect::to("/__auth/login?next=/__ui/").into_response();
+    }
+    let Some(internal_state) = q.state else {
+        return (StatusCode::BAD_REQUEST, "missing state").into_response();
+    };
+    // Read (don't consume) — consent_submit consumes it on approve.
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open bucket");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+    let pending: Option<PendingAuthorization> =
+        match read_json_hash(&mut bucket, &pending_key(&internal_state)) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "read pending");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+            }
+        };
+    let Some(pending) = pending else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "consent request expired or already handled — restart the login flow from your MCP client",
+        )
+            .into_response();
+    };
+    let client_name = load_client(&mut bucket, &pending.client_id)
+        .ok()
+        .flatten()
+        .map(|c| c.client_name)
+        .unwrap_or_else(|| "Unknown client".into());
+
+    crate::ui::render(
+        &state,
+        "oauth_consent.html",
+        context! {
+            state => internal_state,
+            client_name => client_name,
+            scope => pending.scope,
+            redirect_uri => pending.redirect_uri,
+        },
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsentForm {
+    state: String,
+    action: String,
+    #[serde(rename = "_csrf")]
+    _csrf: Option<String>,
+}
+
+async fn consent_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ConsentForm>,
+) -> Response {
+    let Some(user_id) = resolve_session_user(&state, &headers) else {
+        return Redirect::to("/__auth/login?next=/__ui/").into_response();
+    };
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open bucket");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+    let pending = match consume_pending(&mut bucket, &form.state) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "consent request expired or already handled",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "consume pending");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+
+    let original_state = pending.original_state.clone().unwrap_or_default();
+
+    if form.action == "deny" {
+        let url = build_redirect_with_params(
+            &pending.redirect_uri,
+            &[
+                ("error", "access_denied"),
+                ("error_description", "user denied the authorization request"),
+                ("state", &original_state),
+            ],
+        );
+        return Redirect::to(&url).into_response();
+    }
+    if form.action != "approve" {
+        return (StatusCode::BAD_REQUEST, "invalid action").into_response();
+    }
+
+    // Approve: mint an authorization code and redirect to the
+    // client's redirect_uri carrying it.
+    let code_plaintext = generate_random_token();
+    let code_record = AuthorizationCode {
+        code: code_plaintext.clone(),
+        client_id: pending.client_id.clone(),
+        user_id,
+        redirect_uri: pending.redirect_uri.clone(),
+        scope: pending.scope.clone(),
+        code_challenge: pending.code_challenge.clone(),
+        code_challenge_method: pending.code_challenge_method.clone(),
+        created_at: Utc::now(),
+        used_at: None,
+    };
+    if let Err(e) = save_authorization_code(&mut bucket, &code_record) {
+        tracing::error!(error = %e, "save auth code");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+    }
+
+    let url = build_redirect_with_params(
+        &pending.redirect_uri,
+        &[("code", &code_plaintext), ("state", &original_state)],
+    );
+    Redirect::to(&url).into_response()
+}
+
+fn build_redirect_with_params(base: &str, params: &[(&str, &str)]) -> String {
+    let mut url = match reqwest::Url::parse(base) {
+        Ok(u) => u,
+        Err(_) => return base.to_string(),
+    };
+    {
+        let mut q = url.query_pairs_mut();
+        for (k, v) in params {
+            if !v.is_empty() {
+                q.append_pair(k, v);
+            }
+        }
+    }
+    url.into()
+}
+
+// -- Token: POST /__auth/oauth/token ------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct TokenForm {
+    grant_type: String,
+    // authorization_code grant fields
+    code: Option<String>,
+    redirect_uri: Option<String>,
+    code_verifier: Option<String>,
+    // refresh_token grant fields. Parsed but not yet consumed in
+    // slice 52 — the refresh handler lands in slice 53. Keeping the
+    // field declared so serde doesn't drop it when clients start
+    // sending it ahead of that handler being wired.
+    #[allow(dead_code)]
+    refresh_token: Option<String>,
+    // client auth via client_secret_post (form fields)
+    client_id: Option<String>,
+    client_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+}
+
+async fn token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<TokenForm>,
+) -> Response {
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open bucket");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error",
+            );
+        }
+    };
+
+    // Resolve client auth. RFC 6749 §2.3.1 says clients SHOULD use
+    // HTTP Basic; some libraries default to form-post. We accept
+    // both: Authorization: Basic ..., then client_id+client_secret
+    // form fields as fallback.
+    let client_auth = match extract_client_auth(&headers, &form) {
+        Some(a) => a,
+        None => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "missing client credentials",
+            );
+        }
+    };
+
+    let client = match load_client(&mut bucket, &client_auth.client_id) {
+        Ok(Some(c)) if c.revoked_at.is_none() => c,
+        _ => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "unknown or revoked client",
+            );
+        }
+    };
+    if !crate::local_auth::verify_password(&client.client_secret_hash, &client_auth.client_secret) {
+        return oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "client authentication failed",
+        );
+    }
+
+    match form.grant_type.as_str() {
+        "authorization_code" => {
+            handle_authorization_code_grant(&mut bucket, &client, &form, &state).await
+        }
+        "refresh_token" => {
+            // Wired up in slice 53.
+            oauth_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_grant_type",
+                "refresh_token grant not yet implemented",
+            )
+        }
+        other => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+            &format!("unsupported grant_type {other:?}"),
+        ),
+    }
+}
+
+struct ClientAuth {
+    client_id: String,
+    client_secret: String,
+}
+
+fn extract_client_auth(headers: &HeaderMap, form: &TokenForm) -> Option<ClientAuth> {
+    if let Some(v) = headers.get(header::AUTHORIZATION)
+        && let Ok(raw) = v.to_str()
+        && let Some(b64) = raw.strip_prefix("Basic ")
+    {
+        let bytes = B64URL
+            .decode(b64)
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(b64));
+        if let Ok(decoded) = bytes
+            && let Ok(text) = String::from_utf8(decoded)
+            && let Some((id, secret)) = text.split_once(':')
+        {
+            return Some(ClientAuth {
+                client_id: id.to_string(),
+                client_secret: secret.to_string(),
+            });
+        }
+    }
+    if let (Some(id), Some(secret)) = (form.client_id.as_deref(), form.client_secret.as_deref()) {
+        return Some(ClientAuth {
+            client_id: id.to_string(),
+            client_secret: secret.to_string(),
+        });
+    }
+    None
+}
+
+async fn handle_authorization_code_grant(
+    bucket: &mut Bucket,
+    client: &OAuthClient,
+    form: &TokenForm,
+    state: &AppState,
+) -> Response {
+    let _ = state; // session/auth touches happen via store directly
+    let Some(code) = form.code.as_deref() else {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "missing `code`");
+    };
+    let Some(redirect_uri) = form.redirect_uri.as_deref() else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing `redirect_uri`",
+        );
+    };
+    let Some(verifier) = form.code_verifier.as_deref() else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing PKCE `code_verifier`",
+        );
+    };
+
+    let consumed = match consume_authorization_code(bucket, code) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "authorization code not found or expired",
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "consume auth code");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error",
+            );
+        }
+    };
+    // Was already used: consume_authorization_code returns the record
+    // with used_at set. RFC 6749 §10.5 mandates rejection — and
+    // additionally we revoke any access/refresh tokens issued from
+    // this client (defence against a leaked code), but that's a
+    // slice-54 concern.
+    if let Some(prior) = consumed.used_at
+        && (Utc::now() - prior).num_seconds() > 0
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "authorization code already used",
+        );
+    }
+    if consumed.client_id != client.client_id {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "code does not belong to this client",
+        );
+    }
+    if consumed.redirect_uri != redirect_uri {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "redirect_uri does not match the code's binding",
+        );
+    }
+    if !verify_pkce(&consumed.code_challenge, verifier) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "PKCE verifier does not match challenge",
+        );
+    }
+
+    // Mint access token + refresh token. Refresh token lives in
+    // slice 53; for now we issue it but the only way to use it is
+    // via the same authorization_code flow, which is fine.
+    let access_plaintext = generate_access_token();
+    let access_hash = hash_token(&access_plaintext);
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(ACCESS_TOKEN_TTL_SECONDS as i64);
+    let access_record = AccessToken {
+        token_hash: access_hash,
+        client_id: client.client_id.clone(),
+        user_id: consumed.user_id.clone(),
+        scope: consumed.scope.clone(),
+        created_at: now,
+        expires_at,
+    };
+    if let Err(e) = save_access_token(bucket, &access_record) {
+        tracing::error!(error = %e, "save access token");
+        return oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "internal error",
+        );
+    }
+
+    let refresh_plaintext = generate_refresh_token();
+    let refresh_hash = hash_token(&refresh_plaintext);
+    let refresh_record = RefreshToken {
+        token_hash: refresh_hash,
+        client_id: client.client_id.clone(),
+        user_id: consumed.user_id.clone(),
+        scope: consumed.scope.clone(),
+        created_at: now,
+        used_at: None,
+        revoked_at: None,
+    };
+    if let Err(e) = save_refresh_token(bucket, &refresh_record) {
+        tracing::error!(error = %e, "save refresh token");
+        return oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "internal error",
+        );
+    }
+
+    let resp = TokenResponse {
+        access_token: access_plaintext,
+        token_type: "Bearer".into(),
+        expires_in: ACCESS_TOKEN_TTL_SECONDS,
+        scope: consumed.scope,
+        refresh_token: Some(refresh_plaintext),
+    };
+    let mut response = Json(resp).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+// -- Error response shape ----------------------------------------------------
+
+fn oauth_error(status: StatusCode, code: &str, description: &str) -> Response {
+    let body: HashMap<&str, &str> = [("error", code), ("error_description", description)]
+        .into_iter()
+        .collect();
+    (status, Json(body)).into_response()
 }
 
 #[cfg(test)]
