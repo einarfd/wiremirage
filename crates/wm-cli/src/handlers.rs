@@ -22,7 +22,7 @@ use wm_core::{
 };
 
 use crate::cli::{
-    AddRouteArgs, Cli, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, GroupsListArgs,
+    AddRouteArgs, Command, CreateTokenArgs, CreateUserArgs, GroupsCommand, GroupsListArgs,
     JournalCommand, JournalListArgs, RoutesCommand, RoutesListArgs, TestRouteArgs, TokensCommand,
     UnmatchedCommand, UnmatchedListArgs, UpdateRouteArgs, UpdateUserArgs, UsersCommand,
 };
@@ -33,8 +33,16 @@ use crate::format::{self, Format};
 /// unexpected client-side problems (failed to read a file, etc.) —
 /// HTTP-level errors return `Ok(ExitCode)` after printing the
 /// per-class message.
-pub async fn dispatch(args: Cli) -> anyhow::Result<ExitCode> {
-    let format = Format::from_flag(args.json);
+///
+/// `host` and `token` are the values returned by `Config::resolve` —
+/// they already have flag / env / profile / default layered into them.
+pub async fn dispatch(
+    host: String,
+    token: Option<String>,
+    json: bool,
+    command: Command,
+) -> anyhow::Result<ExitCode> {
+    let format = Format::from_flag(json);
 
     // Three commands work without a token. Fast-path them so missing
     // token doesn't bother the user. (`wm match` does need a token —
@@ -42,25 +50,27 @@ pub async fn dispatch(args: Cli) -> anyhow::Result<ExitCode> {
     // `wm completion` is purely local clap-derived and never touches
     // the host.
     let needs_token = !matches!(
-        args.command,
+        command,
         Command::Health | Command::Version | Command::Completion { .. }
     );
-    if needs_token && args.token.is_none() {
+    if needs_token && token.is_none() {
         emit_error(
             format,
             "auth",
-            "no token configured. Set WM_TOKEN or pass --token wmt_...",
+            "no token configured. Set WM_TOKEN, pass --token wmt_..., \
+             or add `token = \"wmt_...\"` to the selected profile in \
+             ~/.config/wiremirage/config.toml.",
         );
         return Ok(ExitCode::from(4));
     }
 
-    let mut builder = Client::builder(&args.host);
-    if let Some(token) = args.token.as_deref() {
+    let mut builder = Client::builder(&host);
+    if let Some(token) = token.as_deref() {
         builder = builder.with_token(token);
     }
     let client = builder.build().context("build wm-core client")?;
 
-    let result = match args.command {
+    let result = match command {
         Command::Health => handle_health(&client, format).await,
         Command::Version => handle_version(&client, format).await,
         Command::Groups(cmd) => handle_groups(&client, cmd, format).await,
@@ -726,7 +736,7 @@ fn admin_flag(admin: bool, no_admin: bool) -> Option<bool> {
 
 fn handle_completion(shell: clap_complete::Shell) {
     use clap::CommandFactory;
-    let mut cmd = Cli::command();
+    let mut cmd = crate::cli::Cli::command();
     let bin_name = cmd.get_name().to_string();
     clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
 }

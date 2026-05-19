@@ -8,22 +8,29 @@
 
 use clap::{Parser, Subcommand};
 
-const DEFAULT_HOST: &str = "http://localhost:8080";
-
 #[derive(Debug, Parser)]
 #[command(name = "wm", version, about = "WireMirage CLI", long_about = None)]
 pub struct Cli {
-    /// Host URL. Defaults to `http://localhost:8080`. Read from the
-    /// `WM_HOST` env var if not supplied on the command line.
-    #[arg(long, env = "WM_HOST", default_value = DEFAULT_HOST, global = true)]
-    pub host: String,
+    /// Host URL. Read from `WM_HOST` if not supplied; falls back to
+    /// the selected profile's `host` field, then to
+    /// `http://localhost:8080`. See `cli-design.md` for the full
+    /// resolution order.
+    #[arg(long, env = "WM_HOST", global = true)]
+    pub host: Option<String>,
 
     /// Bearer token (`wmt_...`). Required for everything under
-    /// `/__api/*`. Read from the `WM_TOKEN` env var if not supplied
-    /// on the command line. `wm health` and `wm version` work without
-    /// a token.
+    /// `/__api/*`. Read from `WM_TOKEN` if not supplied; falls back
+    /// to the selected profile's `token` field. `wm health` and
+    /// `wm version` work without a token.
     #[arg(long, env = "WM_TOKEN", global = true)]
     pub token: Option<String>,
+
+    /// Configuration profile to use. Read from `WM_PROFILE` if not
+    /// supplied; falls back to `default`. Profiles live in
+    /// `~/.config/wiremirage/config.toml` (override with
+    /// `WM_CONFIG_FILE`) under `[profiles.NAME]` keys.
+    #[arg(long, env = "WM_PROFILE", global = true)]
+    pub profile: Option<String>,
 
     /// Emit machine-parseable JSON instead of human-readable text.
     /// Off by default; the human format is the contract for

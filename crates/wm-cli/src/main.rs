@@ -6,6 +6,7 @@
 //! consumption.
 
 mod cli;
+mod config;
 mod format;
 mod handlers;
 
@@ -28,7 +29,27 @@ fn main() -> ExitCode {
 async fn run() -> ExitCode {
     use clap::Parser;
     let args = cli::Cli::parse();
-    match handlers::dispatch(args).await {
+
+    // Resolve profile / env / flag layering into the dispatch-ready
+    // (host, token) pair before any subcommand runs. Failures here
+    // (bad config file, named profile that doesn't exist) are
+    // reported in the same shape as any other startup error.
+    let config = match config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return ExitCode::from(1);
+        }
+    };
+    let effective = match config.resolve(args.profile.as_deref(), args.host, args.token) {
+        Ok(eff) => eff,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match handlers::dispatch(effective.host, effective.token, args.json, args.command).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
