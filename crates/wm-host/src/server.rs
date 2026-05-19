@@ -77,6 +77,12 @@ pub struct AppState {
     /// `WM_TRUST_FORWARDED_HEADERS=1` only when the host is fronted
     /// by a reverse proxy that populates the header reliably.
     trust_forwarded_headers: bool,
+    /// GitHub OAuth config, populated when both `WM_GITHUB_CLIENT_ID`
+    /// and `WM_GITHUB_CLIENT_SECRET` are set. `None` means the login
+    /// page hides the "Continue with GitHub" button and the
+    /// `/__auth/start/github` + `/__auth/callback` routes respond
+    /// 503. Kept behind `Arc` so cloning `AppState` shares it.
+    github_oauth: Option<Arc<crate::github_oauth::GitHubConfig>>,
 }
 
 impl AppState {
@@ -99,6 +105,7 @@ impl AppState {
             shutdown: None,
             secure_cookies: false,
             trust_forwarded_headers: false,
+            github_oauth: None,
         }
     }
 
@@ -147,6 +154,11 @@ impl AppState {
         self
     }
 
+    pub fn with_github_oauth(mut self, config: crate::github_oauth::GitHubConfig) -> Self {
+        self.github_oauth = Some(Arc::new(config));
+        self
+    }
+
     pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
     }
@@ -173,6 +185,10 @@ impl AppState {
 
     pub fn sessions(&self) -> Option<&crate::session::SessionStore> {
         self.sessions.as_ref()
+    }
+
+    pub fn github_oauth(&self) -> Option<&crate::github_oauth::GitHubConfig> {
+        self.github_oauth.as_deref()
     }
 
     pub fn login_throttle(&self) -> &crate::login_throttle::LoginThrottle {
