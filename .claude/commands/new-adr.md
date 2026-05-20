@@ -30,6 +30,10 @@ Workflow:
 
 6. Update `adrs/index.md` to add the new ADR to the Decisions list,
    matching the existing wikilink format.
+7. Update the workspace root `index.md` ("Decisions made and why" section)
+   to add the new ADR to its per-ADR list, matching the existing wikilink
+   format there. Keep both indices in sync — the root list is the
+   document-map entry point and shouldn't lag behind `adrs/index.md`.
 
 Do not finalize Status: leave as `Proposed` until the user confirms the
 decision is accepted.
