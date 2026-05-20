@@ -1,0 +1,37 @@
+package wiremirage:handler@0.1.0;
+
+// Engine-internal extension (ADR-0020). The `engine` world is what
+// `js-engine.wasm` is built against — it looks like the user-facing
+// `handler` world (same export, same store/log imports) but adds a
+// host import that delivers the route's source at request time.
+// The host calls `handle` exactly like it would call a per-route
+// component; the engine then calls back into the host via
+// `engine-host.get-source` to receive the JS source bytes for the
+// matched route, evaluates them, and dispatches.
+//
+// Per-route components (pre-compiled wasm uploads, AOT-language
+// builds) continue to target the user-facing `world handler`.
+
+interface engine-host {
+  // Returns the JavaScript source for the matched route. Called
+  // once per `handle` invocation by the engine shim. The bytes are
+  // expected to be UTF-8 JS, evaluated as a script (no ES-module
+  // export keywords). The TS→JS transpile that produces this string
+  // is responsible for the export → script-shape rewrite.
+  get-source: func() -> string;
+}
+
+world engine {
+  import store;
+  import log;
+  import engine-host;
+
+  use store.{bucket};
+  use http.{request, response};
+
+  export handle: func(
+    req: request,
+    route-store: borrow<bucket>,
+    group-store: borrow<bucket>,
+  ) -> response;
+}

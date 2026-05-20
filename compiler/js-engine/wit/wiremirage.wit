@@ -1,0 +1,78 @@
+package wiremirage:handler@0.1.0;
+
+// WireMirage handler script API. This file is a copy of the
+// canonical contract at the repo root (`wit/wiremirage.wit`);
+// componentize-js wants every WIT file in a build to live in one
+// directory under one package. Drift is loud — both copies are
+// tracked in git, and the canonical source (Arkiv
+// `script-api-wit.md`) is updated first.
+
+interface http {
+  type header = tuple<string, string>;
+  type path-param = tuple<string, string>;
+
+  record request {
+    method: string,
+    path: string,
+    matched-pattern: string,
+    path-params: list<path-param>,
+    query: list<header>,
+    headers: list<header>,
+    body: list<u8>,
+  }
+
+  record response {
+    status: u16,
+    headers: list<header>,
+    body: list<u8>,
+  }
+}
+
+interface store {
+  resource bucket {
+    get: func(key: string) -> option<list<u8>>;
+    set: func(key: string, value: list<u8>);
+    delete: func(key: string);
+    incr: func(key: string, by: s64) -> s64;
+    list-keys: func(prefix: option<string>) -> list<string>;
+
+    list-push: func(key: string, value: list<u8>);
+    list-pop: func(key: string) -> option<list<u8>>;
+    list-range: func(key: string, start: s64, stop: s64) -> list<list<u8>>;
+    list-length: func(key: string) -> u64;
+
+    hash-get: func(key: string, field: string) -> option<list<u8>>;
+    hash-set: func(key: string, field: string, value: list<u8>);
+    hash-delete: func(key: string, field: string);
+    hash-keys: func(key: string) -> list<string>;
+
+    set-add: func(key: string, member: string);
+    set-remove: func(key: string, member: string);
+    set-contains: func(key: string, member: string) -> bool;
+  }
+}
+
+interface log {
+  enum level {
+    debug,
+    info,
+    warn,
+    error,
+  }
+
+  emit: func(level: level, message: string);
+}
+
+world handler {
+  import store;
+  import log;
+
+  use store.{bucket};
+  use http.{request, response};
+
+  export handle: func(
+    req: request,
+    route-store: borrow<bucket>,
+    group-store: borrow<bucket>,
+  ) -> response;
+}

@@ -17,3 +17,19 @@ wasmtime::component::bindgen!({
     },
     imports: { default: trappable },
 });
+
+// Engine-world bindings (ADR-0020). Same shape as the handler world
+// but with the extra `engine-host` import that delivers per-route
+// source to `js-engine.wasm` at request time. Generated alongside
+// the handler bindings so the host can use whichever shape matches
+// the component it's instantiating.
+pub mod engine_bindings {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "engine",
+        with: {
+            "wiremirage:handler/store.bucket": crate::store::Bucket,
+        },
+        imports: { default: trappable },
+    });
+}

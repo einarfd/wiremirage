@@ -1,0 +1,15 @@
+{
+  "name": "@wiremirage/js-engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "WireMirage shared JS engine component (ADR-0020). Built once via componentize-js; the resulting js-engine.wasm is vendored under crates/wm-host/vendored/.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "0.20.0",
+    "typescript": "6.0.3"
+  }
+}

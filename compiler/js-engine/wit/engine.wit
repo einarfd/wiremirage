@@ -1,0 +1,35 @@
+package wiremirage:handler@0.1.0;
+
+// Engine-internal extension. Lives in the same package as the
+// user-facing `handler` world because componentize-js wants every
+// wit file in a build's wit directory to declare the same package
+// identifier. The split between user-facing and engine-internal is
+// preserved by keeping each world in its own file.
+//
+// The `engine` world looks like `handler` (same export shape, same
+// store/log imports) but adds a host import that delivers the
+// route's source at request time.
+
+interface engine-host {
+  // Returns the JavaScript source for the matched route. Called
+  // once per `handle` invocation by the engine shim. The bytes are
+  // expected to be UTF-8 JS, evaluated as a script (no ES-module
+  // export keywords). The TS→JS transpile that produces this string
+  // is responsible for the export → script-shape rewrite.
+  get-source: func() -> string;
+}
+
+world engine {
+  import store;
+  import log;
+  import engine-host;
+
+  use store.{bucket};
+  use http.{request, response};
+
+  export handle: func(
+    req: request,
+    route-store: borrow<bucket>,
+    group-store: borrow<bucket>,
+  ) -> response;
+}
