@@ -458,7 +458,6 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         HANDLED_BODY_LIMIT,
     );
 
-    let component = state.routes.component_for(&matched.route)?;
     let wit_request = build_wit_request(
         &method,
         &uri,
@@ -471,6 +470,19 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let runtime = state.runtime.clone();
     let group_id = matched.route.group_id.clone();
     let route_id = matched.route.id.clone();
+    let route_language = matched.route.language.clone();
+    let route_source = matched.route.source.clone();
+
+    // Branch on language: source-language routes (ADR-0020) run
+    // through the shared engine; everything else (`wasm` uploads,
+    // future AOT languages) still goes through the per-route
+    // component cache.
+    let use_engine = matches!(route_language.as_str(), "javascript");
+    let component = if use_engine {
+        None
+    } else {
+        Some(state.routes.component_for(&matched.route)?)
+    };
 
     // spawn_blocking moves out of the async task's tracing context, so
     // capture the current span and re-enter it inside the closure to
@@ -492,29 +504,73 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let fuel_budget = runtime.handler_fuel();
     let outcome: Outcome = tokio::task::spawn_blocking(move || -> Outcome {
         let _enter = parent_span.enter();
-        let instantiate_span =
-            tracing::info_span!("wasmtime.instantiate", route.id = %route_id).entered();
-        let (handler, mut store, handles) =
-            match runtime.instantiate(&component, &group_id, &route_id) {
-                Ok(t) => t,
-                Err(e) => return (Err(e), Vec::new(), ResourceUsage::default()),
+
+        if use_engine {
+            let source = match route_source {
+                Some(s) => s,
+                None => {
+                    return (
+                        Err(wasmtime::Error::msg(format!(
+                            "source-language route {route_id} has no source stored"
+                        ))),
+                        Vec::new(),
+                        ResourceUsage::default(),
+                    );
+                }
             };
-        drop(instantiate_span);
-        let _call = tracing::info_span!("wasmtime.call_handle", route.id = %route_id).entered();
-        let result = handler.call_handle(&mut store, &wit_request, handles.route, handles.group);
-        let logs = store.data_mut().take_logs();
-        // Capture resource usage before the store drops. `get_fuel`
-        // returns the *remaining* fuel; we subtract from the budget
-        // to get consumed. `peak_memory_bytes` is updated by the
-        // `HandlerLimits` impl every time `memory_growing` is
-        // approved.
-        let fuel_remaining = store.get_fuel().unwrap_or(fuel_budget);
-        let resources = ResourceUsage {
-            fuel_consumed: fuel_budget.saturating_sub(fuel_remaining),
-            memory_peak_bytes: store.data().limits.peak_memory_bytes as u64,
-            wall_clock_ms: 0, // filled in by the async caller below
-        };
-        (result, logs, resources)
+            let instantiate_span =
+                tracing::info_span!("wasmtime.engine_instantiate", route.id = %route_id).entered();
+            let (engine_world, mut store, handles) =
+                match runtime.instantiate_engine(&group_id, &route_id, source) {
+                    Ok(t) => t,
+                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default()),
+                };
+            drop(instantiate_span);
+            let _call =
+                tracing::info_span!("wasmtime.engine_call_handle", route.id = %route_id).entered();
+            let engine_req = crate::bindings::handler_request_to_engine(wit_request);
+            let result = engine_world
+                .call_handle(&mut store, &engine_req, handles.route, handles.group)
+                .map(crate::bindings::engine_response_to_handler);
+            let logs = store.data_mut().take_logs();
+            // Fuel is effectively unbounded on the engine path; we
+            // still report consumed for the journal because the
+            // wasmtime engine still tracks it. memory_peak_bytes is
+            // the more interesting number for these routes.
+            let fuel_remaining = store.get_fuel().unwrap_or(0);
+            let resources = ResourceUsage {
+                fuel_consumed: u64::MAX.saturating_sub(fuel_remaining),
+                memory_peak_bytes: store.data().limits.peak_memory_bytes as u64,
+                wall_clock_ms: 0,
+            };
+            (result, logs, resources)
+        } else {
+            let component = component.expect("non-engine path requires a component");
+            let instantiate_span =
+                tracing::info_span!("wasmtime.instantiate", route.id = %route_id).entered();
+            let (handler, mut store, handles) =
+                match runtime.instantiate(&component, &group_id, &route_id) {
+                    Ok(t) => t,
+                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default()),
+                };
+            drop(instantiate_span);
+            let _call = tracing::info_span!("wasmtime.call_handle", route.id = %route_id).entered();
+            let result =
+                handler.call_handle(&mut store, &wit_request, handles.route, handles.group);
+            let logs = store.data_mut().take_logs();
+            // Capture resource usage before the store drops. `get_fuel`
+            // returns the *remaining* fuel; we subtract from the budget
+            // to get consumed. `peak_memory_bytes` is updated by the
+            // `HandlerLimits` impl every time `memory_growing` is
+            // approved.
+            let fuel_remaining = store.get_fuel().unwrap_or(fuel_budget);
+            let resources = ResourceUsage {
+                fuel_consumed: fuel_budget.saturating_sub(fuel_remaining),
+                memory_peak_bytes: store.data().limits.peak_memory_bytes as u64,
+                wall_clock_ms: 0,
+            };
+            (result, logs, resources)
+        }
     })
     .await?;
 

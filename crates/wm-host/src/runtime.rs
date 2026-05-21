@@ -1,10 +1,12 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Result, Store};
 
 use crate::bindings::Handler;
+use crate::bindings::engine_bindings::Engine as EngineWorld;
 use crate::host_state::{HandlerLimits, HostState};
 use crate::store::{Bucket, Storage};
 
@@ -37,6 +39,27 @@ pub const HANDLER_EPOCH_TICKS: u64 = 100;
 /// epoch-interruption-based deadlines.
 pub const EPOCH_TICK_INTERVAL_MS: u64 = 10;
 
+/// Per-call resource budget for shared-engine (interpreted-language)
+/// routes per ADR-0020's resource-limits section. The engine
+/// instantiates and parses source inside the request budget, so the
+/// numbers are an order of magnitude wider than the
+/// per-route-component path's:
+///
+/// * `ENGINE_FUEL = u64::MAX` — fuel is effectively disabled. The
+///   epoch deadline is the runaway-loop backstop. We can't turn
+///   `consume_fuel` off per call (it's an engine-config flag), so
+///   we set the per-call budget to the maximum and accept the
+///   per-instruction accounting overhead.
+/// * `ENGINE_EPOCH_TICKS = 3000` — ~30 s wall clock at the 10 ms
+///   tick cadence. Long enough that "engine boots, parses 500 LoC,
+///   runs the handler, returns" never trips it on a non-pathological
+///   route; short enough that a `while(true)` dies in 30 s.
+/// * `ENGINE_MAX_MEMORY_BYTES = 256 MiB` — comfortably fits a
+///   SpiderMonkey instance plus a generous handler heap plus state.
+pub const ENGINE_FUEL: u64 = u64::MAX;
+pub const ENGINE_EPOCH_TICKS: u64 = 3000;
+pub const ENGINE_MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+
 /// Wraps a wasmtime `Engine`, a `Linker` configured with all WireMirage
 /// host imports, and the `Storage` backend that mints per-request buckets.
 /// One `Runtime` is shared across requests; per-request state lives in
@@ -55,6 +78,17 @@ pub struct Runtime {
     /// Per-instance linear-memory cap. Defaults to
     /// [`HANDLER_MAX_MEMORY_BYTES`].
     max_memory_bytes: usize,
+    /// Optional shared JS engine component + linker for the
+    /// interpreted-language path (ADR-0020). `None` when no engine
+    /// is wired in (tests that don't need it; pre-slice-57
+    /// configurations). Loaded once via `with_js_engine`; the
+    /// `Arc<Component>` is cheap to clone across requests.
+    js_engine: Option<JsEngine>,
+}
+
+struct JsEngine {
+    component: Arc<Component>,
+    linker: Linker<HostState>,
 }
 
 impl Runtime {
@@ -94,7 +128,49 @@ impl Runtime {
             fuel,
             epoch_ticks,
             max_memory_bytes,
+            js_engine: None,
         })
+    }
+
+    /// Load the shared JS engine component from `path` and prepare
+    /// a dedicated linker for it (with the `engine-host` import
+    /// wired in addition to the usual store/log/http). Idempotent:
+    /// a second call replaces the previous engine.
+    ///
+    /// Failure cases: file missing → returns Err; file isn't a
+    /// component → returns Err; linker setup fails (rare, type
+    /// mismatch with the wit) → returns Err. Each is a startup-
+    /// time bug from the operator's POV.
+    pub fn with_js_engine(mut self, path: &Path) -> Result<Self> {
+        let component = Component::from_file(&self.engine, path)?;
+        self.attach_engine(component);
+        Ok(self)
+    }
+
+    /// Same as `with_js_engine` but takes the component bytes
+    /// directly. The host binary `include_bytes!`-embeds the
+    /// vendored `js-engine.wasm` and feeds it through here so the
+    /// runtime has no on-disk filesystem dependency.
+    pub fn with_js_engine_bytes(mut self, bytes: &[u8]) -> Result<Self> {
+        let component = Component::from_binary(&self.engine, bytes)?;
+        self.attach_engine(component);
+        Ok(self)
+    }
+
+    fn attach_engine(&mut self, component: Component) {
+        let mut linker: Linker<HostState> = Linker::new(&self.engine);
+        EngineWorld::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |s| s)
+            .expect("engine linker setup");
+        self.js_engine = Some(JsEngine {
+            component: Arc::new(component),
+            linker,
+        });
+    }
+
+    /// True when `with_js_engine` has been called successfully and
+    /// shared-engine dispatch is available.
+    pub fn has_js_engine(&self) -> bool {
+        self.js_engine.is_some()
     }
 
     pub fn engine(&self) -> &Engine {
@@ -180,6 +256,55 @@ impl Runtime {
         let group = store.data_mut().push_bucket(group_bucket)?;
         let handler = Handler::instantiate(&mut store, component, &self.linker)?;
         Ok((handler, store, BucketHandles { route, group }))
+    }
+
+    /// Instantiate the shared JS engine for `(group, route)` with
+    /// `source` as the per-request handler bytes. Returns the
+    /// engine-world handle (with the same `call_handle` shape as
+    /// `Handler`), the wasmtime store, and the bucket resources.
+    /// Errors out if `with_js_engine` hasn't been called yet.
+    pub fn instantiate_engine(
+        &self,
+        group_ulid: &str,
+        route_ulid: &str,
+        source: String,
+    ) -> Result<(EngineWorld, Store<HostState>, BucketHandles)> {
+        let route_bucket = self
+            .storage
+            .route_bucket(group_ulid, route_ulid)
+            .map_err(|e| wasmtime::Error::msg(format!("open route bucket: {e}")))?;
+        let group_bucket = self
+            .storage
+            .group_bucket(group_ulid)
+            .map_err(|e| wasmtime::Error::msg(format!("open group bucket: {e}")))?;
+        self.instantiate_engine_with_buckets(source, route_bucket, group_bucket)
+    }
+
+    pub fn instantiate_engine_with_buckets(
+        &self,
+        source: String,
+        route_bucket: Bucket,
+        group_bucket: Bucket,
+    ) -> Result<(EngineWorld, Store<HostState>, BucketHandles)> {
+        let Some(engine) = &self.js_engine else {
+            return Err(wasmtime::Error::msg(
+                "shared JS engine not configured (call Runtime::with_js_engine on startup)",
+            ));
+        };
+        let mut state = HostState::new(HandlerLimits::new(ENGINE_MAX_MEMORY_BYTES));
+        state.set_current_source(source);
+        let mut store = Store::new(&self.engine, state);
+        // Wider per-call budget for the interpreted path. Fuel is
+        // effectively disabled (set to max); epoch is the
+        // runaway-loop backstop.
+        store.set_fuel(ENGINE_FUEL)?;
+        store.set_epoch_deadline(ENGINE_EPOCH_TICKS);
+        store.limiter(|state| &mut state.limits);
+
+        let route = store.data_mut().push_bucket(route_bucket)?;
+        let group = store.data_mut().push_bucket(group_bucket)?;
+        let engine_world = EngineWorld::instantiate(&mut store, &engine.component, &engine.linker)?;
+        Ok((engine_world, store, BucketHandles { route, group }))
     }
 }
 
