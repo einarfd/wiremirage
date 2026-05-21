@@ -24,6 +24,13 @@ wasmtime::component::bindgen!({
 // the handler bindings so the host can use whichever shape matches
 // the component it's instantiating.
 pub mod engine_bindings {
+    // The engine bindgen generates its own copies of Request /
+    // Response — bindgen's `with` doesn't easily share types that
+    // are `use`'d (rather than imported) by the target world. The
+    // dispatch path converts between the two with `From` impls
+    // below. Sharing the Bucket resource via `with` IS load-bearing
+    // though — both worlds must use the same resource-table backing
+    // type so the host can push one bucket and pass it to either.
     wasmtime::component::bindgen!({
         path: "../../wit",
         world: "engine",
@@ -32,4 +39,51 @@ pub mod engine_bindings {
         },
         imports: { default: trappable },
     });
+}
+
+/// Convert the engine-world's Request type to the handler-world's
+/// Request. Same field shape; only the module path differs.
+pub fn engine_request_to_handler(
+    req: engine_bindings::wiremirage::handler::http::Request,
+) -> wiremirage::handler::http::Request {
+    wiremirage::handler::http::Request {
+        method: req.method,
+        path: req.path,
+        matched_pattern: req.matched_pattern,
+        path_params: req.path_params,
+        query: req.query,
+        headers: req.headers,
+        body: req.body,
+    }
+}
+
+/// Convert the handler-world Request to the engine-world Request.
+/// The dispatcher builds a single `wiremirage:handler::http::Request`
+/// from the incoming axum request, then translates it for the
+/// engine call here.
+pub fn handler_request_to_engine(
+    req: wiremirage::handler::http::Request,
+) -> engine_bindings::wiremirage::handler::http::Request {
+    engine_bindings::wiremirage::handler::http::Request {
+        method: req.method,
+        path: req.path,
+        matched_pattern: req.matched_pattern,
+        path_params: req.path_params,
+        query: req.query,
+        headers: req.headers,
+        body: req.body,
+    }
+}
+
+/// Convert the engine-world Response back to the handler-world
+/// Response so the dispatcher's existing serializer / journal-
+/// writer / axum-response builder picks it up.
+pub fn engine_response_to_handler(
+    resp: engine_bindings::wiremirage::handler::http::Response,
+) -> wiremirage::handler::http::Response {
+    wiremirage::handler::http::Response {
+        status: resp.status,
+        headers: resp.headers,
+        body: resp.body,
+    }
 }

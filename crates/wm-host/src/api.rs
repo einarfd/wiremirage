@@ -577,8 +577,31 @@ pub(crate) async fn create_route_core(
                 .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
             (bytes, "wasm".to_string(), bv, None)
         }
+        "javascript" => {
+            // ADR-0020 shared-engine path: source is stored verbatim
+            // on the Route record, no per-route componentize. The
+            // dispatcher branches on `language: "javascript"` to
+            // route the call through the shared `js-engine.wasm`
+            // component at request time.
+            let source = body.source.ok_or_else(|| {
+                ApiError::validation("source required when language=\"javascript\"")
+            })?;
+            // No compiled_wasm bytes for engine routes; we store an
+            // empty Vec so the Route record's shape stays stable
+            // (the field is `Vec<u8>`, not `Option<Vec<u8>>`).
+            (
+                Vec::new(),
+                "javascript".to_string(),
+                SUPPORTED_BINDINGS_VERSION.to_string(),
+                Some(source),
+            )
+        }
         other => {
-            // Source-based path: hand off to the compiler sidecar.
+            // TypeScript (and any other interpreted language not
+            // yet on the engine path) still goes through the
+            // compiler sidecar transitionally — slice 58 will move
+            // TS to the engine path with in-host transpile and
+            // delete this branch.
             let source = body.source.ok_or_else(|| {
                 ApiError::validation(format!("source required when language={other:?}"))
             })?;
@@ -940,7 +963,23 @@ pub(crate) async fn patch_route_core(
                     .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
                 (Some(bytes), Some("wasm".to_string()), Some(bv), Some(None))
             }
+            "javascript" => {
+                // ADR-0020 shared-engine swap: store source, drop
+                // any prior componentized wasm. The dispatcher
+                // picks up the language change on the next request.
+                let source = body.source.as_deref().ok_or_else(|| {
+                    ApiError::validation("source required when language=\"javascript\"")
+                })?;
+                (
+                    Some(Vec::new()),
+                    Some("javascript".to_string()),
+                    Some(SUPPORTED_BINDINGS_VERSION.to_string()),
+                    Some(Some(source.to_string())),
+                )
+            }
             other => {
+                // TS (and any future interpreted language not yet on
+                // the engine path) still goes through the sidecar.
                 let source = body.source.as_deref().ok_or_else(|| {
                     ApiError::validation(format!("source required when language={other:?}"))
                 })?;
