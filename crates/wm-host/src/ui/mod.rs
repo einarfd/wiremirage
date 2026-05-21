@@ -2969,7 +2969,13 @@ struct RouteNewFormState {
     source: String,
 }
 
-const DEFAULT_TS_HANDLER_SOURCE: &str = "export default async function handle(req, ctx) {\n  return {\n    status: 200,\n    headers: [[\"content-type\", \"application/json\"]],\n    body: new TextEncoder().encode(\"{}\"),\n  };\n}\n";
+// ADR-0020 slice B: the shared js-engine evaluates user source as a
+// script (`new Function(source + "; return handle;")`), so the
+// top-level declaration must be `function handle(...)` — not
+// `export default ...` or any module-shape variant. The in-host swc
+// strip pass rewrites `export function handle` → `function handle`,
+// but it can't reach `export default async function handle`.
+const DEFAULT_TS_HANDLER_SOURCE: &str = "function handle(req, route, group) {\n  return {\n    status: 200,\n    headers: [[\"content-type\", \"application/json\"]],\n    body: new TextEncoder().encode(\"{}\"),\n  };\n}\n";
 
 async fn route_new_form(
     State(state): State<AppState>,

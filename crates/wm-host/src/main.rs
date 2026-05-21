@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use wm_host::auth::Auth;
-use wm_host::compiler::CompilerClient;
 use wm_host::github_oauth::GitHubConfig;
 use wm_host::journal::Journal;
 use wm_host::lifecycle::Sweeper;
@@ -49,14 +48,6 @@ async fn main() -> anyhow::Result<()> {
     let journal = Journal::new(storage.clone());
 
     let mut state = AppState::new(runtime, routes, auth, journal);
-    if let Some(compiler) = CompilerClient::from_env() {
-        tracing::info!(url = compiler.base_url(), "compiler sidecar configured");
-        state = state.with_compiler(compiler);
-    } else {
-        tracing::info!(
-            "WM_COMPILER_URL is not set; only `language: \"wasm\"` requests will be accepted by /__api/routes"
-        );
-    }
 
     // Local auth (slice 20). Parse WM_LOCAL_AUTH and wire SESSION_SECRET.
     // Both are independent — operators can configure either, neither,

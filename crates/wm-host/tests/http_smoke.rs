@@ -145,13 +145,11 @@ async fn ready_endpoint_reports_dependencies_without_auth() {
     let resp = reqwest::get(format!("http://{addr}/__ready"))
         .await
         .expect("get");
-    // In-memory storage is trivially ok; no compiler is configured in the
-    // test harness, so it reports "not_configured" — that's still ready.
+    // In-memory storage is trivially ok.
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["status"], "ready");
     assert_eq!(body["valkey"], "ok");
-    assert_eq!(body["compiler"], "not_configured");
     server.abort();
 }
 

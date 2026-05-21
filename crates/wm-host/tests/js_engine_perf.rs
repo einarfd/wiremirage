@@ -97,9 +97,7 @@ async fn engine_dispatch_amortizes_jit_cost_across_requests() {
     let five = t1.elapsed();
     let per_subsequent = five / 5;
 
-    eprintln!(
-        "js engine perf: first={first:?} 5-total={five:?} per-subsequent={per_subsequent:?}"
-    );
+    eprintln!("js engine perf: first={first:?} 5-total={five:?} per-subsequent={per_subsequent:?}");
 
     // The contract this test enforces: subsequent requests are at
     // least 3× faster than the first. If this trips, somebody

@@ -6,15 +6,11 @@
 
 use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::State;
-use axum::routing::post;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use reqwest::Client;
 use serde_json::json;
 use wm_host::auth::Auth;
-use wm_host::compiler::CompilerClient;
 use wm_host::journal::Journal;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
@@ -38,79 +34,10 @@ struct Harness {
     client: Client,
     auth: Auth,
     server: tokio::task::JoinHandle<()>,
-    mock_compiler: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Harness {
     async fn start() -> Self {
-        Self::start_with_compiler(None).await
-    }
-
-    /// Spin up a mock compiler that returns `canned_component` for every
-    /// `/compile` call, then start the host pointed at it.
-    async fn start_with_mock_compiler(canned_component: Vec<u8>) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind compiler");
-        let mock_addr = listener.local_addr().unwrap();
-        let canned_b64 = B64.encode(&canned_component);
-        let app = Router::new()
-            .route(
-                "/compile",
-                post(move |State(state): State<Arc<String>>| {
-                    let body = (*state).clone();
-                    async move {
-                        axum::Json(json!({
-                            "compiled_wasm": body,
-                            "bindings_version": "0.1.0",
-                        }))
-                    }
-                }),
-            )
-            .with_state(Arc::new(canned_b64));
-        let mock = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("axum::serve");
-        });
-        let url = format!("http://{mock_addr}");
-        let mut h = Self::start_with_compiler(Some(CompilerClient::new(url))).await;
-        h.mock_compiler = Some(mock);
-        h
-    }
-
-    /// Mock compiler that always returns a `compile_failed` error.
-    async fn start_with_failing_compiler(message: &'static str) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind compiler");
-        let mock_addr = listener.local_addr().unwrap();
-        let app = Router::new().route(
-            "/compile",
-            post(move || async move {
-                use axum::http::StatusCode;
-                use axum::response::IntoResponse;
-                (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({
-                        "error": {
-                            "code": "compile_failed",
-                            "message": message,
-                            "diagnostics": ["expected `;` here"],
-                        }
-                    })),
-                )
-                    .into_response()
-            }),
-        );
-        let mock = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("axum::serve");
-        });
-        let url = format!("http://{mock_addr}");
-        let mut h = Self::start_with_compiler(Some(CompilerClient::new(url))).await;
-        h.mock_compiler = Some(mock);
-        h
-    }
-
-    async fn start_with_compiler(compiler: Option<CompilerClient>) -> Self {
         // Install the W3C propagator once per process so the tier-2
         // tests that send `traceparent` headers see the trace_id
         // stamped on journal records. Idempotent; the global subscriber
@@ -126,10 +53,7 @@ impl Harness {
         let registry = Arc::new(Registry::new(storage.clone()));
         let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
         let journal = Journal::new(storage);
-        let mut state = AppState::new(runtime, routes, auth.clone(), journal);
-        if let Some(c) = compiler {
-            state = state.with_compiler(c);
-        }
+        let state = AppState::new(runtime, routes, auth.clone(), journal);
         let app = router(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -159,7 +83,6 @@ impl Harness {
             client,
             auth,
             server,
-            mock_compiler: None,
         }
     }
 
@@ -206,9 +129,6 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         self.server.abort();
-        if let Some(c) = self.mock_compiler.take() {
-            c.abort();
-        }
     }
 }
 
@@ -490,99 +410,78 @@ async fn list_routes_reflects_dispatch_hits() {
 // -- Validation / errors -------------------------------------------------------
 
 #[tokio::test]
-async fn rejects_source_request_when_no_compiler_configured() {
+async fn typescript_source_path_creates_route_with_stored_source() {
+    // ADR-0020 slice B path: TS source is transpiled to JS in-host
+    // via swc, then stored. No external compiler — `language:
+    // "typescript"` just works.
     let h = Harness::start().await;
-    let resp = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/foo",
-            "language": "typescript",
-            "source": "export default async function handle() { return new Response('hi'); }"
-        }))
-        .await;
-    assert_eq!(resp.status().as_u16(), 400);
-    let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "compile_failed");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("compiler sidecar not configured"),
-        "got: {}",
-        body["error"]["message"]
-    );
-}
-
-#[tokio::test]
-async fn source_path_with_mock_compiler_creates_callable_route() {
-    // Mock compiler returns the echo fixture's bytes; the host should
-    // accept them and dispatch normally.
-    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
 
     let resp = h
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/charges",
             "language": "typescript",
-            "source": "export function handle(req, _r, _g) { return { status: 200, headers: [], body: new Uint8Array() }; }",
+            "source": "function handle(req: unknown, _r: unknown, _g: unknown) { return { status: 200, headers: [], body: new Uint8Array() }; }",
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 201);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["language"], "typescript");
+    let group = body["group"]["name"].as_str().unwrap().to_string();
+    let number = body["number"].as_u64().unwrap();
 
-    // The route now dispatches via the (echo-fixture) component.
+    // GET /source returns the post-strip JS — verifies the in-host
+    // transpile actually ran (types stripped, function body kept).
     let resp = h
         .client
-        .post(h.url("/v1/charges"))
-        .body("ignored")
+        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
         .send()
         .await
-        .expect("post");
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(resp.text().await.expect("body"), "echo: POST /v1/charges");
+        .expect("get source");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let stored = body["source"].as_str().expect("source string");
+    assert!(!stored.contains(": unknown"), "types stripped: {stored}");
+    assert!(stored.contains("function handle"));
 }
 
 #[tokio::test]
-async fn source_path_surfaces_compiler_diagnostics() {
-    let h = Harness::start_with_failing_compiler("transpile failed").await;
+async fn typescript_source_path_surfaces_transpile_errors() {
+    // Invalid TS source — swc's parser fails, the host returns
+    // `compile_failed` with the parser's error message.
+    let h = Harness::start().await;
 
     let resp = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/bad",
             "language": "typescript",
-            "source": "??? not valid",
+            "source": "function handle(req: unknown {",
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 400);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], "compile_failed");
-    assert_eq!(body["error"]["message"], "transpile failed");
-    let diags = body["error"]["diagnostics"]
-        .as_array()
-        .expect("diagnostics");
-    assert_eq!(diags.len(), 1);
-    assert_eq!(diags[0], "expected `;` here");
-}
-
-fn echo_bytes() -> Vec<u8> {
-    std::fs::read(env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT")).expect("read echo fixture")
 }
 
 // -- Source storage + GET /source ---------------------------------------------
 
-const TS_SOURCE: &str = "export function handle(req, _r, _g) { return { status: 200, headers: [], body: new Uint8Array() }; }";
+// JS round-trips verbatim through `/__api/routes` source storage (no
+// transpile, no whitespace munging). TS now goes through swc before
+// storage, so byte-for-byte assertions on TS belong in
+// `tests/ts_transpile.rs`; the source-storage assertions below use JS
+// to keep the round-trip clean.
+const JS_SOURCE: &str =
+    "function handle(req, _r, _g) { return { status: 200, headers: [], body: new Uint8Array() }; }";
 
 #[tokio::test]
 async fn source_is_persisted_for_source_language_routes() {
-    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let h = Harness::start().await;
     let resp = h
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/charges",
-            "language": "typescript",
-            "source": TS_SOURCE,
+            "language": "javascript",
+            "source": JS_SOURCE,
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 201);
@@ -599,8 +498,8 @@ async fn source_is_persisted_for_source_language_routes() {
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["slug"], format!("{group}/{number}"));
-    assert_eq!(body["language"], "typescript");
-    assert_eq!(body["source"], TS_SOURCE);
+    assert_eq!(body["language"], "javascript");
+    assert_eq!(body["source"], JS_SOURCE);
 }
 
 #[tokio::test]
@@ -638,24 +537,24 @@ async fn source_is_null_for_wasm_uploaded_routes() {
 
 #[tokio::test]
 async fn source_updates_on_source_language_patch() {
-    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let h = Harness::start().await;
     let resp = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/v1/thing",
-            "language": "typescript",
-            "source": TS_SOURCE,
+            "language": "javascript",
+            "source": JS_SOURCE,
         }))
         .await;
     let body: serde_json::Value = resp.json().await.expect("json");
     let group = body["group"]["name"].as_str().unwrap().to_string();
     let number = body["number"].as_u64().unwrap();
 
-    let new_src = "export function handle(req, _r, _g) { /* v2 */ return { status: 200, headers: [], body: new Uint8Array() }; }";
+    let new_src = "function handle(req, _r, _g) { /* v2 */ return { status: 200, headers: [], body: new Uint8Array() }; }";
     let resp = h
         .client
         .patch(h.url(&format!("/__api/routes/{group}/{number}")))
-        .json(&json!({ "language": "typescript", "source": new_src }))
+        .json(&json!({ "language": "javascript", "source": new_src }))
         .send()
         .await
         .expect("patch");
@@ -673,13 +572,13 @@ async fn source_updates_on_source_language_patch() {
 
 #[tokio::test]
 async fn source_cleared_when_wasm_swapped_in() {
-    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let h = Harness::start().await;
     let resp = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/v1/swap",
-            "language": "typescript",
-            "source": TS_SOURCE,
+            "language": "javascript",
+            "source": JS_SOURCE,
         }))
         .await;
     let body: serde_json::Value = resp.json().await.expect("json");
@@ -717,13 +616,13 @@ async fn source_cleared_when_wasm_swapped_in() {
 
 #[tokio::test]
 async fn source_endpoint_forbids_non_owner() {
-    let h = Harness::start_with_mock_compiler(echo_bytes()).await;
+    let h = Harness::start().await;
     let resp = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/v1/private",
-            "language": "typescript",
-            "source": TS_SOURCE,
+            "language": "javascript",
+            "source": JS_SOURCE,
         }))
         .await;
     let body: serde_json::Value = resp.json().await.expect("json");
@@ -925,15 +824,14 @@ async fn rejects_pattern_shape_conflict() {
 }
 
 #[tokio::test]
-async fn source_create_conflict_is_detected_before_compile() {
-    // Stand up a host with a compiler that *always* fails. Then
-    // register a wasm route at /v1/charges and try to register a
+async fn source_create_conflict_is_detected_before_transpile() {
+    // Register a wasm route at /v1/charges, then try to register a
     // TypeScript-source route at the same path. The precheck in
     // create_route_core must short-circuit with a 409 conflict
-    // *before* the sidecar is consulted — if the precheck were
-    // missing, the failing compiler would surface a 400
-    // compile_failed instead.
-    let h = Harness::start_with_failing_compiler("unused — precheck must fire first").await;
+    // *before* the in-host swc transpile runs. We pass syntactically
+    // bad TS — if the precheck were missing, swc would surface a
+    // 400 compile_failed instead of the 409 we assert on.
+    let h = Harness::start().await;
     h.create_route_body(json!({
         "methods": ["POST"],
         "path": "/v1/charges",
@@ -948,7 +846,9 @@ async fn source_create_conflict_is_detected_before_compile() {
             "methods": ["POST"],
             "path": "/v1/charges",
             "language": "typescript",
-            "source": "export function handle() { return { status: 200, headers: [], body: new Uint8Array() }; }",
+            // Intentionally broken — would 400 compile_failed if the
+            // precheck didn't fire first.
+            "source": "function handle( {",
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 409, "expected 409 conflict");

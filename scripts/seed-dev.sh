@@ -98,25 +98,19 @@ add_route openai-mock-flaky   POST /v1/chat/completions   "$COUNTER_WASM"
 add_route openai-mock-flaky   GET  /v1/models             "$ECHO_WASM"
 add_route pubsub-fixture      POST /webhooks/stripe       "$ECHO_WASM"
 
-# -- TypeScript-source route (optional, needs the sidecar) -----------------
-# `just run-web` is in-memory + no sidecar by default, so this branch
-# is best-effort: probe the sidecar's /health endpoint, skip with a
-# note if it's not up. When it is up, the host can compile inline TS
-# source and the route gets `language: "typescript"` + a `source`
-# field — that's what the slice-37 route-detail source viewer
-# actually renders.
+# -- TypeScript-source route -----------------------------------------------
+# Compiles in-host via the embedded js-engine + swc (ADR-0020). No
+# external sidecar — the host accepts TS source verbatim and the
+# slice-37 route-detail source viewer renders it on the detail page.
 
-say "TypeScript source route (optional)"
+say "TypeScript source route"
 
-COMPILER_URL="${WM_COMPILER_URL:-http://localhost:9100}"
-
-if curl -fsS -o /dev/null --max-time 2 "$COMPILER_URL/health"; then
-  TS_HANDLER="$(mktemp --suffix=.ts)"
-  trap 'rm -f "$TS_HANDLER"' EXIT
-  cat >"$TS_HANDLER" <<'TS_EOF'
+TS_HANDLER="$(mktemp --suffix=.ts)"
+trap 'rm -f "$TS_HANDLER"' EXIT
+cat >"$TS_HANDLER" <<'TS_EOF'
 // Returns a fake session id derived from the request body. Lets the
 // slice-37 source viewer show real handler code on the detail page.
-export function handle(req, _route, _group) {
+function handle(req, _route, _group) {
   const id = "sess_" + Math.random().toString(36).slice(2, 10);
   const body = new TextEncoder().encode(
     JSON.stringify({ id, created_at: new Date().toISOString() }),
@@ -128,17 +122,12 @@ export function handle(req, _route, _group) {
   };
 }
 TS_EOF
-  if "${CLI[@]}" routes add \
-    --group stripe-mock --method POST --path /v1/sessions \
-    --source-file "$TS_HANDLER" --language typescript >/dev/null 2>&1; then
-    echo "  + stripe-mock  POST /v1/sessions  (typescript source)"
-  else
-    echo "  · stripe-mock  POST /v1/sessions  (already exists or compile failed)"
-  fi
+if "${CLI[@]}" routes add \
+  --group stripe-mock --method POST --path /v1/sessions \
+  --source-file "$TS_HANDLER" --language typescript >/dev/null 2>&1; then
+  echo "  + stripe-mock  POST /v1/sessions  (typescript source)"
 else
-  echo "  · skipped — no compiler sidecar reachable at $COMPILER_URL"
-  echo "    (start it with: docker compose up -d compiler-typescript,"
-  echo "     then re-run 'just run-web' with WM_COMPILER_URL set, then re-seed)"
+  echo "  · stripe-mock  POST /v1/sessions  (already exists or compile failed)"
 fi
 
 # -- Drive a bit of traffic ------------------------------------------------

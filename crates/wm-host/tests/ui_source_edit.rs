@@ -4,23 +4,16 @@
 //!   * GET renders the textarea pre-populated with stored source
 //!   * GET on a wasm-uploaded route → 404 (no source to edit)
 //!   * GET as non-owner non-admin → 403
-//!   * POST with new source recompiles via sidecar, redirects to detail
+//!   * POST with new source goes through in-host swc, redirects to detail
 //!   * After redirect, the detail page shows the new source
 //!   * POST without CSRF → 403 (handled by the CSRF middleware)
-//!   * POST without a compiler configured → re-renders with compile_failed
+//!   * POST with invalid TS source → re-renders with compile_failed
 
 use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::State;
-use axum::routing::post;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use reqwest::Client;
 use reqwest::redirect::Policy;
-use serde_json::json;
 use wm_host::auth::Auth;
-use wm_host::compiler::CompilerClient;
 use wm_host::journal::Journal;
 use wm_host::local_auth::LocalAuth;
 use wm_host::registry::{NewGroup, NewRoute, Registry};
@@ -30,13 +23,15 @@ use wm_host::{AppState, Runtime, Storage, router};
 
 const SECRET: &[u8; 32] = b"thirty-two-byte-development-key!";
 const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
-const ORIGINAL_SOURCE: &str = "export function handle(_req, _r, _g) {\n  return { status: 200, headers: [], body: new Uint8Array() };\n}";
-const UPDATED_SOURCE: &str = "export function handle(_req, _r, _g) {\n  return { status: 201, headers: [], body: new Uint8Array() };\n}";
+// Plain script-shape JS (no `export`) so the source survives the
+// in-host swc strip round-trip byte-for-byte and the assertions on
+// the rendered detail page can anchor on "status: 200" / "status: 201".
+const ORIGINAL_SOURCE: &str = "function handle(_req, _r, _g) {\n  return { status: 200, headers: [], body: new Uint8Array() };\n}";
+const UPDATED_SOURCE: &str = "function handle(_req, _r, _g) {\n  return { status: 201, headers: [], body: new Uint8Array() };\n}";
 
 struct Harness {
     addr: String,
     server: tokio::task::JoinHandle<()>,
-    _mock_compiler: Option<tokio::task::JoinHandle<()>>,
     admin_id: String,
     alice_id: String,
 }
@@ -62,7 +57,7 @@ fn echo_wasm() -> Vec<u8> {
     std::fs::read(ECHO_COMPONENT_PATH).expect("read echo fixture")
 }
 
-async fn start_seeded(compiler: Option<CompilerClient>) -> Harness {
+async fn start_seeded() -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     let admin = auth.create_user("admin", true).expect("admin");
@@ -77,20 +72,20 @@ async fn start_seeded(compiler: Option<CompilerClient>) -> Harness {
             sliding_ttl: Some(true),
         })
         .expect("group");
-    // One TS-source-language route (the subject under test) + one
+    // One source-language route (the subject under test) + one
     // wasm-uploaded route so the 404 branch has data to assert against.
     registry
         .create_route(NewRoute {
             group: Some("stripe-mock".into()),
             methods: vec!["POST".into()],
             path: "/v1/sessions".into(),
-            language: "typescript".into(),
+            language: "javascript".into(),
             bindings_version: "0.1.0".into(),
-            compiled_wasm: echo_wasm(),
+            compiled_wasm: Vec::new(),
             source: Some(ORIGINAL_SOURCE.into()),
             owner_id: admin.id.clone(),
         })
-        .expect("seed ts route");
+        .expect("seed js route");
     registry
         .create_route(NewRoute {
             group: Some("stripe-mock".into()),
@@ -107,14 +102,11 @@ async fn start_seeded(compiler: Option<CompilerClient>) -> Harness {
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
-    let mut state = AppState::new(runtime, routes, auth, journal)
+    let state = AppState::new(runtime, routes, auth, journal)
         .with_local_auth(
             LocalAuth::parse("admin:devpassword:admin,alice:devpassword").expect("auth"),
         )
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
-    if let Some(c) = compiler {
-        state = state.with_compiler(c);
-    }
     let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -124,43 +116,9 @@ async fn start_seeded(compiler: Option<CompilerClient>) -> Harness {
     Harness {
         addr,
         server,
-        _mock_compiler: None,
         admin_id: admin.id,
         alice_id: alice.id,
     }
-}
-
-/// Start a host wired to a canned mock compiler that returns the echo
-/// fixture's wasm bytes for any POST /compile. Lets the PATCH-via-UI
-/// path exercise the real `patch_route_core` happy path without
-/// depending on a real componentize-js sidecar.
-async fn start_with_mock_compiler() -> Harness {
-    let canned_b64 = B64.encode(echo_wasm());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind compiler");
-    let mock_addr = listener.local_addr().unwrap();
-    let app = Router::new()
-        .route(
-            "/compile",
-            post(move |State(state): State<Arc<String>>| {
-                let body = (*state).clone();
-                async move {
-                    axum::Json(json!({
-                        "compiled_wasm": body,
-                        "bindings_version": "0.1.0",
-                    }))
-                }
-            }),
-        )
-        .with_state(Arc::new(canned_b64));
-    let mock = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("axum::serve");
-    });
-    let compiler_url = format!("http://{mock_addr}");
-    let mut h = start_seeded(Some(CompilerClient::new(compiler_url))).await;
-    h._mock_compiler = Some(mock);
-    h
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
@@ -204,8 +162,8 @@ fn extract_csrf_value(body: &str) -> Option<String> {
 }
 
 #[tokio::test]
-async fn edit_form_renders_with_current_source_for_ts_route() {
-    let h = start_seeded(None).await;
+async fn edit_form_renders_with_current_source_for_source_route() {
+    let h = start_seeded().await;
     let _ = &h.admin_id;
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
@@ -228,29 +186,28 @@ async fn edit_form_renders_with_current_source_for_ts_route() {
     assert!(body.contains("name=\"source\""));
     assert!(body.contains("name=\"_csrf\""));
     // Language picker present and the route's current language is
-    // pre-selected. The seed route was registered as typescript.
+    // pre-selected. The seed route was registered as javascript.
     assert!(
         body.contains("name=\"language\""),
         "language select present"
     );
     assert!(
-        body.contains("value=\"typescript\" selected"),
+        body.contains("value=\"javascript\" selected"),
         "current language pre-selected: {body}"
     );
 }
 
 #[tokio::test]
-async fn edit_submit_switches_language_typescript_to_javascript() {
+async fn edit_submit_switches_language_javascript_to_typescript() {
     // The PATCH path accepts `language` as part of the artifact triple
-    // (slice 15), so the UI form lets users flip TS ↔ JS without
-    // re-creating the route. The mock compiler returns canned bytes
-    // regardless of the input language, so the assertion focuses on
-    // what the registry stores afterwards.
-    let h = start_with_mock_compiler().await;
+    // (slice 15), so the UI form lets users flip JS ↔ TS without
+    // re-creating the route. ADR-0020 slice B handles the transpile
+    // in-process; no external compiler.
+    let h = start_seeded().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let form_body = format!(
-        "_csrf={csrf}&language=javascript&source={}",
+        "_csrf={csrf}&language=typescript&source={}",
         urlencoding::encode(UPDATED_SOURCE),
     );
     let resp = client
@@ -263,7 +220,7 @@ async fn edit_submit_switches_language_typescript_to_javascript() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 303, "303 redirect on success");
 
-    // Detail page should now report the language as JavaScript.
+    // Detail page should now report the language as TypeScript.
     let detail = client
         .get(url(&h, "/__ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
@@ -274,8 +231,8 @@ async fn edit_submit_switches_language_typescript_to_javascript() {
         .await
         .unwrap();
     assert!(
-        detail.contains("javascript"),
-        "language switched to javascript on detail: {detail}"
+        detail.contains("typescript"),
+        "language switched to typescript on detail: {detail}"
     );
 }
 
@@ -286,7 +243,7 @@ async fn edit_submit_ignores_unsupported_language_values() {
     // pre-compiled component, not a source recompile. We treat any
     // value outside the offered dropdown options as "keep the existing
     // language" rather than fail with a confusing compile error.
-    let h = start_with_mock_compiler().await;
+    let h = start_seeded().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let form_body = format!(
@@ -311,16 +268,16 @@ async fn edit_submit_ignores_unsupported_language_values() {
         .text()
         .await
         .unwrap();
-    // The route stayed `typescript` (its original language).
+    // The route stayed `javascript` (its original language).
     assert!(
-        detail.contains("typescript"),
+        detail.contains("javascript"),
         "language unchanged: {detail}"
     );
 }
 
 #[tokio::test]
 async fn edit_form_404s_on_wasm_route_without_stored_source() {
-    let h = start_seeded(None).await;
+    let h = start_seeded().await;
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
@@ -334,7 +291,7 @@ async fn edit_form_404s_on_wasm_route_without_stored_source() {
 
 #[tokio::test]
 async fn edit_form_403_for_non_owner_non_admin() {
-    let h = start_seeded(None).await;
+    let h = start_seeded().await;
     let _ = &h.alice_id;
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "alice").await;
@@ -348,8 +305,8 @@ async fn edit_form_403_for_non_owner_non_admin() {
 }
 
 #[tokio::test]
-async fn edit_submit_with_new_source_recompiles_and_redirects() {
-    let h = start_with_mock_compiler().await;
+async fn edit_submit_with_new_source_updates_and_redirects() {
+    let h = start_seeded().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let form_body = format!(
@@ -390,7 +347,7 @@ async fn edit_submit_with_new_source_recompiles_and_redirects() {
 
 #[tokio::test]
 async fn edit_submit_without_csrf_is_forbidden() {
-    let h = start_with_mock_compiler().await;
+    let h = start_seeded().await;
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     // Note: _csrf intentionally absent.
@@ -406,13 +363,16 @@ async fn edit_submit_without_csrf_is_forbidden() {
 }
 
 #[tokio::test]
-async fn edit_submit_without_compiler_reports_compile_failed() {
-    let h = start_seeded(None).await; // no compiler configured
+async fn edit_submit_with_invalid_ts_source_reports_compile_failed() {
+    // ADR-0020 slice B: invalid TS source is rejected in-host by swc.
+    // The form re-renders with the parser's diagnostic.
+    let h = start_seeded().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let bad = "function handle( {"; // mismatched braces
     let form_body = format!(
-        "_csrf={csrf}&source={}",
-        urlencoding::encode(UPDATED_SOURCE),
+        "_csrf={csrf}&language=typescript&source={}",
+        urlencoding::encode(bad),
     );
     let resp = client
         .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
@@ -424,11 +384,5 @@ async fn edit_submit_without_compiler_reports_compile_failed() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 400);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("compiler sidecar not configured"),
-        "no-compiler error visible: {body}"
-    );
-    assert!(body.contains("Compile failed"));
-    // The user's edits are preserved on the re-render.
-    assert!(body.contains("status: 201"));
+    assert!(body.contains("Compile failed"), "diagnostic shown: {body}");
 }

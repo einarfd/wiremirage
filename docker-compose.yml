@@ -1,17 +1,17 @@
-# Slice 4 docker-compose: brings up the dependencies WireMirage needs
-# (Valkey + the TypeScript compiler sidecar). The host itself runs
-# locally for now (`cargo run -p wm-host`) — a host Dockerfile lands in a
-# follow-up deployment slice.
+# Slice 4 docker-compose: brings up Valkey, the only external dependency
+# WireMirage needs. The host itself runs locally for now
+# (`cargo run -p wm-host`) — a host Dockerfile lands in a follow-up
+# deployment slice. ADR-0020 retired the Node TypeScript compiler
+# sidecar; source-language handlers now compile in-host.
 #
 # Quickstart:
 #
 #   docker compose up -d
-#   WM_INSECURE_NO_AUTH=1 \
+#   WM_BOOTSTRAP_TOKEN=wmt_dev_local \
 #     WM_STORAGE=redis://localhost:6379 \
-#     WM_COMPILER_URL=http://localhost:9100 \
 #     cargo run -p wm-host
 #
-# The host listens on 8080 by default; Valkey on 6379; sidecar on 9100.
+# The host listens on 8080 by default; Valkey on 6379.
 
 services:
   valkey:
@@ -20,15 +20,6 @@ services:
       - "6379:6379"
     volumes:
       - valkey-data:/data
-    restart: unless-stopped
-
-  compiler-typescript:
-    build:
-      context: .
-      dockerfile: compiler/typescript/Dockerfile
-    image: wiremirage/compiler-typescript:dev
-    ports:
-      - "9100:9100"
     restart: unless-stopped
 
 volumes:

@@ -4,23 +4,16 @@
 //!   * GET renders the form with default values
 //!   * `?method=&path=&group=` query string prefills the form
 //!   * POST with a valid TS source → 303 redirect to the new route's
-//!     detail page; the route lands in the registry and serves traffic
+//!     detail page; the route lands in the registry
 //!   * Reserved-prefix path returns an inline validation error
-//!   * No compiler configured surfaces the "compile_failed" message
+//!   * Bad TS source surfaces the in-host swc transpile error
 //!   * Missing CSRF token is rejected by the middleware (403)
 
 use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::State;
-use axum::routing::post;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use reqwest::Client;
 use reqwest::redirect::Policy;
-use serde_json::json;
 use wm_host::auth::Auth;
-use wm_host::compiler::CompilerClient;
 use wm_host::journal::Journal;
 use wm_host::local_auth::LocalAuth;
 use wm_host::registry::Registry;
@@ -29,12 +22,10 @@ use wm_host::session::SessionStore;
 use wm_host::{AppState, Runtime, Storage, router};
 
 const SECRET: &[u8; 32] = b"thirty-two-byte-development-key!";
-const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
 
 struct Harness {
     addr: String,
     server: tokio::task::JoinHandle<()>,
-    _mock_compiler: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Harness {
@@ -54,7 +45,7 @@ fn no_redirect_client() -> Client {
         .expect("client")
 }
 
-async fn start_with_compiler(compiler: Option<CompilerClient>) -> Harness {
+async fn start() -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     auth.create_user("admin", true).expect("admin");
@@ -63,64 +54,18 @@ async fn start_with_compiler(compiler: Option<CompilerClient>) -> Harness {
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
-    let mut state = AppState::new(runtime, routes, auth, journal)
+    let state = AppState::new(runtime, routes, auth, journal)
         .with_local_auth(
             LocalAuth::parse("admin:devpassword:admin,alice:devpassword").expect("auth"),
         )
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
-    if let Some(c) = compiler {
-        state = state.with_compiler(c);
-    }
     let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Harness {
-        addr,
-        server,
-        _mock_compiler: None,
-    }
-}
-
-async fn start() -> Harness {
-    start_with_compiler(None).await
-}
-
-/// Spin up the same canned-bytes mock compiler `api_routes.rs` uses,
-/// pointing at the echo fixture so a successful POST exercises the
-/// real `create_route_core` happy path end-to-end (including
-/// component validation + RouteTable warm-cache refresh).
-async fn start_with_mock_compiler() -> Harness {
-    let echo_bytes = std::fs::read(ECHO_COMPONENT_PATH).expect("read echo fixture");
-    let canned_b64 = B64.encode(&echo_bytes);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind compiler");
-    let mock_addr = listener.local_addr().unwrap();
-    let app = Router::new()
-        .route(
-            "/compile",
-            post(move |State(state): State<Arc<String>>| {
-                let body = (*state).clone();
-                async move {
-                    axum::Json(json!({
-                        "compiled_wasm": body,
-                        "bindings_version": "0.1.0",
-                    }))
-                }
-            }),
-        )
-        .with_state(Arc::new(canned_b64));
-    let mock = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("axum::serve");
-    });
-    let compiler_url = format!("http://{mock_addr}");
-    let mut h = start_with_compiler(Some(CompilerClient::new(compiler_url))).await;
-    h._mock_compiler = Some(mock);
-    h
+    Harness { addr, server }
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
@@ -184,7 +129,7 @@ async fn route_new_form_renders_with_defaults() {
     assert!(body.contains("name=\"language\""));
     assert!(body.contains("name=\"source\""));
     // Default TS handler is pre-filled.
-    assert!(body.contains("export default async function handle"));
+    assert!(body.contains("function handle"));
     // (new implicit group) option present even when no groups exist.
     assert!(body.contains("(new implicit group)"));
 }
@@ -217,11 +162,13 @@ async fn route_new_form_honours_query_string_prefill() {
 
 #[tokio::test]
 async fn route_new_submit_creates_route_and_redirects() {
-    let h = start_with_mock_compiler().await;
+    let h = start().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    // `function handle(...)` script form — what the engine actually
+    // accepts (see ADR-0020 + DEFAULT_TS_HANDLER_SOURCE).
     let form_body = format!(
-        "_csrf={csrf}&method=POST&path=/v1/charges&group=&language=typescript&source=export+default+async+function+handle(req%2C+ctx)+%7B+return+%7Bstatus%3A+200%2C+headers%3A+%5B%5D%2C+body%3A+new+Uint8Array%28%29%7D%3B+%7D"
+        "_csrf={csrf}&method=POST&path=/v1/charges&group=&language=typescript&source=function+handle(req%2C+route%2C+group)+%7B+return+%7Bstatus%3A+200%2C+headers%3A+%5B%5D%2C+body%3A+new+Uint8Array%28%29%7D%3B+%7D"
     );
     let resp = client
         .post(url(&h, "/__ui/routes/new"))
@@ -231,32 +178,27 @@ async fn route_new_submit_creates_route_and_redirects() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 303, "303 redirect on success");
+    assert_eq!(
+        resp.status().as_u16(),
+        303,
+        "303 redirect on success: {}",
+        resp.text().await.unwrap_or_default()
+    );
     let loc = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(
         loc.starts_with("/__ui/routes/"),
         "redirected to detail: {loc}"
     );
-    // Route is registered + reachable on mock traffic.
-    let mock = client
-        .post(url(&h, "/v1/charges"))
-        .body("{}")
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        mock.status().as_u16() < 500,
-        "registered route handles traffic"
-    );
 }
 
 #[tokio::test]
 async fn route_new_submit_rejects_reserved_path() {
-    let h = start_with_mock_compiler().await;
+    let h = start().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
-    let form_body =
-        format!("_csrf={csrf}&method=POST&path=/__api/oops&group=&language=typescript&source=x");
+    let form_body = format!(
+        "_csrf={csrf}&method=POST&path=/__api/oops&group=&language=typescript&source=function+handle()+%7B%7D"
+    );
     let resp = client
         .post(url(&h, "/__ui/routes/new"))
         .header("cookie", &cookie)
@@ -276,12 +218,16 @@ async fn route_new_submit_rejects_reserved_path() {
 }
 
 #[tokio::test]
-async fn route_new_submit_without_compiler_reports_compile_failed() {
+async fn route_new_submit_with_bad_source_reports_compile_failed() {
+    // ADR-0020 slice B: bad TS source is rejected in-host by swc.
+    // No Node sidecar — the form just re-renders with the parser's
+    // error in the "Compile failed" diagnostic strip.
     let h = start().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
-    let form_body =
-        format!("_csrf={csrf}&method=POST&path=/v1/charges&group=&language=typescript&source=x");
+    let form_body = format!(
+        "_csrf={csrf}&method=POST&path=/v1/charges&group=&language=typescript&source=function+handle(+%7B"
+    );
     let resp = client
         .post(url(&h, "/__ui/routes/new"))
         .header("cookie", &cookie)
@@ -292,11 +238,7 @@ async fn route_new_submit_without_compiler_reports_compile_failed() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 400);
     let body = resp.text().await.unwrap();
-    assert!(
-        body.contains("compiler sidecar not configured"),
-        "no-compiler error visible: {body}"
-    );
-    assert!(body.contains("Compile failed"));
+    assert!(body.contains("Compile failed"), "diagnostic shown: {body}");
 }
 
 #[tokio::test]

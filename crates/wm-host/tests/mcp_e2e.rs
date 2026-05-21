@@ -8,9 +8,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::State;
-use axum::routing::post;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::ClientHandler;
@@ -20,7 +17,6 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::json;
 use wm_host::auth::Auth;
-use wm_host::compiler::CompilerClient;
 use wm_host::journal::{
     HandlerLogEntry, Journal, NewJournalEntry, RequestEnvelope, ResourceUsage, ResponseEnvelope,
 };
@@ -52,7 +48,6 @@ struct Harness {
     base_url: String,
     state: AppState,
     server: tokio::task::JoinHandle<()>,
-    _mock_compiler: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Harness {
@@ -62,10 +57,6 @@ impl Drop for Harness {
 }
 
 async fn start() -> Harness {
-    start_with_compiler(None).await
-}
-
-async fn start_with_compiler(compiler: Option<CompilerClient>) -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
@@ -74,10 +65,7 @@ async fn start_with_compiler(compiler: Option<CompilerClient>) -> Harness {
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage);
-    let mut state = AppState::new(runtime, routes, auth, journal);
-    if let Some(c) = compiler {
-        state = state.with_compiler(c);
-    }
+    let state = AppState::new(runtime, routes, auth, journal);
     let app = router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -91,41 +79,7 @@ async fn start_with_compiler(compiler: Option<CompilerClient>) -> Harness {
         base_url: format!("http://{addr}"),
         state,
         server,
-        _mock_compiler: None,
     }
-}
-
-/// Start the host wired to a canned-bytes mock compiler that returns
-/// the echo fixture's wasm for any `/compile` POST. Exercises the real
-/// source-language pipeline through `api::create_route_core` /
-/// `patch_route_core` without needing a real componentize-js sidecar.
-async fn start_with_mock_compiler() -> Harness {
-    let canned_b64 = B64.encode(echo_wasm());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind compiler");
-    let mock_addr = listener.local_addr().unwrap();
-    let app = Router::new()
-        .route(
-            "/compile",
-            post(move |State(state): State<Arc<String>>| {
-                let body = (*state).clone();
-                async move {
-                    axum::Json(json!({
-                        "compiled_wasm": body,
-                        "bindings_version": "0.1.0",
-                    }))
-                }
-            }),
-        )
-        .with_state(Arc::new(canned_b64));
-    let mock = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("axum::serve");
-    });
-    let compiler_url = format!("http://{mock_addr}");
-    let mut h = start_with_compiler(Some(CompilerClient::new(compiler_url))).await;
-    h._mock_compiler = Some(mock);
-    h
 }
 
 fn sample_handled(group_id: &str, group_name: &str, status: u16) -> NewJournalEntry {
@@ -1240,7 +1194,7 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
 
 #[tokio::test]
 async fn create_route_accepts_typescript_source() {
-    let h = start_with_mock_compiler().await;
+    let h = start().await;
     let client = DummyClient
         .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
         .await
@@ -1270,8 +1224,11 @@ async fn create_route_accepts_typescript_source() {
 }
 
 #[tokio::test]
-async fn create_route_typescript_without_compiler_returns_compile_failed() {
-    let h = start().await; // no compiler configured
+async fn create_route_typescript_with_bad_source_returns_compile_failed() {
+    // ADR-0020 slice B: invalid TS is rejected in-host by swc.
+    // `compile_failed` surfaces to the MCP caller with the parser's
+    // diagnostic.
+    let h = start().await;
     let client = DummyClient
         .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
         .await
@@ -1284,7 +1241,7 @@ async fn create_route_typescript_without_compiler_returns_compile_failed() {
                     "methods": ["POST"],
                     "path": "/v1/charges",
                     "language": "typescript",
-                    "source": "export function handle() {}",
+                    "source": "function handle( {",
                 })
                 .as_object()
                 .unwrap()
@@ -1292,10 +1249,10 @@ async fn create_route_typescript_without_compiler_returns_compile_failed() {
             ),
         )
         .await;
-    let err = err.expect_err("no compiler → compile_failed");
+    let err = err.expect_err("bad TS → compile_failed");
     let msg = err.to_string();
     assert!(
-        msg.contains("compiler sidecar not configured") || msg.contains("compile_failed"),
+        msg.contains("compile_failed"),
         "compile_failed surfaces from MCP: {msg}",
     );
 
@@ -1304,7 +1261,7 @@ async fn create_route_typescript_without_compiler_returns_compile_failed() {
 
 #[tokio::test]
 async fn create_route_rejects_source_and_wasm_together() {
-    let h = start_with_mock_compiler().await;
+    let h = start().await;
     let client = DummyClient
         .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
         .await
@@ -1338,7 +1295,7 @@ async fn create_route_rejects_source_and_wasm_together() {
 
 #[tokio::test]
 async fn update_route_swaps_typescript_source() {
-    let h = start_with_mock_compiler().await;
+    let h = start().await;
     let client = DummyClient
         .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
         .await
@@ -1418,7 +1375,7 @@ async fn update_route_can_switch_wasm_to_source_and_back() {
     // recompute the artifact cleanly: TS swap stores source + sets
     // language=typescript; wasm swap clears stored source +
     // sets language=wasm.
-    let h = start_with_mock_compiler().await;
+    let h = start().await;
     let client = DummyClient
         .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
         .await

@@ -12,7 +12,7 @@
 // wasm is committed to the repo.
 
 import { componentize } from "@bytecodealliance/componentize-js";
-import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -25,8 +25,7 @@ const OUT = resolve(OUT_DIR, "js-engine.wasm");
 
 // 1. Transpile TS → JS. ESNext module shape — componentize-js wants
 //    a real ES module, not script-shape. The `export function handle`
-//    is fine; that's what componentize-js looks for to satisfy the
-//    world's export.
+//    is what componentize-js looks for to satisfy the world's export.
 const tsSrc = readFileSync(SRC, "utf8");
 const { outputText, diagnostics } = ts.transpileModule(tsSrc, {
   compilerOptions: {
