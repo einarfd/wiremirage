@@ -2,9 +2,11 @@
 //!
 //! Routes (`/__api/routes`): POST/GET/DELETE per `rest-api.md`. Body has
 //! two shapes: pre-compiled (`language: "wasm"`, `compiled_wasm` base64)
-//! and source-based (`language: "typescript"|...`, `source`). Source-based
-//! requests forward to the compiler sidecar via `CompilerClient`; if no
-//! sidecar is configured, those requests fail with `compile_failed`.
+//! and source-based (`language: "javascript" | "typescript"`, `source`).
+//! Source-based requests are handled in-process: JS is stored verbatim
+//! and dispatched through the shared `js-engine.wasm` component, TS goes
+//! through `ts_transpile::transpile` (pure-Rust swc) first and is stored
+//! as JS. No external compiler.
 //!
 //! Tokens (`/__api/tokens`): POST/GET/DELETE for the caller's own
 //! tokens, per ADR-0012. Plaintext is returned exactly once, in the
@@ -130,8 +132,8 @@ pub(crate) struct CreateRouteBody {
     /// Base64-encoded `.component.wasm` bytes. Required when
     /// `language == "wasm"`.
     pub(crate) compiled_wasm: Option<String>,
-    /// Source code for the source-based path. Forwarded to the compiler
-    /// sidecar; returns `compile_failed` if no sidecar is configured.
+    /// Source code for the source-based path. Stored verbatim for
+    /// `javascript`; transpiled in-process for `typescript`.
     pub(crate) source: Option<String>,
 }
 
@@ -148,8 +150,8 @@ pub(crate) struct PatchRouteBody {
     /// Base64-encoded `.component.wasm` bytes. Pairs with
     /// `language: "wasm"`.
     pub(crate) compiled_wasm: Option<String>,
-    /// Source code; forwarded to the compiler sidecar. Pairs with a
-    /// source language (e.g. `typescript`).
+    /// Source code for source-based languages
+    /// (`javascript` | `typescript`).
     pub(crate) source: Option<String>,
 }
 
@@ -328,15 +330,6 @@ impl ApiError {
             code: "compile_failed",
             message: msg.into(),
             diagnostics: Vec::new(),
-        }
-    }
-
-    fn compile_failed_with_diagnostics(msg: impl Into<String>, diagnostics: Vec<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "compile_failed",
-            message: msg.into(),
-            diagnostics,
         }
     }
 
@@ -544,11 +537,11 @@ pub(crate) async fn create_route_core(
         ));
     }
 
-    // Cheap conflict precheck so idempotent retries don't burn a
-    // sidecar compile per attempt — the same scan runs again inside
+    // Cheap conflict precheck so idempotent retries don't burn an
+    // swc transpile per attempt — the same scan runs again inside
     // `registry.create_route()` after we have an artifact, but
     // surfacing it here means a re-seed of an existing slug fails
-    // in milliseconds instead of seconds.
+    // before we do the parser work.
     state
         .routes()
         .registry()
@@ -586,9 +579,6 @@ pub(crate) async fn create_route_core(
             let source = body.source.ok_or_else(|| {
                 ApiError::validation("source required when language=\"javascript\"")
             })?;
-            // No compiled_wasm bytes for engine routes; we store an
-            // empty Vec so the Route record's shape stays stable
-            // (the field is `Vec<u8>`, not `Option<Vec<u8>>`).
             (
                 Vec::new(),
                 "javascript".to_string(),
@@ -596,43 +586,32 @@ pub(crate) async fn create_route_core(
                 Some(source),
             )
         }
-        other => {
-            // TypeScript (and any other interpreted language not
-            // yet on the engine path) still goes through the
-            // compiler sidecar transitionally — slice 58 will move
-            // TS to the engine path with in-host transpile and
-            // delete this branch.
+        "typescript" => {
+            // ADR-0020 slice B: pure-Rust swc transpiles TS → JS in
+            // the host before storage. The route's `language` is
+            // preserved as "typescript" for operator visibility, but
+            // dispatch resolves it as engine-language via
+            // `dispatches_via_engine`.
             let source = body.source.ok_or_else(|| {
-                ApiError::validation(format!("source required when language={other:?}"))
+                ApiError::validation("source required when language=\"typescript\"")
             })?;
-            let compiler = state.compiler().ok_or_else(|| {
-                ApiError::compile_failed(
-                    "compiler sidecar not configured; set WM_COMPILER_URL or send a pre-compiled component",
-                )
-            })?;
-            let artifact = compiler
-                .compile(other, &source)
-                .await
-                .map_err(|e| match e {
-                    crate::compiler::CompilerError::CompileFailed {
-                        message,
-                        diagnostics,
-                    } => ApiError::compile_failed_with_diagnostics(message, diagnostics),
-                    other_err => ApiError::compile_failed(format!("{other_err}")),
-                })?;
-            // Validate the bytes parse here too — defends against a
-            // misbehaving sidecar shipping garbage.
-            wasmtime::component::Component::from_binary(
-                state.runtime().engine(),
-                &artifact.component,
-            )
-            .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
+            let ts_source = source.clone();
+            let js =
+                tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
+                    .await
+                    .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
+                    .map_err(ApiError::compile_failed)?;
             (
-                artifact.component,
-                other.to_string(),
-                artifact.bindings_version,
-                Some(source),
+                Vec::new(),
+                "typescript".to_string(),
+                SUPPORTED_BINDINGS_VERSION.to_string(),
+                Some(js),
             )
+        }
+        other => {
+            return Err(ApiError::validation(format!(
+                "unsupported language {other:?}; expected \"wasm\", \"javascript\", or \"typescript\""
+            )));
         }
     };
 
@@ -977,35 +956,27 @@ pub(crate) async fn patch_route_core(
                     Some(Some(source.to_string())),
                 )
             }
-            other => {
-                // TS (and any future interpreted language not yet on
-                // the engine path) still goes through the sidecar.
+            "typescript" => {
                 let source = body.source.as_deref().ok_or_else(|| {
-                    ApiError::validation(format!("source required when language={other:?}"))
+                    ApiError::validation("source required when language=\"typescript\"")
                 })?;
-                let compiler = state.compiler().ok_or_else(|| {
-                    ApiError::compile_failed(
-                        "compiler sidecar not configured; set WM_COMPILER_URL or send a pre-compiled component",
-                    )
-                })?;
-                let artifact = compiler.compile(other, source).await.map_err(|e| match e {
-                    crate::compiler::CompilerError::CompileFailed {
-                        message,
-                        diagnostics,
-                    } => ApiError::compile_failed_with_diagnostics(message, diagnostics),
-                    other_err => ApiError::compile_failed(format!("{other_err}")),
-                })?;
-                wasmtime::component::Component::from_binary(
-                    state.runtime().engine(),
-                    &artifact.component,
-                )
-                .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
+                let ts_source = source.to_string();
+                let js =
+                    tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
+                        .await
+                        .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
+                        .map_err(ApiError::compile_failed)?;
                 (
-                    Some(artifact.component),
-                    Some(other.to_string()),
-                    Some(artifact.bindings_version),
-                    Some(Some(source.to_string())),
+                    Some(Vec::new()),
+                    Some("typescript".to_string()),
+                    Some(SUPPORTED_BINDINGS_VERSION.to_string()),
+                    Some(Some(js)),
                 )
+            }
+            other => {
+                return Err(ApiError::validation(format!(
+                    "unsupported language {other:?}; expected \"wasm\", \"javascript\", or \"typescript\""
+                )));
             }
         }
     } else {

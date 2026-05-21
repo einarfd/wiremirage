@@ -15,9 +15,12 @@ against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
 `RouteTable` keyed by `{group}/{n}` slugs per `route-model.md`. The
 REST API at `/__api/routes` supports POST/GET/PATCH/DELETE for both
-pre-compiled wasm uploads and TypeScript source — the source path goes
-through a separate Node sidecar at `compiler/typescript/`
-(componentize-js + jco), reachable via `WM_COMPILER_URL`. The
+pre-compiled wasm uploads and source-language handlers. Source-language
+(JS / TS) compiles in-host (ADR-0020): a shared `js-engine.wasm` is
+embedded into the host binary, TypeScript runs through pure-Rust swc
+before storage, dispatch instantiates the shared engine per request
+with the per-route source threaded through a host import. No Node
+sidecar. The
 `/__api/*` surface is gated by bearer-token auth (bootstrap via
 `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup); mock traffic to user
 routes stays open by design. Public probes: `GET /__health`,
@@ -250,8 +253,8 @@ failure the form re-renders with `error.title` / `message` /
 `diagnostics` from the `ApiError` and returns 400 with the
 submitted values preserved. CSRF on the POST. Tier-2:
 `tests/ui_route_new.rs` covers GET defaults / GET prefill /
-POST happy path against a mock compiler / reserved-path
-rejection / no-compiler-configured / missing-CSRF 403. Slice 30 cleaned up two pieces of wireframe
+POST happy path / reserved-path rejection / bad-source
+compile_failed / missing-CSRF 403. Slice 30 cleaned up two pieces of wireframe
 drift the dogfood pass surfaced: group-detail had a separate
 "Manage" card at the bottom of the page (slice-26 layout)
 instead of the wireframe's inline header for Refresh/Edit TTL
@@ -363,8 +366,9 @@ field shape). Slice 40 added source editing on the
 route-detail UI: a new `/__ui/routes/{group}/{n}/source/edit`
 page renders a textarea pre-populated with the stored
 source; POST forwards to `api::patch_route_core`
-(extracted from the REST handler), which recompiles via
-the sidecar and swaps the artifact in place. Compile
+(extracted from the REST handler), which runs the in-host
+TypeScript transpile (slice 58) and swaps the artifact in
+place. Compile
 errors re-render the form with diagnostics and the
 user's edits preserved; success redirects back to the
 detail page. wasm-uploaded routes (`source: None`) 404
@@ -387,7 +391,7 @@ agent-driven deployment shape: MCP `create_route` and
 (`typescript` / `javascript`) alongside the existing
 `compiled_wasm_b64` path. Both handlers delegate to
 `api::create_route_core` / `patch_route_core`, so the
-sidecar compile, slug-conflict precheck, and source-storage
+in-host transpile, slug-conflict precheck, and source-storage
 behavior are identical to what REST does. Compile failures
 surface back to MCP as `compile_failed` with diagnostics in
 the `data` payload. The slice-10 wasm-only carve-out is
@@ -425,7 +429,19 @@ the 10 ms epoch ticker spawned at host startup), and a
 fires first traps the call; the existing handler-error path
 journals it. `ResourceUsage::fuel_consumed` and
 `memory_peak_bytes` go from 0-placeholders to real numbers
-captured from the store before it drops.
+captured from the store before it drops. Slices 56–58 implemented
+ADR-0020: a shared `js-engine.wasm` (componentize-js bundle of
+StarlingMonkey + a small dispatch shim) is built ahead of time
+under `compiler/js-engine/`, vendored at
+`crates/wm-host/vendored/js-engine.wasm`, and embedded into the host
+binary via `include_bytes!`. Dispatch on `language: "javascript" |
+"typescript"` instantiates a fresh component per request and reads
+the matched route's source through a `get-source` host import.
+TypeScript transpiles to JS in-host via pure-Rust swc
+(`crate::ts_transpile`) before storage — TS and JS now share a single
+dispatch path with no Node sidecar. `WM_COMPILER_URL` is gone;
+`docker-compose.yml` no longer ships a `compiler-typescript`
+service; `compiler/typescript/` is deleted.
 
 ## Where the design lives
 
@@ -453,13 +469,14 @@ Cargo workspace with three crates under `crates/`:
   MCP service is a `mcp/` module here, mounted at `/__api/mcp`.
 - `wm-cli` — `wm` CLI binary
 
-Plus a Node-based compiler sidecar:
+Plus a non-Rust subdirectory used at build time only:
 
-- `compiler/typescript/` — accepts TypeScript source over HTTP, returns
-  componentized wasm bytes. Built as its own Docker image
-  (`compiler/typescript/Dockerfile`); the host calls it when the user
-  POSTs `language: "typescript"` to `/__api/routes`. **Not** Rust, not
-  in the cargo workspace.
+- `compiler/js-engine/` — TypeScript shim + componentize-js build pipeline
+  that produces `crates/wm-host/vendored/js-engine.wasm` (ADR-0020).
+  Compiled ahead of time; the resulting wasm component is embedded into
+  the host binary via `include_bytes!`. **Not** in the cargo workspace.
+  Source-language handler dispatch goes through this shared engine.
+  TypeScript → JS happens in-process in the Rust host via swc, not here.
 
 The WIT contract that handlers program against lives at `wit/wiremirage.wit`.
 It is the verbatim mirror of `script-api-wit.md` in the Arkiv workspace; if
@@ -490,26 +507,23 @@ worth making.
 Use `just` (see `justfile`):
 
 - `just check` — fmt check + clippy `-D warnings` + tests (skips Docker tests)
-- `just check-all` — like `check` plus tier-3 Valkey + sidecar tests
+- `just check-all` — like `check` plus tier-3 Valkey tests
 - `just fmt` — format
 - `just test` — workspace tests only (no Docker)
 - `just test-valkey` — tier-3 Valkey-backed tests, requires Docker
-- `just test-sidecar` — tier-3 TS sidecar tests; builds the image first
-- `just build-sidecar-image` — build the sidecar Docker image only
 - `just build` — `cargo build --workspace`
 - `just run-host` / `just run-cli <args>`
 
-To run the host with sidecar (for TypeScript handlers):
+To run the host with Valkey:
 
 ```sh
-docker compose up -d   # starts valkey + compiler-typescript
+docker compose up -d   # starts valkey
 WM_BOOTSTRAP_TOKEN=wmt_dev_local \
   WM_STORAGE=redis://localhost:6379 \
-  WM_COMPILER_URL=http://localhost:9100 \
   cargo run -p wm-host
 ```
 
-Or in-memory + no compiler (pre-compiled `language: "wasm"` only):
+Or in-memory:
 
 ```sh
 WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_STORAGE=memory cargo run -p wm-host
@@ -525,7 +539,7 @@ curl -X POST localhost:8080/__api/routes \
     "methods": ["POST"],
     "path": "/v1/charges",
     "language": "typescript",
-    "source": "export function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"
+    "source": "function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"
   }'
 # Mock traffic does not need an Authorization header.
 curl -X POST localhost:8080/v1/charges -d '{}'
@@ -537,9 +551,6 @@ Env vars (no silent fallbacks; missing required → fail-fast):
 - `WM_BOOTSTRAP_TOKEN` (required on first startup, optional on
   restarts once at least one user exists) — plaintext for the admin
   user named `bootstrap`. Treat like a credential.
-- `WM_COMPILER_URL` (optional) — URL of the TypeScript sidecar. If
-  unset, source-based POSTs return `compile_failed`; pre-compiled
-  uploads still work.
 - `WM_SECURE_COOKIES` (optional, slice 44) — `1`/`true`/`yes`/`on`
   to append `Secure` to the `wm_session` + `wm_csrf` cookies. Off by
   default so dev workflows over plain HTTP keep working; required
@@ -563,11 +574,12 @@ In addition to a stable Rust toolchain:
   to componentize fixture guests; also handy for `wasm-tools component wit
   <component.wasm>` when investigating component-shape issues)
 - `just` — `cargo install just`
-- **Node 22+** — only needed for hacking on the compiler sidecar
-  (`compiler/typescript/`) or running its `npm test`. Not required to
-  build or run the host.
-- **Docker** — required for the tier-3 testcontainers suites
-  (`just test-valkey`, `just test-sidecar`).
+- **Node 22+** — only needed for rebuilding the embedded js-engine
+  (`compiler/js-engine/`) when the engine shim or its wit changes.
+  The vendored `crates/wm-host/vendored/js-engine.wasm` is checked in,
+  so a fresh build of the host doesn't need Node.
+- **Docker** — required for the tier-3 testcontainers suite
+  (`just test-valkey`).
 
 ## Conventions
 

@@ -22,9 +22,13 @@ which is shipped to *users* of WireMirage.
   WireMirage (per ADR-0015) and describe the CLI workflow — distinct
   from the dev skill in this file. Tightly coupled to the current
   CLI; keep updated alongside CLI changes.
-- **Compiler sidecar (Node, not Rust):** `compiler/typescript/`. Hono
-  HTTP server + jco/componentize-js. Built as its own Docker image. Not
-  in the cargo workspace; uses npm + tsc + vitest.
+- **Shared js-engine (built ahead of time, not a runtime sidecar):**
+  `compiler/js-engine/` is a TypeScript shim that componentize-js bundles
+  with StarlingMonkey into `crates/wm-host/vendored/js-engine.wasm`. The
+  host `include_bytes!`-embeds the result. ADR-0020. JS source is
+  dispatched through this shared component; TS is transpiled to JS
+  in-host via swc (`crate::ts_transpile`) before storage. No Node
+  sidecar at runtime — `compiler/typescript/` was deleted.
 - **WIT contract:** `wit/wiremirage.wit` at the repo root — the *verbatim*
   mirror of `script-api-wit.md` in Arkiv. Treat the Arkiv doc as the source
   of truth; if the contract has to change, update the doc first (with an
@@ -93,25 +97,34 @@ use `Storage::valkey(url)`. **Don't introduce a default-to-memory
 fallback in production paths** — fail-fast on missing config is a
 deliberate project convention.
 
-## Compiler sidecar
+## Source-language pipeline (ADR-0020)
 
-`POST /__api/routes` accepts two body shapes (per `rest-api.md`):
-pre-compiled `language: "wasm"` uploads go straight through; source-based
-`language: "typescript"` requests are forwarded to the sidecar via
-`CompilerClient::compile`. Sidecar is reachable via `WM_COMPILER_URL`;
-unset → source requests return `compile_failed` ("compiler not
-configured"), pre-compiled uploads still work.
+`POST /__api/routes` accepts three body shapes (per `rest-api.md`):
 
-The sidecar is *built* as part of the host's tier-3 sidecar tests
-(`just test-sidecar`) — those tests start a real container via
-testcontainers-rs against a locally-built `wiremirage/compiler-typescript:dev`
-image. CI builds the image as a step before running those tests; locally
-`just test-sidecar` does the same.
+- `language: "wasm"` — pre-compiled component bytes. Validated as a
+  `wasmtime::component::Component` at create time; per-route component
+  cache pins it at dispatch time.
+- `language: "javascript"` — source stored verbatim.
+- `language: "typescript"` — source goes through pure-Rust swc
+  (`crate::ts_transpile::transpile`) at create/patch time. swc's strip
+  pass erases TS-only syntax; the post-transpile JS is what's stored
+  on the Route record.
 
-When changing the WIT contract, the sidecar's image must be rebuilt
-because the WIT directory is COPYed in at image-build time. The `dev`
-tag is a moving target — always rebuild after a WIT change before
-running `just test-sidecar`.
+JS / TS routes dispatch through a single embedded
+`js-engine.wasm` component (`crates/wm-host/vendored/`, produced
+ahead of time by `compiler/js-engine/build.mjs`). On every dispatched
+request the host instantiates the engine, evaluates the per-route
+source via a `get-source` host import, and runs the user `handle`
+function in a script-shape `Function` wrapper. The
+`Arc<Component>` is shared across requests so the wasmtime JIT cost
+amortizes (see `tests/js_engine_perf.rs`).
+
+When changing the WIT contract: update `wit/wiremirage.wit` and
+`wit/engine.wit`, regenerate the engine via
+`cd compiler/js-engine && npm run build`, commit the resulting
+`crates/wm-host/vendored/js-engine.wasm`. The vendored binary is the
+ground truth for what the host loads; bindgen on the Rust side reads
+from `wit/*.wit`.
 
 ## Auth (slice 5)
 
@@ -135,8 +148,8 @@ don't have tokens. The unauthenticated probes `GET /__health` and
   builds a default `reqwest::Client` carrying that token. Tests that
   drive 401 / 403 paths construct their own clients via
   `Harness::unauthenticated_client()` or `Harness::provision_user()`.
-  `start_with_seeded_route` in `tests/http_smoke.rs` and the Valkey /
-  sidecar integration tests do the same.
+  `start_with_seeded_route` in `tests/http_smoke.rs` and the Valkey
+  integration tests do the same.
 - **Ownership.** `Route` records carry `owner_id` (set from `auth.user_id`
   at create time). DELETE requires `route.owner_id == caller || caller.is_admin`;
   unauthorized callers get 403 `forbidden`. PATCH and admin "act on behalf of"
@@ -172,14 +185,13 @@ collector get a clean stderr-only experience.
   fields: `http.method`, `route.matched_pattern`, `route.id`,
   `outcome`); `wasmtime.instantiate` + `wasmtime.call_handle` as
   children of dispatch; `Auth::authenticate`; `Registry::create_route`
-  / `delete_route`; `CompilerClient::compile`. **Avoid** putting the
-  raw URL `path` in span attributes — path-param values explode
-  cardinality. Use `route.matched_pattern` instead.
+  / `delete_route`. **Avoid** putting the raw URL `path` in span
+  attributes — path-param values explode cardinality. Use
+  `route.matched_pattern` instead.
 - **Propagation.** W3C `traceparent` is extracted from incoming axum
   headers (`HeaderExtractor` adapter) and applied as the dispatch
-  span's parent. Outbound sidecar calls inject `traceparent` via
-  `HeaderInjector` so the sidecar — once instrumented — chains under
-  our span. Both adapters live in `telemetry.rs`.
+  span's parent. The `HeaderInjector` adapter is retained for future
+  outbound calls. Both adapters live in `telemetry.rs`.
 - **What's not in slice 6.** Metrics (request count, latency
   histogram, fuel) are deferred until we feel the lack. Sidecar OTel
   is out of scope — it's a slim Hono app whose latency is dominated
@@ -642,9 +654,9 @@ edit a TS/JS handler.
   swapped). Both handler bodies are now thin wrappers
   that build `CreateRouteBody` / `PatchRouteBody` and
   delegate to `api::create_route_core` / `patch_route_core`.
-  Compile, sidecar, conflict-precheck, source-storage,
-  and component-validation all live in the shared core
-  helpers — MCP and REST go through the same code path.
+  Conflict-precheck, swc transpile, source-storage, and
+  component-validation all live in the shared core helpers —
+  MCP and REST go through the same code path.
 - **`mcp/error.rs`**: new `map_api_error(ApiError) ->
   ErrorData` propagates `code`, message, and any
   compile-failed diagnostics into the structured `data`
@@ -654,17 +666,11 @@ edit a TS/JS handler.
   `CreateRouteBody` / `PatchRouteBody` and their fields
   is enough — no public-API surface change.
 - **Tests** (`tests/mcp_e2e.rs`):
-  - `create_route_accepts_typescript_source` — happy path through the mock-compiler harness.
-  - `create_route_typescript_without_compiler_returns_compile_failed` — no `WM_COMPILER_URL` configured → compile_failed surfaces.
+  - `create_route_accepts_typescript_source` — happy path; in-host swc transpiles, source is stored.
+  - `create_route_typescript_with_bad_source_returns_compile_failed` — swc parse error surfaces as `compile_failed` from MCP.
   - `create_route_rejects_source_and_wasm_together` — validation_failed on the both-fields case.
   - `update_route_swaps_typescript_source` — verifies the stored source actually changed via a follow-up `show_route_source` call.
   - `update_route_can_switch_wasm_to_source_and_back` — wasm → TS swap stores source; TS → wasm swap clears it. The same `Some(None)` / `Some(Some(_))` patch semantics the REST PATCH path uses.
-- **Test-harness change**: `mcp_e2e.rs` gains a
-  `start_with_mock_compiler()` helper mirroring the
-  pattern from `ui_source_edit.rs` /  `ui_route_new.rs`
-  — a tiny axum server returns canned echo-wasm bytes
-  for any `/compile` POST, so source-language tests
-  don't need a real componentize-js sidecar.
 
 ## Ace Editor for source viewer + editor (slice 41)
 
@@ -736,8 +742,8 @@ vendored as a script-tag distribution — no JS bundler.
 Makes the slice-37 read-only source card editable. New
 `/__ui/routes/{group}/{n}/source/edit` page renders a
 textarea pre-populated with the route's stored source;
-POST forwards to `api::patch_route_core` which
-recompiles via the sidecar and swaps the artifact in
+POST forwards to `api::patch_route_core` which runs the
+slice-58 swc transpile (for TS) and swaps the artifact in
 place.
 
 - **`api.rs`**: extracted `pub(crate) async fn
@@ -750,9 +756,9 @@ place.
 - **`ui/mod.rs`**: `route_source_edit_page` (GET) +
   `route_source_edit_submit` (POST), both owner-or-admin
   gated. Routes with `source: None` (wasm uploads) 404
-  on both — no source to edit, and recompiling-wasm-from-
-  wasm isn't a thing the sidecar supports. On compile
-  failure, the form re-renders with `SourceEditError {
+  on both — no source to edit, and there's nothing to do
+  with wasm source. On compile failure (e.g. swc parse
+  error), the form re-renders with `SourceEditError {
   title, message, diagnostics }` and the user's edits
   intact.
 - **`templates/route_source_edit.html`**: textarea +
@@ -771,12 +777,12 @@ place.
   affordance. MCP `update_route` stays wasm-only per
   the slice-15 decision.
 - **Tests** (`tests/ui_source_edit.rs`):
-  - `edit_form_renders_with_current_source_for_ts_route`
+  - `edit_form_renders_with_current_source_for_source_route`
   - `edit_form_404s_on_wasm_route_without_stored_source`
   - `edit_form_403_for_non_owner_non_admin`
-  - `edit_submit_with_new_source_recompiles_and_redirects` — uses the canned-bytes mock compiler trick from `ui_route_new.rs` to exercise the happy path; verifies the updated source renders on the detail page after the redirect.
+  - `edit_submit_with_new_source_updates_and_redirects` — happy path; verifies the updated source renders on the detail page after the redirect.
   - `edit_submit_without_csrf_is_forbidden`
-  - `edit_submit_without_compiler_reports_compile_failed` — verifies the no-compiler case re-renders with `compile_failed` + the user's edits preserved.
+  - `edit_submit_with_invalid_ts_source_reports_compile_failed` — verifies the swc parse-error case re-renders with `compile_failed`.
 
 ## MCP near-miss projection on list_recent_unmatched (slice 38)
 
@@ -1254,16 +1260,17 @@ compile-register pipeline with `POST /__api/routes`.
   values preserved.
 - **Shared core**: `create_route_core` does the whole
   pipeline — reserved-path check, source/wasm exclusivity
-  check, language branch (compile via sidecar for source,
-  base64-decode + bindings-version check for `wasm`),
-  `Component::from_binary` validation, registry insert,
-  `RouteTable::refresh_after_create`. Two new accessors on
-  `ApiError` (`code()`, `diagnostics()`) let the UI map
+  check, language branch (in-host swc transpile for `typescript`,
+  store-verbatim for `javascript`, base64-decode +
+  bindings-version check for `wasm`),
+  `Component::from_binary` validation (wasm only), registry
+  insert, `RouteTable::refresh_after_create`. Two accessors
+  on `ApiError` (`code()`, `diagnostics()`) let the UI map
   REST error codes to UI error titles.
-- **Form scope**: source-only — `typescript` or `javascript`
-  (both supported by the sidecar). Pre-compiled wasm uploads
-  remain a REST-only path; a textarea is the wrong UI for
-  bytes-with-base64.
+- **Form scope**: source-only — `typescript` or `javascript`,
+  both dispatched through the shared js-engine. Pre-compiled
+  wasm uploads remain a REST-only path; a textarea is the
+  wrong UI for bytes-with-base64.
 - **Implicit groups**: an empty group field maps to
   `group: None`, which the registry handles by creating an
   implicit single-route group. Implicit groups are filtered
@@ -1758,17 +1765,15 @@ end-to-end before the detail pages land.
   pages to a single `login.html` render with `local_enabled`,
   `next`, `error` in the context. Honours `?next=` on GET so the
   hidden form input round-trips through the redirect flow.
-- **`just run-web`** convenience target: brings up the realistic
-  stack — Valkey + TypeScript sidecar via `docker compose up -d`,
-  waits for both to be reachable, then runs the host locally with
-  `WM_STORAGE=redis://localhost:6379`,
-  `WM_COMPILER_URL=http://localhost:9100`,
-  `WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword'`, fixed
-  `SESSION_SECRET`, then `cargo run -p wm-host`. Data persists
-  across host restarts in the Valkey volume (`docker compose down -v`
-  to wipe). Visit `http://localhost:8080/__ui/` and log in.
-  `just run-web-fast` is the in-memory, no-sidecar shortcut for
-  when you don't need persistence or TS compilation.
+- **`just run-web`** convenience target: brings up Valkey via
+  `docker compose up -d`, waits for it to be reachable, then runs
+  the host locally with `WM_STORAGE=redis://localhost:6379`,
+  `WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword'`,
+  fixed `SESSION_SECRET`, then `cargo run -p wm-host`. Data
+  persists across host restarts in the Valkey volume
+  (`docker compose down -v` to wipe). Visit
+  `http://localhost:8080/__ui/` and log in. `just run-web-fast`
+  is the in-memory shortcut for when you don't need persistence.
 - **Stubs:** `placeholder.html` is shared by every "coming in a
   later slice" route. The stub handler names the equivalent API
   path so the user can drop to `wm`/`curl` until the real page
@@ -2092,10 +2097,10 @@ create-route surface, partial body.
   compile is cheaper than a stale-bytes bug.
 - **Auth:** owner-or-admin, matching DELETE. Non-owner non-admin
   gets 403.
-- **MCP stays wasm-only on the artifact**, matching `create_route`.
-  Source-based updates go through REST or `wm routes update
-  --source-file` (which forwards through the same compiler sidecar
-  used by `wm routes add`).
+- **MCP `update_route` now accepts source-language too** (slice 42).
+  REST and `wm routes update --source-file` use the same
+  `patch_route_core` path, which runs the in-host swc transpile for
+  TypeScript before storage (ADR-0020).
 - **CLI flag semantics:** `wm routes update <slug>` requires at
   least one of `--method`, `--path`, `--source-file`, or
   `--wasm-file`; an entirely empty patch is a usage error caught

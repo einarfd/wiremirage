@@ -9,7 +9,6 @@ pub mod api_filters;
 pub mod auth;
 pub mod auth_api;
 pub mod bindings;
-pub mod compiler;
 pub mod dry_run;
 pub mod github_oauth;
 pub mod host_state;
@@ -29,13 +28,13 @@ pub mod server;
 pub mod session;
 pub mod store;
 pub mod telemetry;
+pub mod ts_transpile;
 pub mod ui;
 
-/// Handler bindings version this build of the host accepts. Compilers
-/// (sidecar) and pre-compiled-component uploads must declare this exact
-/// value; mismatches are rejected. Bumped per the protocol in
-/// `script-api-wit.md`'s "Stability policy" when the WIT contract changes
-/// shape.
+/// Handler bindings version this build of the host accepts. Pre-compiled
+/// wasm uploads must declare this exact value; mismatches are rejected.
+/// Bumped per the protocol in `script-api-wit.md`'s "Stability policy"
+/// when the WIT contract changes shape.
 pub const SUPPORTED_BINDINGS_VERSION: &str = "0.1.0";
 
 pub use bindings::Handler;

@@ -38,10 +38,6 @@ pub struct AppState {
     routes: Arc<RouteTable>,
     auth: crate::auth::Auth,
     journal: crate::journal::Journal,
-    /// Optional compiler-sidecar client. `None` means the host hasn't
-    /// been configured with `WM_COMPILER_URL`; source-based POSTs to
-    /// `/__api/routes` are rejected with `compile_failed` in that case.
-    compiler: Option<crate::compiler::CompilerClient>,
     /// Local-auth credential map (slice 20). Empty when
     /// `WM_LOCAL_AUTH` isn't configured; login attempts just always
     /// fail in that case.
@@ -97,7 +93,6 @@ impl AppState {
             routes,
             auth,
             journal,
-            compiler: None,
             local_auth: Arc::new(crate::local_auth::LocalAuth::empty()),
             sessions: None,
             login_throttle: Arc::new(crate::login_throttle::LoginThrottle::new()),
@@ -139,11 +134,6 @@ impl AppState {
         self.shutdown.as_ref()
     }
 
-    pub fn with_compiler(mut self, compiler: crate::compiler::CompilerClient) -> Self {
-        self.compiler = Some(compiler);
-        self
-    }
-
     pub fn with_local_auth(mut self, local_auth: crate::local_auth::LocalAuth) -> Self {
         self.local_auth = Arc::new(local_auth);
         self
@@ -173,10 +163,6 @@ impl AppState {
 
     pub fn journal(&self) -> &crate::journal::Journal {
         &self.journal
-    }
-
-    pub fn compiler(&self) -> Option<&crate::compiler::CompilerClient> {
-        self.compiler.as_ref()
     }
 
     pub fn local_auth(&self) -> &crate::local_auth::LocalAuth {
@@ -231,23 +217,15 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
-/// Readiness probe. Public, unauthenticated. Reports per-dependency status:
-/// `valkey` always reports for the configured backend (in-memory is
-/// trivially "ok"); `compiler` is "not_configured" when no sidecar URL is
-/// set. Returns 503 if any dependency is configured but unreachable.
+/// Readiness probe. Public, unauthenticated. Reports `valkey` status
+/// for the configured backend (in-memory is trivially "ok"). Returns
+/// 503 if any dependency is configured but unreachable.
 async fn ready(State(state): State<AppState>) -> Response {
     let valkey = match state.runtime().storage().ping() {
         Ok(()) => "ok".to_string(),
         Err(e) => format!("unreachable: {e}"),
     };
-    let compiler = match state.compiler() {
-        None => "not_configured".to_string(),
-        Some(client) => match client.ping().await {
-            Ok(()) => "ok".to_string(),
-            Err(e) => format!("unreachable: {e}"),
-        },
-    };
-    let healthy = valkey == "ok" && (compiler == "ok" || compiler == "not_configured");
+    let healthy = valkey == "ok";
     let status = if healthy {
         StatusCode::OK
     } else {
@@ -256,7 +234,6 @@ async fn ready(State(state): State<AppState>) -> Response {
     let body = json!({
         "status": if healthy { "ready" } else { "not_ready" },
         "valkey": valkey,
-        "compiler": compiler,
         "version": HOST_VERSION,
     });
     (status, Json(body)).into_response()
@@ -476,8 +453,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // Branch on language: source-language routes (ADR-0020) run
     // through the shared engine; everything else (`wasm` uploads,
     // future AOT languages) still goes through the per-route
-    // component cache.
-    let use_engine = matches!(route_language.as_str(), "javascript");
+    // component cache. TS routes were transpiled to JS at create-
+    // time, so they're indistinguishable from JS routes at
+    // dispatch — both stored fields hold script-shape JS.
+    let use_engine = matches!(route_language.as_str(), "javascript" | "typescript");
     let component = if use_engine {
         None
     } else {

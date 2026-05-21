@@ -16,9 +16,11 @@ isn't practical. A small web UI exists for human inspection.
 Early implementation. The WIT script API (`wit/wiremirage.wit`) is in
 place, the host runs components against it, storage is abstracted behind
 in-memory and Valkey backends, routes are stored in a registry keyed by
-`{group}/{n}`, and the REST API accepts both pre-compiled wasm uploads
-and TypeScript source (the latter goes through a Node sidecar at
-`compiler/typescript/`). Routes are mutable via `PATCH
+`{group}/{n}`, and the REST API accepts pre-compiled wasm uploads as
+well as `language: "javascript" | "typescript"` source — JS and TS
+both dispatch through an embedded shared js-engine.wasm component
+(ADR-0020), with TypeScript transpiled to JS in-host via pure-Rust
+swc. No external compiler. Routes are mutable via `PATCH
 /__api/routes/{group}/{n}` (slice 15): `methods`, `path`, and the
 handler artifact swap together; path/method changes re-run pattern
 conflict detection, and any wasm swap evicts the in-memory component
@@ -69,13 +71,15 @@ crates/
                           MCP service lives under wm-host/src/mcp/
   wm-cli/                 the wm CLI binary
 compiler/
-  typescript/             Node-based compiler sidecar (componentize-js + jco)
+  js-engine/              TypeScript shim + componentize-js build pipeline
+                          for the shared js-engine.wasm (ADR-0020)
 wit/
   wiremirage.wit          handler script API contract (mirrors the design doc)
+  engine.wit              shared-engine world (host imports for source dispatch)
 skill/
   wiremirage/             user-facing Anthropic Skill (SKILL.md + scripts)
   wiremirage-debug/       diagnostic sub-skill triggered on mock-debugging tasks
-docker-compose.yml        Valkey + sidecar for local development
+docker-compose.yml        Valkey for local development
 ```
 
 ## Building
@@ -95,23 +99,26 @@ just check    # fmt, clippy, test
 just build    # cargo build --workspace
 ```
 
-To run the host with the TypeScript sidecar:
+To run the host:
 
 ```
-docker compose up -d   # starts Valkey + compiler-typescript
+docker compose up -d   # starts Valkey
 WM_BOOTSTRAP_TOKEN=wmt_dev_local \
   WM_STORAGE=redis://localhost:6379 \
-  WM_COMPILER_URL=http://localhost:9100 \
   cargo run -p wm-host
 # In another shell:
 curl -X POST localhost:8080/__api/routes \
   -H 'authorization: Bearer wmt_dev_local' \
   -H content-type:application/json \
   -d '{"methods":["POST"],"path":"/v1/charges","language":"typescript",
-       "source":"export function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"}'
+       "source":"function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"}'
 # Mock traffic does not need an Authorization header.
 curl -X POST localhost:8080/v1/charges -d '{}'
 ```
+
+TypeScript and JavaScript source compile in-host — TS is transpiled via
+swc and dispatched through an embedded `js-engine.wasm` component (see
+ADR-0020). No Node sidecar.
 
 The host exposes two unauthenticated probe endpoints for orchestrators:
 `GET /__health` (liveness, always 200) and `GET /__ready` (readiness;
@@ -129,20 +136,16 @@ supplied.
 
 Optional:
 
-- `WM_COMPILER_URL` — sidecar endpoint. Without it, source-based
-  requests fail; pre-compiled `language: "wasm"` uploads still work.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — URL of an OTLP/gRPC collector. When
-  set, the host exports spans for the request → handler → backend
-  path; when unset, host logging is stderr-only. The standard
-  `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` env vars are
-  honored. W3C `traceparent` is extracted from incoming requests and
-  injected on outbound calls to the sidecar.
+  set, the host exports spans for the request → handler path; when
+  unset, host logging is stderr-only. The standard `OTEL_SERVICE_NAME`
+  and `OTEL_RESOURCE_ATTRIBUTES` env vars are honored. W3C
+  `traceparent` is extracted from incoming requests.
 
 Tier-3 tests require Docker:
 
 ```
 just test-valkey       # Valkey-backed storage suite
-just test-sidecar      # builds the sidecar image, runs end-to-end TS test
 just check-all         # everything (fmt + clippy + test + tier-3)
 ```
 
@@ -163,7 +166,7 @@ version probes work without a token; everything else requires one.
 wm health                                  # probes /__health
 wm groups create stripe-mock               # default 24h sliding TTL
 wm routes add --group stripe-mock --method POST --path /v1/charges \
-  --source-file handler.ts                 # compiles via the sidecar
+  --source-file handler.ts                 # transpiled in-host
 wm routes list
 wm routes update stripe-mock/1 --source-file new-handler.ts  # PATCH
 wm routes source stripe-mock/1             # print stored handler source

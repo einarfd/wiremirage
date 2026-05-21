@@ -58,17 +58,23 @@ minijinja = { version = "2", default-features = false, features = ["builtins", "
 # A handful of `urlencoding::encode` calls; the crate is ~50 LOC of safe
 # Rust and pulls no other deps.
 urlencoding = "2"
+# Pure-Rust TypeScript transpile (ADR-0020 slice B). swc's
+# `strip_type` transform erases TS-only syntax in-host so we can
+# delete the Node sidecar entirely. Heavy dep tree but the only
+# proven-mature pure-Rust path; the alternatives (sucrase/tsc
+# baked into the engine) tripped wasm traps inside StarlingMonkey.
+swc_common = "21"
+swc_ecma_ast = "23"
+swc_ecma_parser = { version = "39", features = ["typescript"] }
+swc_ecma_transforms_typescript = "47"
+swc_ecma_codegen = "26"
+swc_ecma_visit = "23"
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via
 # testcontainers-rs. Requires Docker. Disabled by default so plain
 # `cargo test` stays fast and works without Docker; CI enables it.
 valkey-tests = []
-# Enables tier-3 integration tests that spin up the TypeScript compiler
-# sidecar Docker image. Requires Docker AND a pre-built
-# `wiremirage/compiler-typescript:dev` image (built via
-# `compiler/typescript/Dockerfile`).
-sidecar-tests = []
 
 [dev-dependencies]
 hyper.workspace = true
