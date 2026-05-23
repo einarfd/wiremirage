@@ -73,6 +73,14 @@ try {
     sourcePath: jsPath,
     witPath: WIT,
     worldName: "engine",
+    // Pass our env through to the spawned wizer/weval subprocess.
+    // Without this, componentize-js synthesises a tiny env containing
+    // only its own bookkeeping vars (DEBUG, SOURCE_NAME, EXPORT_*),
+    // and wizer's wasmtime cache then can't find $HOME — it errors
+    // with "config file not specified and failed to get the default"
+    // before doing any real work. We rely on the Dockerfile to pin
+    // HOME=/tmp so this works regardless of which UID we run as.
+    env: process.env,
     // Same restrictions as the per-route handler builds: no real
     // clocks, no real RNG, no fetch, no stdio. The host provides
     // logging via the `log` interface.
