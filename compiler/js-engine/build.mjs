@@ -3,13 +3,12 @@
 // Transpiles engine.ts → engine.js (no module-system rewriting; the
 // componentize-js Wizer step expects the file to be a real ES
 // module), then runs componentize-js with the `engine` world to
-// produce js-engine.wasm. Output is written verbatim to the
-// vendored path that the host's build.rs reads via env var.
+// produce js-engine.wasm.
 //
-// This script is intentionally not part of the host's cargo build —
-// node + componentize-js are a one-time dev dep, not a host runtime
-// dep. Re-run by hand whenever engine.ts changes; the resulting
-// wasm is committed to the repo.
+// Invoked from the host's `build.rs` via a pinned Docker container
+// (see `Dockerfile` in this directory). The cargo `OUT_DIR` is
+// bind-mounted at /out and `WM_JS_ENGINE_OUT=/out/js-engine.wasm`
+// selects the output path.
 
 import { componentize } from "@bytecodealliance/componentize-js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -20,8 +19,15 @@ import ts from "typescript";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(HERE, "src/engine.ts");
 const WIT = resolve(HERE, "wit");
-const OUT_DIR = resolve(HERE, "..", "..", "crates", "wm-host", "vendored");
-const OUT = resolve(OUT_DIR, "js-engine.wasm");
+
+if (!process.env.WM_JS_ENGINE_OUT) {
+  console.error(
+    "WM_JS_ENGINE_OUT is required (absolute path to the .wasm output).",
+  );
+  process.exit(1);
+}
+const OUT = resolve(process.env.WM_JS_ENGINE_OUT);
+const OUT_DIR = dirname(OUT);
 
 // 1. Transpile TS → JS. ESNext module shape — componentize-js wants
 //    a real ES module, not script-shape. The `export function handle`
@@ -47,9 +53,12 @@ if (diagnostics && diagnostics.length > 0) {
   process.exit(1);
 }
 
-// 2. componentize-js needs a file on disk. Use a sibling .js path so
-//    the source-map paths in any future diagnostics aren't surprising.
-const jsPath = resolve(HERE, "src/engine.generated.js");
+// 2. componentize-js needs a file on disk. Write into OUT_DIR so the
+//    container's bind-mount is writable; /app and /app/src are owned
+//    by root (from the Dockerfile COPY) and the build runs as the
+//    host UID, so writing inside /app would EACCES.
+mkdirSync(OUT_DIR, { recursive: true });
+const jsPath = resolve(OUT_DIR, "engine.generated.js");
 writeFileSync(jsPath, outputText);
 
 // Optional: pass `--debug` to dump generated bindings to ./debug/.

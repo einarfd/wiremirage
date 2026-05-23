@@ -24,24 +24,15 @@ async fn main() -> anyhow::Result<()> {
     let auth = Auth::new(storage.clone());
     bootstrap_admin_if_requested(&auth)?;
 
-    // The shared JS engine component (ADR-0020). Embedded at build
-    // time from `crates/wm-host/vendored/js-engine.wasm`, which is
-    // built via `compiler/js-engine/build.mjs`. Empty when the
-    // vendored file is absent (e.g. during a fresh checkout before
-    // running the build script) — the runtime tolerates that with
-    // an explicit not-configured error on the engine path.
-    const JS_ENGINE_BYTES: &[u8] = include_bytes!("../vendored/js-engine.wasm");
-    let runtime = Runtime::new(storage.clone())?;
-    let runtime = if !JS_ENGINE_BYTES.is_empty() {
-        runtime
-            .with_js_engine_bytes(JS_ENGINE_BYTES)
-            .map_err(|e| anyhow!("load vendored js-engine.wasm: {e}"))?
-    } else {
-        tracing::warn!(
-            "vendored js-engine.wasm is empty; source-language routes will fail at dispatch"
-        );
-        runtime
-    };
+    // The shared JS engine component (ADR-0020). Built at cargo build
+    // time by `build.rs` (via `compiler/js-engine/Dockerfile`) and
+    // embedded into the binary. The `WM_JS_ENGINE_WASM` env var is set
+    // by build.rs to the absolute path of the artifact in cargo's
+    // OUT_DIR.
+    const JS_ENGINE_BYTES: &[u8] = include_bytes!(env!("WM_JS_ENGINE_WASM"));
+    let runtime = Runtime::new(storage.clone())?
+        .with_js_engine_bytes(JS_ENGINE_BYTES)
+        .map_err(|e| anyhow!("load embedded js-engine.wasm: {e}"))?;
     let runtime = Arc::new(runtime);
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone())?;

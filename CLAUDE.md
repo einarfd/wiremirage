@@ -431,17 +431,24 @@ journals it. `ResourceUsage::fuel_consumed` and
 `memory_peak_bytes` go from 0-placeholders to real numbers
 captured from the store before it drops. Slices 56–58 implemented
 ADR-0020: a shared `js-engine.wasm` (componentize-js bundle of
-StarlingMonkey + a small dispatch shim) is built ahead of time
-under `compiler/js-engine/`, vendored at
-`crates/wm-host/vendored/js-engine.wasm`, and embedded into the host
-binary via `include_bytes!`. Dispatch on `language: "javascript" |
+StarlingMonkey + a small dispatch shim) lives under
+`compiler/js-engine/`. Dispatch on `language: "javascript" |
 "typescript"` instantiates a fresh component per request and reads
 the matched route's source through a `get-source` host import.
 TypeScript transpiles to JS in-host via pure-Rust swc
 (`crate::ts_transpile`) before storage — TS and JS now share a single
 dispatch path with no Node sidecar. `WM_COMPILER_URL` is gone;
 `docker-compose.yml` no longer ships a `compiler-typescript`
-service; `compiler/typescript/` is deleted.
+service; `compiler/typescript/` is deleted. Slice C of ADR-0020
+made the engine a build-time artifact rather than a vendored blob:
+`crates/wm-host/build.rs` runs `compiler/js-engine/Dockerfile`
+(pinned `node:22-bookworm-slim`) to produce `js-engine.wasm`
+inside cargo's `OUT_DIR`, stamps the path into
+`WM_JS_ENGINE_WASM`, and `src/main.rs`
+`include_bytes!`'s it. Docker is now a build dependency;
+`WM_JS_ENGINE_WASM_OVERRIDE=/abs/path` skips docker for
+release-image builds or no-Docker contributors. Nothing is checked
+in under `crates/wm-host/vendored/` (the directory is gitignored).
 
 ## Where the design lives
 
@@ -471,12 +478,14 @@ Cargo workspace with three crates under `crates/`:
 
 Plus a non-Rust subdirectory used at build time only:
 
-- `compiler/js-engine/` — TypeScript shim + componentize-js build pipeline
-  that produces `crates/wm-host/vendored/js-engine.wasm` (ADR-0020).
-  Compiled ahead of time; the resulting wasm component is embedded into
-  the host binary via `include_bytes!`. **Not** in the cargo workspace.
-  Source-language handler dispatch goes through this shared engine.
-  TypeScript → JS happens in-process in the Rust host via swc, not here.
+- `compiler/js-engine/` — TypeScript shim + Dockerfile that produces
+  the shared `js-engine.wasm` component (ADR-0020). Built at cargo build
+  time by `crates/wm-host/build.rs` via the pinned
+  `node:22-bookworm-slim` image; the resulting wasm lands in cargo's
+  `OUT_DIR` and is embedded into the host binary via `include_bytes!`.
+  **Not** in the cargo workspace. Source-language handler dispatch goes
+  through this shared engine. TypeScript → JS happens in-process in the
+  Rust host via swc, not here.
 
 The WIT contract that handlers program against lives at `wit/wiremirage.wit`.
 It is the verbatim mirror of `script-api-wit.md` in the Arkiv workspace; if
@@ -574,12 +583,13 @@ In addition to a stable Rust toolchain:
   to componentize fixture guests; also handy for `wasm-tools component wit
   <component.wasm>` when investigating component-shape issues)
 - `just` — `cargo install just`
-- **Node 22+** — only needed for rebuilding the embedded js-engine
-  (`compiler/js-engine/`) when the engine shim or its wit changes.
-  The vendored `crates/wm-host/vendored/js-engine.wasm` is checked in,
-  so a fresh build of the host doesn't need Node.
-- **Docker** — required for the tier-3 testcontainers suite
-  (`just test-valkey`).
+- **Docker** — required for `cargo build` (the host's `build.rs`
+  invokes `compiler/js-engine/Dockerfile` to produce the shared
+  `js-engine.wasm` component; pinned `node:22-bookworm-slim`, image
+  layer-cached). Also required for the tier-3 testcontainers suite
+  (`just test-valkey`). Set `WM_JS_ENGINE_WASM_OVERRIDE=/abs/path` to
+  skip the docker invocation and use a pre-built artifact, e.g. for
+  release-image builds or restricted CI lanes.
 
 ## Conventions
 

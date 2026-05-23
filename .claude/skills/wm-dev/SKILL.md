@@ -22,13 +22,18 @@ which is shipped to *users* of WireMirage.
   WireMirage (per ADR-0015) and describe the CLI workflow — distinct
   from the dev skill in this file. Tightly coupled to the current
   CLI; keep updated alongside CLI changes.
-- **Shared js-engine (built ahead of time, not a runtime sidecar):**
+- **Shared js-engine (built at cargo build time, not a runtime sidecar):**
   `compiler/js-engine/` is a TypeScript shim that componentize-js bundles
-  with StarlingMonkey into `crates/wm-host/vendored/js-engine.wasm`. The
-  host `include_bytes!`-embeds the result. ADR-0020. JS source is
-  dispatched through this shared component; TS is transpiled to JS
-  in-host via swc (`crate::ts_transpile`) before storage. No Node
-  sidecar at runtime — `compiler/typescript/` was deleted.
+  with StarlingMonkey into `js-engine.wasm`. The host's `build.rs` runs a
+  pinned Docker image (`node:22-bookworm-slim`) to produce the artifact
+  in cargo's `OUT_DIR` and stamps the path into `WM_JS_ENGINE_WASM`;
+  `src/main.rs` `include_bytes!`'s it. ADR-0020. Nothing is checked in
+  under `crates/wm-host/vendored/` (gitignored). JS source is dispatched
+  through this shared component; TS is transpiled to JS in-host via swc
+  (`crate::ts_transpile`) before storage. No Node sidecar at runtime —
+  `compiler/typescript/` was deleted. Set
+  `WM_JS_ENGINE_WASM_OVERRIDE=/abs/path/to/prebuilt.wasm` to bypass the
+  docker step (release-image builds, no-Docker contributors).
 - **WIT contract:** `wit/wiremirage.wit` at the repo root — the *verbatim*
   mirror of `script-api-wit.md` in Arkiv. Treat the Arkiv doc as the source
   of truth; if the contract has to change, update the doc first (with an
@@ -55,10 +60,14 @@ In addition to stable Rust + clippy + rustfmt (already pulled in via
 - `wasm32-unknown-unknown` target — `rustup target add wasm32-unknown-unknown`
 - `wasm-tools` CLI — `cargo install wasm-tools`
 - `just` — `cargo install just`
-- **Docker** — needed only for `just check-all` / `just test-valkey`. The
-  testcontainers-rs sync runner spins up `valkey/valkey:8` for the tier-3
-  storage suite. CI already has Docker; locally you only need it if you
-  want to exercise the Valkey backend.
+- **Docker** — required for `cargo build`. The host's `build.rs` invokes
+  `compiler/js-engine/Dockerfile` (pinned `node:22-bookworm-slim`) to
+  produce the shared `js-engine.wasm`; output lives in cargo's `OUT_DIR`,
+  nothing is vendored. Docker layer cache keeps repeated builds fast.
+  Also needed for `just check-all` / `just test-valkey` (tier-3 storage
+  suite via testcontainers). To bypass the engine build (release-image
+  pipelines, restricted CI lanes), set
+  `WM_JS_ENGINE_WASM_OVERRIDE=/abs/path/to/prebuilt.wasm`.
 
 CI installs all four. Locally, install once.
 
@@ -111,20 +120,23 @@ deliberate project convention.
   on the Route record.
 
 JS / TS routes dispatch through a single embedded
-`js-engine.wasm` component (`crates/wm-host/vendored/`, produced
-ahead of time by `compiler/js-engine/build.mjs`). On every dispatched
-request the host instantiates the engine, evaluates the per-route
-source via a `get-source` host import, and runs the user `handle`
-function in a script-shape `Function` wrapper. The
+`js-engine.wasm` component, produced at cargo build time by
+`crates/wm-host/build.rs` running `compiler/js-engine/Dockerfile`
+(pinned `node:22-bookworm-slim`). The artifact lands in `OUT_DIR`
+and is `include_bytes!`'d via `env!("WM_JS_ENGINE_WASM")`. On
+every dispatched request the host instantiates the engine, evaluates
+the per-route source via a `get-source` host import, and runs the
+user `handle` function in a script-shape `Function` wrapper. The
 `Arc<Component>` is shared across requests so the wasmtime JIT cost
 amortizes (see `tests/js_engine_perf.rs`).
 
-When changing the WIT contract: update `wit/wiremirage.wit` and
-`wit/engine.wit`, regenerate the engine via
-`cd compiler/js-engine && npm run build`, commit the resulting
-`crates/wm-host/vendored/js-engine.wasm`. The vendored binary is the
-ground truth for what the host loads; bindgen on the Rust side reads
-from `wit/*.wit`.
+When changing the WIT contract or the engine shim: update
+`wit/wiremirage.wit` and/or `compiler/js-engine/wit/*.wit`, edit
+`compiler/js-engine/src/engine.ts` if needed, then `cargo build`.
+The build script detects the change via `cargo:rerun-if-changed`
+and re-runs the docker build. Nothing is committed under
+`crates/wm-host/vendored/` (gitignored). bindgen on the Rust side
+reads from `wit/*.wit` independently.
 
 ## Auth (slice 5)
 
