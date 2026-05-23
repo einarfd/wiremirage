@@ -58,9 +58,21 @@ fn build_fixture(manifest_dir: &Path, out_dir: &Path, name: &str) {
         fixture_dir.join("Cargo.toml").display()
     );
 
+    // Fixture crates are standalone (their own Cargo.toml + lockfile)
+    // and live outside the workspace. When this build.rs runs under
+    // `cargo clippy`, cargo sets `RUSTC_WORKSPACE_WRAPPER=clippy-driver`
+    // in the env; that propagates here, and our nested `cargo build`
+    // would inherit it and run clippy on the fixture too. The fixture's
+    // `wit_bindgen::generate!` macro expands to code that trips
+    // `clippy::too_many_arguments`, which we can't fix. Force the
+    // nested cargo back to a plain rustc by clearing the wrapper env
+    // vars before spawning.
     let status = Command::new("cargo")
         .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
         .current_dir(&fixture_dir)
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC")
         .status()
         .unwrap_or_else(|e| {
             panic!(
