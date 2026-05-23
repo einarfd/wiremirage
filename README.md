@@ -71,8 +71,9 @@ crates/
                           MCP service lives under wm-host/src/mcp/
   wm-cli/                 the wm CLI binary
 compiler/
-  js-engine/              TypeScript shim + componentize-js build pipeline
-                          for the shared js-engine.wasm (ADR-0020)
+  js-engine/              TypeScript shim + Dockerfile that builds the
+                          shared js-engine.wasm (ADR-0020) at cargo build
+                          time; output lives in target/, not vendored
 wit/
   wiremirage.wit          handler script API contract (mirrors the design doc)
   engine.wit              shared-engine world (host imports for source dispatch)
@@ -85,12 +86,22 @@ docker-compose.yml        Valkey for local development
 ## Building
 
 Requires the latest stable Rust toolchain (pinned via `rust-toolchain.toml`)
-and a few extra tools used to build the host's fixture guests:
+plus:
 
 ```
 rustup target add wasm32-unknown-unknown
 cargo install just wasm-tools
 ```
+
+Docker is also required — the host's `build.rs` invokes a pinned
+`compiler/js-engine/Dockerfile` to produce the shared js-engine.wasm
+component (ADR-0020) and embeds it into the binary. The image build is
+layer-cached, and cargo only re-runs the step when something under
+`compiler/js-engine/` changes.
+
+If you can't run Docker (e.g., building from source on a restricted
+machine), set `WM_JS_ENGINE_WASM_OVERRIDE=/abs/path/to/prebuilt.wasm` to
+skip the docker invocation and use a pre-built artifact instead.
 
 Then:
 

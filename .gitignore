@@ -4,12 +4,15 @@ crates/wm-host/tests/fixtures/*/target/
 **/*.rs.bk
 *.pdb
 
-# Node (compiler sidecar)
+# Node (used at build time only — see compiler/js-engine/)
 node_modules/
 dist/
 *.tsbuildinfo
+compiler/js-engine/src/engine.generated.js
+compiler/js-engine/debug/
 
-# Wasm build artifacts (kept out by default; add fixture paths explicitly if needed)
+# Wasm build artifacts (built by build.rs into target/; nothing vendored)
+crates/wm-host/vendored/
 
 # Environment
 .env

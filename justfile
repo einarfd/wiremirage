@@ -89,7 +89,8 @@ seed-dev:
 # Stop the dev compose stack and wipe the Valkey volume so the next
 # `just run-web` starts from an empty store. Useful when a data-shape
 # change makes pre-existing records unreadable, or when you just want
-# a clean slate to re-seed against. Doesn't touch the compiler image.
+# a clean slate to re-seed against. Doesn't touch the js-engine
+# builder image used by build.rs.
 wipe-dev:
     docker compose down -v
 
