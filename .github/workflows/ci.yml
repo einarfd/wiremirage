@@ -14,6 +14,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # GHA runners ship with ~30 GB of preinstalled tooling (Android SDK,
+      # .NET, Haskell, large GHC versions) that we don't use. swc +
+      # wasmtime + cranelift produce a target/ that easily exceeds the
+      # remaining disk; the linker then SIGBUSes mid-link. Free the
+      # space before we start building.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
