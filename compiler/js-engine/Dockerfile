@@ -23,4 +23,13 @@ COPY build.mjs ./
 
 ENV WM_JS_ENGINE_OUT=/out/js-engine.wasm
 
+# build.rs runs us as `--user $UID:$GID` so the output is host-owned.
+# If that UID isn't in the image's /etc/passwd (e.g. GitHub Actions
+# runners run as uid 1001, which isn't `node`), HOME ends up unset
+# and wasmtime's `ProjectDirs::from` returns None — wizer (called by
+# componentize-js) then errors with "config file not specified and
+# failed to get the default". /tmp is writable for any uid; pinning
+# HOME here makes the build independent of which uid we run as.
+ENV HOME=/tmp
+
 CMD ["node", "build.mjs"]
