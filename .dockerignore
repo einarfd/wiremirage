@@ -1,9 +1,41 @@
-# Repo-root .dockerignore — applied when building images whose context is
-# the repo root (e.g., `docker build -f compiler/typescript/Dockerfile .`).
+# Repo-root .dockerignore — applied when building images whose context
+# is the repo root (e.g., `docker build -f Dockerfile .`).
+#
+# Keep the build context lean. target/ alone can be tens of GB on a
+# working tree, and `docker build` would spend minutes transferring it
+# before the build stage even starts.
 
+# Rust build artifacts
 target/
+**/target/
+
+# Git history (not needed inside the image)
 .git/
+.github/
+
+# Node artefacts inside compiler/js-engine — the stage-1 build runs
+# `npm ci` cleanly inside the image, so the host's node_modules and
+# generated intermediate files are noise.
 **/node_modules/
 **/dist/
 **/*.tsbuildinfo
-crates/wm-host/tests/fixtures/*/target/
+compiler/js-engine/debug/
+compiler/js-engine/src/engine.generated.js
+
+# Pre-slice-59 vendored blob path (gitignored, but might exist locally
+# from before the cleanup).
+crates/wm-host/vendored/
+
+# Editor / OS / agent state
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local environment files (avoid leaking secrets into the image)
+.env
+.env.local
+.env.*.local

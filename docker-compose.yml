@@ -1,17 +1,26 @@
-# Slice 4 docker-compose: brings up Valkey, the only external dependency
-# WireMirage needs. The host itself runs locally for now
-# (`cargo run -p wm-host`) — a host Dockerfile lands in a follow-up
-# deployment slice. ADR-0020 retired the Node TypeScript compiler
-# sidecar; source-language handlers now compile in-host.
+# docker-compose for WireMirage.
 #
-# Quickstart:
+# Two services:
+#   - valkey  : the storage backend, always available
+#   - wm-host : the host binary, built from the repo's Dockerfile.
+#               Gated by the `full` profile so the default
+#               `docker compose up -d` matches the dev workflow
+#               (Valkey only; you `cargo run -p wm-host` against it).
+#
+# Quickstart — dev (Valkey only, host via cargo):
 #
 #   docker compose up -d
 #   WM_BOOTSTRAP_TOKEN=wmt_dev_local \
 #     WM_STORAGE=redis://localhost:6379 \
 #     cargo run -p wm-host
 #
-# The host listens on 8080 by default; Valkey on 6379.
+# Quickstart — full stack (Valkey + host both in compose):
+#
+#   WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+#     docker compose --profile full up -d --build
+#
+# The host listens on 8080; Valkey on 6379. Source-language handlers
+# compile in-host (ADR-0020); no Node sidecar.
 
 services:
   valkey:
@@ -20,6 +29,21 @@ services:
       - "6379:6379"
     volumes:
       - valkey-data:/data
+    restart: unless-stopped
+
+  wm-host:
+    profiles: [full]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      WM_STORAGE: redis://valkey:6379
+      WM_BOOTSTRAP_TOKEN: ${WM_BOOTSTRAP_TOKEN:?set WM_BOOTSTRAP_TOKEN to e.g. wmt_dev_local}
+      WM_LISTEN_ADDR: 0.0.0.0:8080
+    depends_on:
+      - valkey
     restart: unless-stopped
 
 volumes:
