@@ -77,6 +77,41 @@ run-web-fast:
       SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
       cargo run -p wm-host
 
+# Run the full stack inside Docker — Valkey + wm-host both via
+# `docker compose --profile full`. Uses the same Dockerfile that will
+# build the release image, so this is the "is the prod-shaped build
+# still working" check, not the inner dev loop. For iterating on host
+# code, use `run-web` — cargo's incremental compile is ~5-15s versus
+# the ~30-60s warm Docker rebuild this triggers.
+#
+# After it starts, open http://localhost:8080/__ui/ and log in as
+# `admin` / `devpassword`. Stop with `just stop-web-docker` (keeps
+# Valkey volume) or `just wipe-dev` (wipes it).
+run-web-docker:
+    #!/usr/bin/env bash
+    set -e
+    WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+      WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
+      SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
+      docker compose --profile full up -d --build
+    echo "Waiting for wm-host to respond on http://localhost:8080/__health ..."
+    until curl -fsS http://localhost:8080/__health >/dev/null 2>&1; do
+      sleep 0.5
+    done
+    echo "Ready. Open http://localhost:8080/__ui/ — log in as admin / devpassword."
+    echo "Tail logs:  docker compose logs -f wm-host"
+    echo "Stop:       just stop-web-docker  (or  just wipe-dev  to also wipe Valkey)"
+
+# Stop the full Docker stack started by `run-web-docker`. Keeps the
+# Valkey volume so a subsequent `run-web-docker` reuses existing
+# routes/users/etc.; use `wipe-dev` to also wipe Valkey state.
+#
+# WM_BOOTSTRAP_TOKEN=stop is a stub value to satisfy the compose
+# interpolation check on the wm-host service env block; any non-empty
+# value works for `down` since the container is just being stopped.
+stop-web-docker:
+    WM_BOOTSTRAP_TOKEN=stop docker compose --profile full down
+
 # Pour a handful of groups + routes + traffic into a running
 # `just run-web` (or `run-web-fast`) host so the UI has something
 # to render. Under `run-web`, data persists in Valkey across host
@@ -91,8 +126,13 @@ seed-dev:
 # change makes pre-existing records unreadable, or when you just want
 # a clean slate to re-seed against. Doesn't touch the js-engine
 # builder image used by build.rs.
+#
+# Includes `--profile full` so if `run-web-docker` is running, wm-host
+# comes down with it. WM_BOOTSTRAP_TOKEN=stop is a stub value to
+# satisfy the compose interpolation check; any non-empty value works
+# for `down`.
 wipe-dev:
-    docker compose down -v
+    WM_BOOTSTRAP_TOKEN=stop docker compose --profile full down -v
 
 run-cli *ARGS:
     cargo run -p wm-cli -- {{ARGS}}
