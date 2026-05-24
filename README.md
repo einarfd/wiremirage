@@ -135,30 +135,170 @@ The host exposes two unauthenticated probe endpoints for orchestrators:
 `GET /__health` (liveness, always 200) and `GET /__ready` (readiness;
 checks the configured backends).
 
-Required env vars (no silent fallbacks):
-
-- `WM_STORAGE` — `memory`, `redis://host:port[/db]`, or `rediss://...` for TLS.
-
-On first startup, set `WM_BOOTSTRAP_TOKEN=wmt_...` to provision an admin
-user named `bootstrap` whose API token is the supplied plaintext. The
-variable is idempotent — set it once, rotate later via `/__api/tokens`.
-The host refuses to start if no users exist and no bootstrap token is
-supplied.
-
-Optional:
-
-- `OTEL_EXPORTER_OTLP_ENDPOINT` — URL of an OTLP/gRPC collector. When
-  set, the host exports spans for the request → handler path; when
-  unset, host logging is stderr-only. The standard `OTEL_SERVICE_NAME`
-  and `OTEL_RESOURCE_ATTRIBUTES` env vars are honored. W3C
-  `traceparent` is extracted from incoming requests.
-
 Tier-3 tests require Docker:
 
 ```
 just test-valkey       # Valkey-backed storage suite
 just check-all         # everything (fmt + clippy + test + tier-3)
 ```
+
+## Configuration
+
+All configuration is via environment variables — no config file. The host
+fails fast on missing required values rather than silently falling back, so
+a misconfigured deploy surfaces at startup, not on the first failed request.
+
+Authentication splits into **three independent paths** that can be enabled
+in any combination:
+
+| Path | Used by | Required env vars |
+|---|---|---|
+| **API tokens (bearer)** | `wm` CLI, MCP server, scripts, agents | `WM_BOOTSTRAP_TOKEN` (first start) |
+| **GitHub OAuth** | Browser users | `WM_GITHUB_CLIENT_ID`, `WM_GITHUB_CLIENT_SECRET`, `WM_GITHUB_ALLOW_USERS` and/or `WM_GITHUB_ALLOW_ORGS`, `SESSION_SECRET` |
+| **Local password** | Testing / trusted-network only (ADR-0018) | `WM_LOCAL_AUTH`, `SESSION_SECRET` |
+
+API tokens always work. GitHub OAuth and local password are independent —
+enable either, both, or neither. Mock traffic (everything not under a
+reserved `/__api/`, `/__ui/`, `/__auth/` prefix) is always unauthenticated by
+design — SUTs don't have credentials.
+
+### Storage (required)
+
+- `WM_STORAGE` — one of:
+  - `memory` — in-process, state lost on restart. Fine for `just run-web-fast`
+    and integration tests.
+  - `redis://host:port[/db]` — Valkey / Redis. The recommended deployment shape.
+  - `rediss://host:port[/db]` — same, with TLS.
+
+### Listener (optional)
+
+- `WM_LISTEN_ADDR` — default `127.0.0.1:8080`. The release Docker image overrides
+  this to `0.0.0.0:8080` so the container is reachable when published with
+  `-p 8080:8080`. Production deployments behind a reverse proxy should bind to
+  `127.0.0.1` (combined with `WM_TRUST_FORWARDED_HEADERS=1` — see *Production
+  hardening* below).
+
+### API tokens — bootstrap (required on first start)
+
+`WM_BOOTSTRAP_TOKEN=wmt_<some-secret>` creates an admin user named `bootstrap`
+on the very first host startup, with the supplied plaintext as their API
+token. Subsequent starts with the same env var are idempotent no-ops. The
+host **refuses to start** if no users exist and the variable is unset — this
+prevents a fresh deployment from coming up unreachable.
+
+Generate one with `openssl rand -hex 32` (prefix with `wmt_` if you want to
+match the project's token convention). After first deploy, log in with this
+token via the CLI (`WM_TOKEN=wmt_... wm health`) or the UI's bearer-token
+flow, mint a real operator token (`wm tokens create operator/default`), and
+delete the bootstrap user (`wm users delete bootstrap`) so the literal
+bootstrap token stops being a valid credential.
+
+### Browser login — GitHub OAuth (recommended for production)
+
+Two steps. First, register a GitHub **OAuth App** (the simple flavor —
+not a GitHub App, see below).
+
+> **OAuth App vs GitHub App — pick OAuth App.**  GitHub's developer
+> settings has two different things you can create:
+>
+> - **OAuth Apps** (Settings → Developer settings → **OAuth Apps**) — the
+>   classic "sign in with GitHub" flow. Only three things to configure:
+>   name, homepage URL, callback URL. This is what WireMirage uses.
+> - **GitHub Apps** (Settings → Developer settings → **GitHub Apps**) — a
+>   much richer system designed for apps that act on repos (CI, bots,
+>   integrations). Has Webhooks, Permissions, Event subscriptions, an
+>   installation flow, "Where can this be installed", post-install
+>   callbacks, and so on. **Don't use this** — none of it applies to
+>   "let me read this user's GitHub identity," and the extra surface is
+>   pure overhead.
+>
+> If you're staring at a form that asks about webhooks or permissions,
+> you're on the wrong page — go back one step to the developer-settings
+> landing and pick **OAuth Apps** instead.
+
+Steps:
+
+1. **Settings → Developer settings → OAuth Apps → New OAuth App** (under
+   your personal account at `https://github.com/settings/developers`, or
+   under an org if the WireMirage instance is for a team —
+   `https://github.com/organizations/<org>/settings/applications/new`).
+2. Fill in:
+   - **Application name**: anything you'll recognize (e.g.
+     `wiremirage-staging`). Shown on the GitHub OAuth consent screen.
+   - **Homepage URL**: `https://wm.example.com` — whatever public URL
+     your WireMirage will live at. Shown on the consent screen as a
+     "more info" link.
+   - **Application description** (optional): a sentence visible on the
+     consent screen. Empty is fine.
+   - **Authorization callback URL**: `https://wm.example.com/__auth/callback`
+     — exact match, including the path. The host computes this URL itself
+     from the inbound request's `X-Forwarded-*` headers (Caddy or
+     whichever reverse proxy you run populates them), so it must agree
+     with what GitHub sees. If TLS terminates somewhere other than
+     `https://wm.example.com`, you'll see a `redirect_uri mismatch` error
+     from GitHub; fix the callback or the proxy headers until they
+     agree.
+   - **Enable Device Flow**: leave **unchecked**. Device flow is for
+     headless logins (CLI tools without a browser). WireMirage's login
+     is a browser round-trip; device flow isn't used.
+3. **Generate a client secret** on the app's settings page. Copy both
+   the Client ID (visible immediately) and the secret (shown once —
+   stash it before navigating away).
+
+Then set these env vars on the host:
+
+- `WM_GITHUB_CLIENT_ID` — the OAuth app's Client ID.
+- `WM_GITHUB_CLIENT_SECRET` — the generated secret. Treat as a credential.
+- `WM_GITHUB_ALLOW_USERS` — comma-separated GitHub logins allowed to log in
+  (e.g. `alice,bob`). OR'd with `WM_GITHUB_ALLOW_ORGS`.
+- `WM_GITHUB_ALLOW_ORGS` — comma-separated GitHub org logins; any member of
+  any listed org is allowed in. Requires the `read:org` scope, which the host
+  always requests. Use this for "anyone on the team" semantics.
+- `WM_GITHUB_ADMIN_USERS` — optional subset of allowed users (by GitHub
+  login) promoted to admin on first login. When empty, every GitHub user
+  lands as a non-admin and existing admins can promote via
+  `wm users update <login> --admin`.
+- `SESSION_SECRET` — HMAC key for `wm_session` and `wm_csrf` cookies. At
+  least 32 bytes; `openssl rand -base64 48` works. Rotating invalidates
+  every existing session, so keep it stable unless you mean to log everyone
+  out.
+
+If `WM_GITHUB_CLIENT_ID` is set but `WM_GITHUB_CLIENT_SECRET` is missing (or
+vice versa), the host refuses to start — a half-configured OAuth path is a
+silent footgun otherwise. If neither is set, the GitHub flow simply isn't
+enabled and the login page omits the "Continue with GitHub" button.
+
+Denied logins (allow-list miss) get a clear error after the OAuth round-trip
+rather than landing in an authenticated session — so a leaked Client ID
+doesn't grant access on its own.
+
+### Browser login — local passwords (testing / trusted networks only)
+
+- `WM_LOCAL_AUTH=alice:hunter2:admin,bob:correct-horse-battery-staple` —
+  comma-separated `user:password[:role]` triples; `role` is `admin` or omitted
+  (default user). Passwords are argon2id-hashed at startup; the plaintext
+  is never persisted.
+- `SESSION_SECRET` as above.
+
+This mode exists for testing and trusted-network deployments — passwords in
+env vars aren't OAuth-grade. Don't expose a host with `WM_LOCAL_AUTH` set to
+the public internet without a TLS edge **and** an IP allow-list at the
+reverse proxy.
+
+### Observability (optional)
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — URL of an OTLP/gRPC collector (e.g.
+  `http://localhost:4317`). When unset, the host logs to stderr only; when
+  set, spans are exported in addition. No localhost fallback if the env var
+  is missing — the absence of an endpoint is taken as "don't try."
+- `OTEL_SERVICE_NAME` — default `wm-host`. Override to disambiguate multiple
+  WireMirage instances in the same backend.
+- `OTEL_RESOURCE_ATTRIBUTES` — standard OTel SDK behavior; comma-separated
+  `key=value` pairs (e.g. `deployment.environment=prod,service.version=abc123`).
+
+Inbound W3C `traceparent` is extracted on every request and used as the
+dispatch span's parent so the host's spans chain under whatever upstream
+traced the request.
 
 ## Using the CLI
 
