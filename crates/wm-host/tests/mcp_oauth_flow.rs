@@ -906,3 +906,103 @@ async fn revoke_with_unknown_token_still_returns_200() {
         .expect("revoke");
     assert_eq!(resp.status(), 200);
 }
+
+#[tokio::test]
+async fn authorize_rejects_wrong_resource_with_actionable_error() {
+    // Client misconfigured to point at the host root rather than the
+    // MCP endpoint at /__api/mcp. The fix that made this catchable:
+    // we validate `resource` (RFC 8707) at authorize time, before the
+    // consent dialog, so the user sees a fixable error instead of
+    // going through OAuth and then failing opaquely at the MCP
+    // transport with the resulting token.
+    let h = start().await;
+    let client = no_redirect_client();
+
+    let reg = client
+        .post(url(&h, "/__auth/oauth/register"))
+        .json(&json!({
+            "client_name": "test",
+            "redirect_uris": ["http://127.0.0.1:0/cb"],
+        }))
+        .send()
+        .await
+        .expect("register");
+    let reg_json: Value = reg.json().await.unwrap();
+    let client_id = reg_json["client_id"].as_str().unwrap();
+
+    let (_, challenge) = pkce_pair();
+
+    // resource= names the host root, NOT /__api/mcp.
+    let wrong_resource = format!("http://{}", h.addr);
+    let q = format!(
+        "response_type=code&client_id={}&redirect_uri=http://127.0.0.1:0/cb&code_challenge={}&code_challenge_method=S256&resource={}",
+        urlencode(client_id),
+        urlencode(&challenge),
+        urlencode(&wrong_resource),
+    );
+    let resp = client
+        .get(url(&h, &format!("/__auth/oauth/authorize?{q}")))
+        .send()
+        .await
+        .expect("authorize");
+
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.expect("text");
+    let expected = format!("http://{}/__api/mcp", h.addr);
+    assert!(
+        body.contains(&expected),
+        "error should name the correct MCP endpoint: {body}"
+    );
+    assert!(
+        body.contains(&wrong_resource),
+        "error should echo the wrong resource so the user knows what they sent: {body}"
+    );
+    assert!(
+        body.contains("Reconfigure"),
+        "error should be actionable (tell them to reconfigure): {body}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_accepts_correct_resource() {
+    // resource= exactly matches /__api/mcp → request proceeds (and
+    // returns the usual 303-to-login since this test client has no
+    // session cookie; the point is that the resource check didn't
+    // reject it with 400).
+    let h = start().await;
+    let client = no_redirect_client();
+
+    let reg = client
+        .post(url(&h, "/__auth/oauth/register"))
+        .json(&json!({
+            "client_name": "test",
+            "redirect_uris": ["http://127.0.0.1:0/cb"],
+        }))
+        .send()
+        .await
+        .expect("register");
+    let reg_json: Value = reg.json().await.unwrap();
+    let client_id = reg_json["client_id"].as_str().unwrap();
+
+    let (_, challenge) = pkce_pair();
+    let correct_resource = format!("http://{}/__api/mcp", h.addr);
+    let q = format!(
+        "response_type=code&client_id={}&redirect_uri=http://127.0.0.1:0/cb&code_challenge={}&code_challenge_method=S256&resource={}",
+        urlencode(client_id),
+        urlencode(&challenge),
+        urlencode(&correct_resource),
+    );
+    let resp = client
+        .get(url(&h, &format!("/__auth/oauth/authorize?{q}")))
+        .send()
+        .await
+        .expect("authorize");
+
+    // No session → bounce to login. The point is it's not a 400 from
+    // the resource check.
+    assert_eq!(
+        resp.status(),
+        303,
+        "correct resource should pass validation and reach the session check"
+    );
+}
