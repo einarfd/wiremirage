@@ -60,6 +60,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}
+      WM_MCP_ALLOWED_HOSTS: ${WM_MCP_ALLOWED_HOSTS:-}
     depends_on:
       - valkey
     restart: unless-stopped

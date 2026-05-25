@@ -12,11 +12,13 @@
 //! plus the resolved `AuthContext` into the request extensions where
 //! per-tool handlers can pull them out.
 
+use std::env;
 use std::sync::Arc;
 
 use axum::Router;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
 
 use crate::AppState;
 
@@ -33,15 +35,14 @@ pub use server::WmMcpServer;
 ///
 /// The returned router is intended to be `.merge`d into the host's
 /// main router. Each request is authenticated by the same
-/// `/__api/*` middleware (TODO slice 10 task #69) before reaching the
-/// rmcp tower service.
+/// `/__api/*` middleware before reaching the rmcp tower service.
 pub fn router(state: AppState) -> Router {
     let state = Arc::new(state);
     let factory_state = state.clone();
     let service = StreamableHttpService::new(
         move || Ok(WmMcpServer::new(factory_state.clone())),
         Arc::new(LocalSessionManager::default()),
-        Default::default(),
+        mcp_server_config(),
     );
 
     // Apply our auth layer before rmcp gets the request.
@@ -51,6 +52,41 @@ pub fn router(state: AppState) -> Router {
             state,
             auth::require_bearer,
         ))
+}
+
+/// Build the rmcp transport config, honoring `WM_MCP_ALLOWED_HOSTS`.
+///
+/// rmcp's streamable-HTTP server defaults its `allowed_hosts` to
+/// `["localhost", "127.0.0.1", "::1"]` as DNS-rebinding protection.
+/// Behind a reverse proxy on a real domain (the typical production
+/// shape) the inbound `Host` header is the public hostname (e.g.
+/// `wm.example.com`), which would otherwise be rejected with
+/// `"disallowed Host header (possible DNS rebinding attempt)"` —
+/// before our own auth middleware sees the request, surfacing to the
+/// client as an opaque auth failure.
+///
+/// `WM_MCP_ALLOWED_HOSTS` is a comma-separated list of additional
+/// hostnames (or `host:port` strings) the MCP transport will accept.
+/// The defaults (`localhost`, `127.0.0.1`, `::1`) remain — operators
+/// supply the public hostname on top.
+fn mcp_server_config() -> StreamableHttpServerConfig {
+    let cfg = StreamableHttpServerConfig::default();
+    let Ok(raw) = env::var("WM_MCP_ALLOWED_HOSTS") else {
+        return cfg;
+    };
+    let extras: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if extras.is_empty() {
+        return cfg;
+    }
+    // Start from the defaults so the dev path (localhost / 127.0.0.1)
+    // still works alongside the operator-supplied public hostnames.
+    let mut hosts = cfg.allowed_hosts.clone();
+    hosts.extend(extras);
+    cfg.with_allowed_hosts(hosts)
 }
 
 #[cfg(test)]
