@@ -1,0 +1,454 @@
+//! Capabilities tool — `get_capabilities`. Mirrors the
+//! arkiv pattern of "tool returns docs as markdown" because MCP
+//! `resources` support is uneven across clients (Claude Desktop in
+//! particular). The wiremirage skill ships the same content for
+//! humans / agents with Bash access; this tool exposes it for agents
+//! that only see MCP.
+//!
+//! Topics are split so a curious agent can fetch just the section
+//! that matters for the task at hand instead of always paying for
+//! the full markdown body. The no-arg form returns an overview that
+//! both teaches the basics and enumerates the available topics.
+//!
+//! Content here is deliberately JS-side and concrete — the WIT
+//! contract at `wit/wiremirage.wit` is the canonical spec, but it's
+//! shaped for protocol readers. The agent writing a TS handler
+//! doesn't need to think in WIT kebab-case; they need
+//! `routeStore.incr("count", 1n)` to be in front of them.
+
+use rmcp::ErrorData;
+use rmcp::Json;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::tool;
+use rmcp::tool_router;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::mcp::server::WmMcpServer;
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetCapabilitiesArgs {
+    /// Topic name. Omit to get the overview + list of topics. Known
+    /// topics: `overview`, `request`, `response`, `store`, `log`,
+    /// `clock`, `gotchas`.
+    pub topic: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CapabilitiesResult {
+    /// The topic name that was returned. Echoes the request when
+    /// known, "overview" when the request was empty or unknown.
+    pub topic: String,
+    /// The markdown body for the topic.
+    pub content: String,
+    /// All topic names this tool knows about. Includes the one in
+    /// `topic` field.
+    pub available_topics: Vec<String>,
+}
+
+const TOPICS: &[(&str, &str)] = &[
+    ("overview", OVERVIEW),
+    ("request", REQUEST),
+    ("response", RESPONSE),
+    ("store", STORE),
+    ("log", LOG),
+    ("clock", CLOCK),
+    ("gotchas", GOTCHAS),
+];
+
+#[tool_router(router = capabilities_router, vis = "pub(crate)")]
+impl WmMcpServer {
+    #[tool(
+        name = "get_capabilities",
+        description = "Return markdown documentation for the WireMirage handler API: how to author the `source` field of `create_route`, the request/response shape, the per-route and per-group stores, log, clock primitives, and common gotchas. Call without arguments for an overview + list of available topics; call with `topic` to get a specific section. Call this BEFORE writing your first handler — the rest of the MCP tool descriptions tell you how to manage routes, not what the handler code itself should look like."
+    )]
+    pub async fn get_capabilities(
+        &self,
+        Parameters(args): Parameters<GetCapabilitiesArgs>,
+    ) -> Result<Json<CapabilitiesResult>, ErrorData> {
+        let available: Vec<String> = TOPICS.iter().map(|(k, _)| (*k).to_string()).collect();
+        let key = args.topic.as_deref().unwrap_or("overview").to_lowercase();
+        let (topic, content) = TOPICS
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .unwrap_or_else(|| ("overview".to_string(), OVERVIEW.to_string()));
+        Ok(Json(CapabilitiesResult {
+            topic,
+            content,
+            available_topics: available,
+        }))
+    }
+}
+
+const OVERVIEW: &str = r#"# WireMirage handler API — overview
+
+A WireMirage route's `source` field is a TypeScript or JavaScript module
+that exports a single `handle` function. The host calls `handle` once
+per matched HTTP request, in a fresh wasmtime instance. State that
+should persist between calls goes through the per-route and per-group
+stores.
+
+## Minimal example
+
+```ts
+export function handle(req, routeStore, groupStore) {
+  return {
+    status: 200,
+    headers: [["content-type", "application/json"]],
+    body: new TextEncoder().encode(JSON.stringify({ ok: true })),
+  };
+}
+```
+
+That's a complete handler. Drop it into `create_route`'s `source` field
+with `language: "typescript"` (or `"javascript"`) and it'll serve the
+declared `path` and methods.
+
+## Available topics
+
+Fetch each with `get_capabilities(topic: "<name>")`:
+
+- **`request`** — the request object's fields and types
+- **`response`** — the response shape and reserved headers
+- **`store`** — per-route and per-group state (kv + lists + hashes + sets)
+- **`log`** — emitting log lines that attach to the journal entry
+- **`clock`** — `host.sleep`, wall-time, monotonic time (ADR-0021)
+- **`gotchas`** — bigint quirks, camelCase field names, and other footguns
+
+## Key design points
+
+- **Stores are typed bytes** (`Uint8Array` / `list<u8>`). Encode with
+  `TextEncoder`, decode with `TextDecoder`. JSON is conventional but
+  the runtime is value-agnostic.
+- **Fresh instance per request.** Nothing in JS module-scope survives.
+  Use the stores for any continuity.
+- **`routeStore` is private** to this route. `groupStore` is shared
+  with every other route in the same group. Use the group store for
+  cross-route invariants (rate limits, session-like data).
+- **The body is bytes.** `req.body` is a `Uint8Array`; the response's
+  `body` must also be `Uint8Array`. Use TextEncoder/TextDecoder.
+"#;
+
+const REQUEST: &str = r#"# Request
+
+The first parameter to `handle`. Field names are camelCase (the WIT
+contract is kebab-case but the JS binding camelCases everything).
+
+```ts
+{
+  method: string,          // "GET", "POST", etc. Always uppercase.
+  path: string,            // Full literal path. e.g., "/users/123/posts/456"
+  matchedPattern: string,  // The route pattern that matched. e.g., "/users/{id}/posts/{post-id}"
+  pathParams: [string, string][],  // [["id","123"],["post-id","456"]]
+  query: [string, string][],       // Parsed query parameters. Names lowercased.
+  headers: [string, string][],     // Request headers. Names lowercased. Multi-valued repeat.
+  body: Uint8Array,        // Raw body bytes. May be empty. Capped at 10 MiB.
+}
+```
+
+## Reading the body
+
+```ts
+const bodyText = new TextDecoder().decode(req.body);
+const parsed = JSON.parse(bodyText);  // if you expect JSON
+```
+
+## Reading a header
+
+```ts
+// Headers are tuples, not a map — iterate or filter.
+const ct = req.headers.find(([k]) => k === "content-type")?.[1];
+```
+
+## Reading a path parameter
+
+```ts
+// Route registered with path "/users/{id}/posts/{post-id}"
+const userId = req.pathParams.find(([k]) => k === "id")?.[1];
+const postId = req.pathParams.find(([k]) => k === "post-id")?.[1];
+```
+"#;
+
+const RESPONSE: &str = r#"# Response
+
+The handler returns one object. Same field-name conventions as request.
+
+```ts
+{
+  status: number,           // Any 100–599. Non-standard values allowed.
+  headers: [string, string][],  // See "Reserved headers" below.
+  body: Uint8Array,         // Raw bytes. Empty array for no body.
+}
+```
+
+## Minimal returns
+
+```ts
+// Empty 204
+return { status: 204, headers: [], body: new Uint8Array() };
+
+// JSON 200
+return {
+  status: 200,
+  headers: [["content-type", "application/json"]],
+  body: new TextEncoder().encode(JSON.stringify({ ok: true })),
+};
+
+// Plain text error
+return {
+  status: 503,
+  headers: [["content-type", "text/plain; charset=utf-8"]],
+  body: new TextEncoder().encode("upstream timeout"),
+};
+```
+
+## Reserved headers
+
+A small set of headers the host computes regardless of what you set —
+trying to set them gets a warning logged on the journal entry and your
+value dropped:
+
+- `Content-Length` — always computed from the body bytes.
+- `Transfer-Encoding` — managed by the host.
+- `Connection` — managed by the host.
+- `Date` — auto-set if you didn't provide one.
+
+Everything else passes through verbatim, including malformed values
+and non-standard headers — mocks need to be able to simulate real
+APIs' quirks.
+"#;
+
+const STORE: &str = r#"# Store
+
+Two stores are passed to every handler: `routeStore` (private to this
+route) and `groupStore` (shared with every route in the same group).
+Both expose the same API.
+
+## Basic key-value
+
+```ts
+routeStore.get("key");                    // Uint8Array | null
+routeStore.set("key", new TextEncoder().encode("value"));
+routeStore.delete("key");                 // no-op if absent
+routeStore.listKeys("prefix" /* or null for everything */);  // string[]
+```
+
+## Atomic counter (returns bigint!)
+
+```ts
+// Both args matter: the increment amount is the SECOND.
+// Note `1n` not `1` — the WIT type is s64 → bigint on the JS side.
+const n = routeStore.incr("calls", 1n);
+// n is a bigint. Convert for JSON: Number(n).
+```
+
+## Lists (queues, ordered logs)
+
+```ts
+routeStore.listPush("queue", new TextEncoder().encode("item"));
+routeStore.listPop("queue");              // Uint8Array | null (leftmost)
+routeStore.listRange("queue", 0n, -1n);   // entire list as Uint8Array[]
+routeStore.listLength("queue");           // bigint
+```
+
+## Hashes (record-shaped data)
+
+```ts
+routeStore.hashSet("user:42", "name", new TextEncoder().encode("Alice"));
+routeStore.hashGet("user:42", "name");    // Uint8Array | null
+routeStore.hashDelete("user:42", "name");
+routeStore.hashKeys("user:42");           // string[]
+```
+
+## Sets (unique members)
+
+```ts
+routeStore.setAdd("seen-ips", "10.0.0.1");
+routeStore.setContains("seen-ips", "10.0.0.1");  // boolean
+routeStore.setRemove("seen-ips", "10.0.0.1");
+```
+
+## When to use routeStore vs groupStore
+
+- **`routeStore`** — counters per route, last-seen payload, simulated
+  upstream state for *this specific endpoint*.
+- **`groupStore`** — anything that crosses routes within a logical
+  test scenario: rate-limit windows, session tokens issued by an `auth`
+  route and validated by a `me` route, customer records shared across
+  `charges`/`refunds`/`customers`.
+
+State survives until the group expires (default 24h sliding TTL) or
+you call `wm groups state GROUP --clear` (CLI) / `clear_group_state`
+(MCP).
+"#;
+
+const LOG: &str = r#"# Log
+
+The host imports a logging interface so handlers can attach
+structured lines to the request's journal entry.
+
+```ts
+// `log` is a global the host injects. Levels: debug | info | warn | error.
+log.emit("info", "received request for /v1/charges");
+log.emit("warn", `unexpected field: ${field}`);
+log.emit("error", `panic: ${e.message}`);
+```
+
+Logs attach to the journal record for this request and show up in:
+
+- `wm journal show <group>/<n>` (CLI)
+- the `/__ui/journal/{group}/{n}` page (web UI)
+
+Logs do NOT go to stdout; the wasm sandbox doesn't expose stdio. Use
+this interface for anything you'd otherwise `console.log`.
+"#;
+
+const CLOCK: &str = r#"# Clock — host.sleep, wall-time, monotonic time
+
+A `host` global exposes three time primitives (ADR-0021).
+
+## host.sleep(ms)
+
+Block the handler for `ms` milliseconds before returning. Counts against
+the wasm sandbox's per-request wall-clock budget — ~30s for JS/TS
+handlers (the typical case), ~1s for AOT-compiled wasm components. A
+sleep that exceeds the budget traps the handler.
+
+```ts
+export function handle(req, routeStore, groupStore) {
+  host.sleep(200);   // 200ms before responding
+  return { status: 200, headers: [], body: new Uint8Array() };
+}
+```
+
+## host.wallTimeMs() — wall-clock UTC milliseconds since Unix epoch
+
+```ts
+const now = host.wallTimeMs();   // e.g. 1716800000000
+```
+
+May jump backwards on NTP correction. **Don't use for measuring
+elapsed time** — use `monotonicMs` for that.
+
+## host.monotonicMs() — monotonic counter for measuring durations
+
+Opaque counter anchored at host process start. Only useful as a
+*difference*: store the value, read it again later, subtract.
+
+```ts
+export function handle(req, routeStore, groupStore) {
+  const start = host.monotonicMs();
+  // ... do some work ...
+  const elapsedMs = host.monotonicMs() - start;
+  log.emit("info", `request took ${elapsedMs}ms`);
+  return { status: 200, headers: [], body: new Uint8Array() };
+}
+```
+
+Never decreases, never jumps backward. Survives across requests within
+the same host process so you can compute "how long has this group
+been active" by storing the first-seen value in the store.
+
+## Latency simulation pattern
+
+Combine `monotonicMs` + the route store + `sleep` to make response time
+grow over a test run — useful for reproducing API-gateway
+cascading-failure modes that depend on response time creeping past a
+timeout threshold:
+
+```ts
+export function handle(_req, routeStore, _group) {
+  const now = host.monotonicMs();
+  const startBytes = routeStore.get("first_seen_ms");
+  let start;
+  if (startBytes === null) {
+    start = now;
+    routeStore.set("first_seen_ms", new TextEncoder().encode(String(now)));
+  } else {
+    start = Number(new TextDecoder().decode(startBytes));
+  }
+  const elapsedSec = (now - start) / 1000;
+  // Ramp up: +50ms per second of elapsed test time, capped at 30s.
+  const delay = Math.min(30000, Math.trunc(50 + 50 * elapsedSec));
+  host.sleep(delay);
+  return {
+    status: 200,
+    headers: [["content-type", "application/json"]],
+    body: new TextEncoder().encode(JSON.stringify({ ok: true, delay_ms: delay })),
+  };
+}
+```
+"#;
+
+const GOTCHAS: &str = r#"# Gotchas
+
+Things that surprise people writing their first handler.
+
+## `incr` returns a bigint, not a number
+
+The WIT type is `s64` (signed 64-bit integer), which maps to JS
+`bigint`, not `number`. Two consequences:
+
+```ts
+// Both must use the `n` suffix:
+const n = routeStore.incr("count", 1n);   // n is bigint
+if (n % 3n === 0n) { /* ... */ }
+
+// Convert for JSON:
+JSON.stringify({ count: Number(n) });     // not just `count: n`
+// (JSON.stringify can't serialize bigint directly.)
+```
+
+Same applies to `listLength` — also returns `bigint`. And `listRange`
+takes bigint indices.
+
+## Field names are camelCase, not snake_case
+
+The WIT contract is kebab-case (`path-params`, `matched-pattern`,
+`route-store`). The JS binding produces camelCase (`pathParams`,
+`matchedPattern`). Get this wrong and you get a runtime trap that's
+hard to read.
+
+## The body is Uint8Array on both sides
+
+Request `body` and response `body` are bytes (`Uint8Array` /
+`list<u8>`). The runtime is value-agnostic — JSON is conventional but
+not required. Encode with `TextEncoder` before returning, decode with
+`TextDecoder` when reading.
+
+```ts
+// Reading
+const text = new TextDecoder().decode(req.body);
+// Writing
+body: new TextEncoder().encode(JSON.stringify(data));
+```
+
+## Mock traffic is unauthenticated by design
+
+The `/__api/*`, `/__ui/*`, `/__auth/*` paths require auth. Everything
+else (including your handler's path) is intentionally open — system-
+under-test code typically doesn't carry tokens. Don't put secrets in
+the URL.
+
+## No state reset from inside handlers
+
+A handler can read/write its store but can't bulk-clear it. Use
+`clear_route_state` / `clear_group_state` MCP tools (or `wm groups
+state GROUP --clear` from the CLI) between test phases.
+
+## host.sleep eats into the wasm budget
+
+The 30-second epoch deadline is wall-clock — a `host.sleep(28000)`
+leaves only ~2 seconds for the rest of the handler to run. For
+latency-simulation that wants delays close to the limit, do the sleep
+LAST in the handler so the budget isn't exhausted before you return.
+
+## Fresh instance per request — no JS module-scope persistence
+
+Anything in JS top-level scope (variables declared outside `handle`,
+caches, module-level computations) resets between requests. The fresh
+wasmtime instance per call is by design — it gives clean isolation as
+a property of the architecture. Use `routeStore` / `groupStore` for
+any continuity.
+"#;

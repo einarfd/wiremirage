@@ -137,16 +137,17 @@ pub struct CreateRouteArgs {
     /// Source language: `typescript`, `javascript`, or `wasm`.
     pub language: String,
     /// Handler source as a string. Required when `language` is a
-    /// source language (e.g. `typescript`). The host forwards it to
-    /// the compiler sidecar; surface `compile_failed` with
-    /// diagnostics back to the caller on failure.
+    /// source language (e.g. `typescript`). TypeScript is transpiled
+    /// in-host via swc (no external compiler); the host surfaces
+    /// `compile_failed` with diagnostics back to the caller on
+    /// failure. Call `get_capabilities()` for the handler API spec.
     pub source: Option<String>,
     /// Required when `language: "wasm"`. Pre-compiled component
     /// bytes, base64-encoded. Mutually exclusive with `source`.
     pub compiled_wasm_b64: Option<String>,
     /// Bindings version the upload was built against. Required for
-    /// wasm uploads. For source-language routes the sidecar sets
-    /// this; the field is ignored.
+    /// wasm uploads. For source-language routes the host sets this
+    /// automatically; the field is ignored.
     pub bindings_version: Option<String>,
 }
 
@@ -163,14 +164,16 @@ pub struct UpdateRouteArgs {
     /// `typescript`, `javascript`, or `wasm`. Omit to leave the
     /// artifact unchanged.
     pub language: Option<String>,
-    /// Replace the handler with this source string. Forwarded to the
-    /// compiler sidecar. Mutually exclusive with `compiled_wasm_b64`.
+    /// Replace the handler with this source string. TypeScript is
+    /// transpiled in-host via swc; mutually exclusive with
+    /// `compiled_wasm_b64`. Call `get_capabilities()` for the handler
+    /// API spec.
     pub source: Option<String>,
     /// Replace the compiled wasm. Base64-encoded component bytes.
     /// Mutually exclusive with `source`.
     pub compiled_wasm_b64: Option<String>,
     /// Bindings version of the new wasm. Required for wasm uploads;
-    /// ignored for source-language (the sidecar sets it).
+    /// ignored for source-language (the host sets it automatically).
     pub bindings_version: Option<String>,
 }
 
@@ -335,7 +338,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "create_route",
-        description = "Create a new route. Accepts either a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source`, compiled via the host's sidecar) or a pre-compiled component (`language: \"wasm\"` plus `compiled_wasm_b64`). Returns `compile_failed` with diagnostics if the source doesn't compile."
+        description = "Create a new route. Accepts either a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source` — TypeScript is transpiled to JS in-host via swc, then dispatched through the embedded js-engine.wasm per ADR-0020) or a pre-compiled wasm component (`language: \"wasm\"` plus `compiled_wasm_b64`). Returns `compile_failed` with diagnostics if the source doesn't compile. **Before writing your first handler, call `get_capabilities()` to see the handler signature, request/response shape, store/log/clock API, and gotchas.**"
     )]
     pub async fn create_route(
         &self,
@@ -360,7 +363,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "update_route",
-        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, `source` (with `language`), or `compiled_wasm_b64` (with `language: \"wasm\"`). Source swaps recompile via the sidecar; wasm swaps clear any previously-stored source."
+        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, `source` (with `language`), or `compiled_wasm_b64` (with `language: \"wasm\"`). Source swaps re-transpile in-host via swc (for TypeScript) or store JS verbatim; wasm swaps clear any previously-stored source. Call `get_capabilities()` for the handler API spec."
     )]
     pub async fn update_route(
         &self,

@@ -34,6 +34,7 @@ pub struct WmMcpServer {
 impl WmMcpServer {
     pub fn new(state: Arc<AppState>) -> Self {
         let tool_router = Self::identity_router()
+            + Self::capabilities_router()
             + Self::discovery_router()
             + Self::groups_router()
             + Self::routes_router()
