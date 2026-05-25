@@ -182,16 +182,26 @@ design — SUTs don't have credentials.
 
 `WM_BOOTSTRAP_TOKEN=wmt_<some-secret>` creates an admin user named `bootstrap`
 on the very first host startup, with the supplied plaintext as their API
-token. Subsequent starts with the same env var are idempotent no-ops. The
-host **refuses to start** if no users exist and the variable is unset — this
-prevents a fresh deployment from coming up unreachable.
+token. Subsequent starts with the same env var are no-ops *as long as the
+bootstrap user still exists*. The host **refuses to start** if no users
+exist and the variable is unset — this prevents a fresh deployment from
+coming up unreachable.
 
-Generate one with `openssl rand -hex 32` (prefix with `wmt_` if you want to
-match the project's token convention). After first deploy, log in with this
-token via the CLI (`WM_TOKEN=wmt_... wm health`) or the UI's bearer-token
-flow, mint a real operator token (`wm tokens create operator/default`), and
-delete the bootstrap user (`wm users delete bootstrap`) so the literal
-bootstrap token stops being a valid credential.
+Generate one with `openssl rand -hex 32` (prefix with `wmt_` to match the
+project's token convention). After first deploy, log in with this token
+via the CLI (`WM_TOKEN=wmt_... wm health`) or the UI's bearer-token flow,
+mint a real operator token (`wm tokens create operator/default`), then
+delete the bootstrap user. Note that an admin can't self-delete (built-in
+guard), so the deletion happens from a *different* admin's session — either
+a second user you created, or your OAuth-provisioned user once GitHub
+login has succeeded once.
+
+**Important — drop `WM_BOOTSTRAP_TOKEN` after retirement.** The host's
+bootstrap check only verifies "does a user named `bootstrap` exist?" — if
+the env var stays set after you delete the bootstrap user, the *next*
+host restart silently re-creates it with the same token. Always unset the
+env var when retiring the bootstrap user; treat the two as a paired
+operation.
 
 ### Browser login — GitHub OAuth (recommended for production)
 
