@@ -42,12 +42,24 @@ services:
       WM_STORAGE: redis://valkey:6379
       WM_BOOTSTRAP_TOKEN: ${WM_BOOTSTRAP_TOKEN:?set WM_BOOTSTRAP_TOKEN to e.g. wmt_dev_local}
       WM_LISTEN_ADDR: 0.0.0.0:8080
-      # Optional — empty defaults mean "not configured", matching how the
-      # host treats unset env vars. `just run-web-docker` sets these so
-      # the browser login flow is usable; production deployments override
-      # via per-deployment compose files (e.g. hetzner's override).
+      # Every WireMirage env var the host recognises has to be listed
+      # here for it to reach the container — compose's `${VAR}`
+      # interpolation reads from shell env (dev) and `.env` (prod), but
+      # the container only sees what `environment:` enumerates. Empty
+      # defaults mean "not configured" and match how the host treats
+      # unset env vars (see README → Configuration).
       WM_LOCAL_AUTH: ${WM_LOCAL_AUTH:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
+      WM_GITHUB_CLIENT_ID: ${WM_GITHUB_CLIENT_ID:-}
+      WM_GITHUB_CLIENT_SECRET: ${WM_GITHUB_CLIENT_SECRET:-}
+      WM_GITHUB_ALLOW_USERS: ${WM_GITHUB_ALLOW_USERS:-}
+      WM_GITHUB_ALLOW_ORGS: ${WM_GITHUB_ALLOW_ORGS:-}
+      WM_GITHUB_ADMIN_USERS: ${WM_GITHUB_ADMIN_USERS:-}
+      WM_SECURE_COOKIES: ${WM_SECURE_COOKIES:-}
+      WM_TRUST_FORWARDED_HEADERS: ${WM_TRUST_FORWARDED_HEADERS:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}
     depends_on:
       - valkey
     restart: unless-stopped
