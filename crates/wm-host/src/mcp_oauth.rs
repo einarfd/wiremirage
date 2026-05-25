@@ -434,6 +434,15 @@ fn derive_public_base(headers: &HeaderMap, trust_forwarded: bool) -> String {
     format!("{scheme}://{host}")
 }
 
+/// Compare an RFC 8707 `resource` query value to the URL of this
+/// host's MCP endpoint. Trailing slashes are normalised so
+/// `…/__api/mcp` and `…/__api/mcp/` are treated as equivalent; everything
+/// else (scheme, host, path) is compared byte-for-byte because URLs
+/// otherwise have meaningful case in path / query.
+fn resource_matches_mcp(requested: &str, expected: &str) -> bool {
+    requested.trim_end_matches('/') == expected.trim_end_matches('/')
+}
+
 // -- Access token CRUD --------------------------------------------------------
 
 pub fn save_access_token(bucket: &mut Bucket, token: &AccessToken) -> Result<(), OAuthStoreError> {
@@ -853,6 +862,13 @@ struct AuthorizeQuery {
     scope: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
+    /// RFC 8707 Resource Indicators. Optional — when present, the
+    /// client is naming the protected resource the token is being
+    /// minted for. We use this to catch misconfigured clients
+    /// pointed at the wrong URL on this host *before* the consent
+    /// dialog (see `resource_matches_mcp` and the validation block
+    /// in [`authorize`]).
+    resource: Option<String>,
 }
 
 async fn authorize(
@@ -895,6 +911,30 @@ async fn authorize(
             "code_challenge_method must be S256",
         )
             .into_response();
+    }
+
+    // RFC 8707 Resource Indicators. If the client supplied `resource`,
+    // validate it names *our* MCP endpoint. A wrong URL here (e.g. a
+    // client configured against the bare host root) would otherwise
+    // complete OAuth successfully and only fail at the actual MCP
+    // transport later — opaque to the user. Catching it here surfaces
+    // the real problem before the consent dialog.
+    if let Some(requested) = q.resource.as_deref().filter(|s| !s.is_empty()) {
+        let expected = format!(
+            "{base}/__api/mcp",
+            base = derive_public_base(&headers, state.trust_forwarded_headers())
+        );
+        if !resource_matches_mcp(requested, &expected) {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "This server's MCP endpoint is {expected}. Your client requested a \
+                     token for {requested}, which is not a valid MCP endpoint here. \
+                     Reconfigure the client with {expected} and try again."
+                ),
+            )
+                .into_response();
+        }
     }
 
     let mut bucket = match state.auth().storage().admin_bucket() {
@@ -1782,5 +1822,61 @@ mod tests {
         // The record stays around so diagnostic queries still see it.
         let still_there = load_refresh_token(&mut b, "hash2").unwrap().unwrap();
         assert!(still_there.revoked_at.is_some());
+    }
+
+    // -- resource_matches_mcp -----------------------------------------
+
+    #[test]
+    fn resource_matches_exact() {
+        assert!(resource_matches_mcp(
+            "https://wm.example.com/__api/mcp",
+            "https://wm.example.com/__api/mcp"
+        ));
+    }
+
+    #[test]
+    fn resource_matches_with_trailing_slash() {
+        // RFC 8707 doesn't require normalisation, but clients can
+        // legitimately disagree on the trailing slash. Treat them
+        // as equivalent so we don't reject a request the user can't
+        // easily fix on their end.
+        assert!(resource_matches_mcp(
+            "https://wm.example.com/__api/mcp/",
+            "https://wm.example.com/__api/mcp"
+        ));
+        assert!(resource_matches_mcp(
+            "https://wm.example.com/__api/mcp",
+            "https://wm.example.com/__api/mcp/"
+        ));
+    }
+
+    #[test]
+    fn resource_mismatch_on_root() {
+        // The classic "client pointed at host root instead of
+        // /__api/mcp" case.
+        assert!(!resource_matches_mcp(
+            "https://wm.example.com/",
+            "https://wm.example.com/__api/mcp"
+        ));
+        assert!(!resource_matches_mcp(
+            "https://wm.example.com",
+            "https://wm.example.com/__api/mcp"
+        ));
+    }
+
+    #[test]
+    fn resource_mismatch_on_wrong_path() {
+        assert!(!resource_matches_mcp(
+            "https://wm.example.com/__api/other",
+            "https://wm.example.com/__api/mcp"
+        ));
+    }
+
+    #[test]
+    fn resource_mismatch_on_different_host() {
+        assert!(!resource_matches_mcp(
+            "https://imposter.example.com/__api/mcp",
+            "https://wm.example.com/__api/mcp"
+        ));
     }
 }
