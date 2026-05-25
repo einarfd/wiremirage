@@ -1,11 +1,31 @@
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use wasmtime::Result;
 use wasmtime::component::{Resource, ResourceTable};
 
+use crate::bindings::wiremirage::handler::clock::Host as ClockHost;
 use crate::bindings::wiremirage::handler::http::Host as HttpHost;
 use crate::bindings::wiremirage::handler::log::{Host as LogHost, Level};
 use crate::bindings::wiremirage::handler::store::{Host as StoreHost, HostBucket};
 use crate::log::{LogCapture, LogLevel, LogRecord};
 use crate::store::Bucket;
+
+/// Anchor for the `clock.monotonic-ms` host import (ADR-0021).
+/// Initialised lazily on first use and never reset, so the value the
+/// host returns is "milliseconds since this wm-host process first
+/// looked at the clock" — opaque, monotonically non-decreasing, only
+/// meaningful as a difference.
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+/// Upper bound on a single `clock.sleep` call. The wasm epoch
+/// deadline (slice 46: 1 s for AOT handlers, 30 s for the shared
+/// engine — ADR-0020) is what would otherwise stop a runaway sleep,
+/// but epoch interruption only fires when wasm bytecode runs; inside
+/// the host import the wasm is paused and can't be trapped. The
+/// clamp keeps a single tokio worker from being blocked longer than
+/// the engine's outer deadline would ever allow.
+const MAX_SLEEP_MS: u64 = 30_000;
 
 /// Wasmtime `ResourceLimiter` impl that caps linear-memory growth and
 /// records the peak byte count for the journal entry. Lives inside
@@ -273,6 +293,77 @@ impl LogHost for HostState {
     }
 }
 
+// -- clock impl (ADR-0021) ----------------------------------------------------
+//
+// Three host imports give handlers latency simulation (`sleep`) and the
+// usual wall-vs-monotonic time split. Sleep semantics worth knowing:
+//
+// 1. The host blocks the calling thread for the requested duration.
+//    On the multi-thread tokio runtime that production uses, we wrap
+//    with `block_in_place` so the worker is freed for other tasks
+//    while this one parks. On the current-thread runtime (tests),
+//    `block_in_place` would panic, so we fall back to plain
+//    `thread::sleep` — which blocks the test's single worker but
+//    that's fine since tests don't run concurrent requests.
+//
+// 2. The sleep duration counts against the wasm epoch deadline.
+//    Inside the host import the wasm is paused and the epoch
+//    interrupter can't trap it, so a clamp (`MAX_SLEEP_MS`) is what
+//    actually bounds the per-call sleep. After sleep returns, the
+//    next wasm instruction will hit the epoch check; a handler that
+//    sleeps close to the deadline has little room left for its own
+//    code. JS/TS handlers (shared-engine path) get the 30 s outer
+//    deadline; AOT components get 1 s. Document this in the handler
+//    docs so operators know the budget they're working against.
+
+fn do_sleep(ms: u64) {
+    let dur = Duration::from_millis(ms.min(MAX_SLEEP_MS));
+    if dur.is_zero() {
+        return;
+    }
+    if let Ok(handle) = tokio::runtime::Handle::try_current()
+        && matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        )
+    {
+        // Cooperate with the multi-thread runtime: hand the worker
+        // back so it can serve other tasks while this one parks.
+        tokio::task::block_in_place(|| std::thread::sleep(dur));
+    } else {
+        // Current-thread runtime (tests) — block_in_place would
+        // panic, so just sleep on the current OS thread.
+        std::thread::sleep(dur);
+    }
+}
+
+fn monotonic_now_ms() -> u64 {
+    let start = PROCESS_START.get_or_init(Instant::now);
+    start.elapsed().as_millis() as u64
+}
+
+fn wall_now_ms() -> u64 {
+    // `chrono::Utc::now().timestamp_millis()` is signed; in practice
+    // it's far from 0 or i64::MAX, but the cast handles the edge by
+    // clamping pre-1970 values to 0.
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+impl ClockHost for HostState {
+    fn sleep(&mut self, ms: u64) -> Result<()> {
+        do_sleep(ms);
+        Ok(())
+    }
+
+    fn wall_time_ms(&mut self) -> Result<u64> {
+        Ok(wall_now_ms())
+    }
+
+    fn monotonic_ms(&mut self) -> Result<u64> {
+        Ok(monotonic_now_ms())
+    }
+}
+
 // -- engine-world bindings (ADR-0020) -----------------------------------------
 //
 // `wasmtime::component::bindgen!` generates one set of Host traits
@@ -283,6 +374,7 @@ impl LogHost for HostState {
 // above; bucket + log methods delegate to the same fields. The
 // engine-world adds `engine-host.get-source` on top.
 
+use crate::bindings::engine_bindings::wiremirage::handler::clock::Host as EngineClockHost;
 use crate::bindings::engine_bindings::wiremirage::handler::engine_host::Host as EngineHostHost;
 use crate::bindings::engine_bindings::wiremirage::handler::http::Host as EngineHttpHost;
 use crate::bindings::engine_bindings::wiremirage::handler::log::{
@@ -294,6 +386,19 @@ use crate::bindings::engine_bindings::wiremirage::handler::store::{
 
 impl EngineHttpHost for HostState {}
 impl EngineStoreHost for HostState {}
+
+impl EngineClockHost for HostState {
+    fn sleep(&mut self, ms: u64) -> Result<()> {
+        do_sleep(ms);
+        Ok(())
+    }
+    fn wall_time_ms(&mut self) -> Result<u64> {
+        Ok(wall_now_ms())
+    }
+    fn monotonic_ms(&mut self) -> Result<u64> {
+        Ok(monotonic_now_ms())
+    }
+}
 
 impl EngineLogHost for HostState {
     fn emit(&mut self, level: EngineLogLevel, message: String) -> Result<()> {

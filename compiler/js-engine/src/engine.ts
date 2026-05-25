@@ -19,15 +19,43 @@
 //   `function handle(...)` (script style) at the source surface.
 
 // componentize-js generates JS-side bindings for the world's host
-// imports under the `wiremirage:engine/engine-host` specifier. The
-// type-only `declare module` block below makes TypeScript happy
-// during the build; at runtime the binding is provided by the host.
+// imports under the `wiremirage:engine/<interface>` specifier. The
+// type-only `declare module` blocks below make TypeScript happy
+// during the build; at runtime the bindings are provided by the host.
 declare module "wiremirage:handler/engine-host@0.1.0" {
   /** Return the JS source for the route this request matched. */
   export function getSource(): string;
 }
 
+declare module "wiremirage:handler/clock@0.1.0" {
+  /** Block the calling handler for `ms` milliseconds (ADR-0021). */
+  export function sleep(ms: bigint): void;
+  /** Wall-clock milliseconds since the Unix epoch (UTC). */
+  export function wallTimeMs(): bigint;
+  /** Monotonic milliseconds since host process start; only useful as a difference. */
+  export function monotonicMs(): bigint;
+}
+
 import { getSource } from "wiremirage:handler/engine-host@0.1.0";
+import {
+  sleep as clockSleep,
+  wallTimeMs as clockWallTimeMs,
+  monotonicMs as clockMonotonicMs,
+} from "wiremirage:handler/clock@0.1.0";
+
+// Expose the clock primitives to user code as a `host` global. The
+// WIT signatures use `u64`, which componentize-js maps to `bigint` on
+// the JS side. We wrap with Number coercion so user code can write
+// `host.sleep(100)` rather than `host.sleep(100n)` — the same shape
+// most operators will reach for. Values beyond 2^53 truncate, which
+// for ms-units is 285k years and not a real concern.
+(globalThis as Record<string, unknown>).host = {
+  sleep: (ms: number | bigint): void => {
+    clockSleep(typeof ms === "bigint" ? ms : BigInt(Math.max(0, Math.trunc(ms))));
+  },
+  wallTimeMs: (): number => Number(clockWallTimeMs()),
+  monotonicMs: (): number => Number(clockMonotonicMs()),
+};
 
 // Each call to `handle` is a fresh wasmtime instance, so caching the
 // compiled user-handle function across requests doesn't pay rent.

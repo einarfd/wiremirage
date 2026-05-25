@@ -138,6 +138,32 @@ interface log {
 }
 
 // -----------------------------------------------------------------------------
+// Clock
+//
+// Host-provided time primitives (ADR-0021). `sleep` lets handlers
+// simulate latency; the two read functions cover "what time is it" vs
+// "how much time has passed".
+
+interface clock {
+  // Block the handler for `ms` milliseconds. Bounded by the wasm
+  // sandbox's epoch deadline (ADR-0002 / slice 46, ~30s wall clock);
+  // a sleep that exceeds the deadline traps the handler. Yields the
+  // host's tokio worker rather than blocking a thread.
+  sleep: func(ms: u64);
+
+  // Current wall-clock time, milliseconds since the Unix epoch (UTC).
+  // May jump backwards on NTP correction; use `monotonic-ms` for
+  // measuring durations.
+  wall-time-ms: func() -> u64;
+
+  // Monotonically non-decreasing counter in milliseconds. Anchored at
+  // host process start (the absolute value is opaque — only differences
+  // are meaningful). Use to compute durations that have to remain
+  // correct across clock adjustments.
+  monotonic-ms: func() -> u64;
+}
+
+// -----------------------------------------------------------------------------
 // The handler world
 //
 // A handler is a Wasm component that imports the host interfaces above and
@@ -156,6 +182,7 @@ interface log {
 world handler {
   import store;
   import log;
+  import clock;
 
   use store.{bucket};
   use http.{request, response};
