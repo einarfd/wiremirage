@@ -310,6 +310,23 @@ Inbound W3C `traceparent` is extracted on every request and used as the
 dispatch span's parent so the host's spans chain under whatever upstream
 traced the request.
 
+### MCP transport (optional, required for production)
+
+- `WM_MCP_ALLOWED_HOSTS` — comma-separated hostnames (or `host:port`)
+  that the streamable-HTTP MCP transport will accept in the `Host`
+  header. **Required for any non-localhost deployment.** rmcp defaults
+  to `localhost`, `127.0.0.1`, `::1` only as DNS-rebinding protection;
+  a request reaching the host with `Host: wm.example.com` is otherwise
+  rejected before the auth middleware runs, and a native MCP client
+  reports it as an opaque "authorization failed" error. The defaults
+  stay enabled — set this to the public hostname(s), not as a
+  replacement.
+
+  Example for a deployment at `wm.example.com`:
+  ```
+  WM_MCP_ALLOWED_HOSTS=wm.example.com
+  ```
+
 ## Using the CLI
 
 ### Installing
