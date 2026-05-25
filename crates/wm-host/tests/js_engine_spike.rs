@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wm_host::bindings::engine_bindings::Engine as EngineWorld;
+use wm_host::bindings::engine_bindings::wiremirage::handler::clock::Host as ClockHost;
 use wm_host::bindings::engine_bindings::wiremirage::handler::engine_host::Host as EngineHostTrait;
 use wm_host::bindings::engine_bindings::wiremirage::handler::http::{
     Host as HttpHost, Request as WitRequest,
@@ -33,7 +34,9 @@ use wm_host::bindings::engine_bindings::wiremirage::handler::store::{
 };
 use wm_host::store::{Bucket, Storage};
 
-const VENDORED_ENGINE: &str = "vendored/js-engine.wasm";
+// Pre-slice-59 this pointed at `crates/wm-host/vendored/js-engine.wasm`.
+// The engine is now built at cargo build time (ADR-0020 slice C); build.rs
+// stamps the OUT_DIR path into WM_JS_ENGINE_WASM.
 
 /// Minimal host state for the engine. Owns the resource table for
 /// `store.bucket`, captures any logs the engine emits (it shouldn't,
@@ -77,6 +80,21 @@ impl LogHost for EngineState {
             .unwrap()
             .push(format!("{level:?}: {message}"));
         Ok(())
+    }
+}
+
+// Minimal clock stub — the spike test doesn't exercise clock semantics
+// (those have dedicated tests against the real host impl), it just
+// needs the trait to be satisfied so the engine world can link.
+impl ClockHost for EngineState {
+    fn sleep(&mut self, _ms: u64) -> wasmtime::Result<()> {
+        Ok(())
+    }
+    fn wall_time_ms(&mut self) -> wasmtime::Result<u64> {
+        Ok(0)
+    }
+    fn monotonic_ms(&mut self) -> wasmtime::Result<u64> {
+        Ok(0)
     }
 }
 
@@ -212,7 +230,7 @@ impl HostBucket for EngineState {
 }
 
 fn vendored_engine_path() -> Option<std::path::PathBuf> {
-    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(VENDORED_ENGINE);
+    let p = std::path::PathBuf::from(env!("WM_JS_ENGINE_WASM"));
     if p.exists() { Some(p) } else { None }
 }
 
@@ -222,7 +240,10 @@ fn js_engine_runs_user_handler_via_get_source_host_import() {
         // Vendored binary not present on this checkout. The build
         // script under compiler/js-engine/ writes it; the spike test
         // is no-op until it's been run at least once.
-        eprintln!("skipping: {VENDORED_ENGINE} not vendored — run compiler/js-engine/build.mjs");
+        eprintln!(
+            "skipping: js-engine.wasm not present at {} — build.rs should have produced it",
+            env!("WM_JS_ENGINE_WASM")
+        );
         return;
     };
 

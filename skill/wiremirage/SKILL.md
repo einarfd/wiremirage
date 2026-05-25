@@ -96,6 +96,7 @@ The `scripts/` directory next to this `SKILL.md` ships ready-to-run examples you
 - **`scripts/setup-stripe-mock.sh`** — creates a multi-route Stripe mock (charges, refunds, customers). The shape demonstrates a typical "set up before tests, tear down after" flow.
 - **`scripts/reset-state.sh GROUP`** — clears all per-route and per-group state for the named group. Use between test phases when you need a clean slate without recreating routes.
 - **`scripts/flaky-mock.sh PATH [EVERY_N]`** — creates a single route that returns 503 on every Nth call. Demonstrates stateful behavior (`ctx.store.incr`) and is the canonical pattern for testing retry logic.
+- **`scripts/latency-mock.sh PATH`** — creates a single route whose response latency *grows* with elapsed time since first call (default: +50ms per second, capped at 30s). Demonstrates `host.sleep` and `host.monotonicMs` from ADR-0021. Canonical pattern for reproducing API-gateway cascading-failure modes that depend on response time creeping up toward a timeout threshold.
 
 Read the scripts before running — they're written to be readable as documentation. The handlers are intentionally small; copy and adapt for your own routes.
 
@@ -125,6 +126,12 @@ Two binding quirks worth knowing up front, both inherited from the WIT-to-JS con
 Persistent state survives between requests until the group expires or you call `wm groups state GROUP --clear`. Use it for counters, last-seen-payload assertions, multi-step flows ("third call returns 503"), or anything else that needs to remember.
 
 The handler also imports a `log` interface (see `wit/wiremirage.wit`) — log lines emitted from a handler attach to the corresponding journal entry and show up in `wm journal show`.
+
+A `host` global exposes three time primitives (ADR-0021):
+
+- **`host.sleep(ms)`** — block the handler for `ms` milliseconds. Counts against the sandbox's per-request wall-clock budget (~30s for JS/TS handlers, ~1s for AOT components); a sleep that exceeds it traps the handler. Use to simulate slow upstream APIs; pair with state to make the delay grow over time (see `scripts/latency-mock.sh`).
+- **`host.wallTimeMs()`** — current wall-clock time in milliseconds since the Unix epoch. May jump backwards on NTP correction; use `monotonicMs` for measuring elapsed time.
+- **`host.monotonicMs()`** — opaque monotonically non-decreasing counter, milliseconds. Useful only as a *difference* — store the value at T₁, read it again at T₂, subtract. Doesn't reset across requests within the same host process.
 
 ## Inspecting what happened
 

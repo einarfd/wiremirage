@@ -24,6 +24,7 @@ interface engine-host {
 world engine {
   import store;
   import log;
+  import clock;
   import engine-host;
 
   use store.{bucket};

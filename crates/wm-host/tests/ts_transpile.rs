@@ -12,7 +12,7 @@ use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage};
 
 fn vendored_engine_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendored/js-engine.wasm");
+    let p = PathBuf::from(env!("WM_JS_ENGINE_WASM"));
     if p.exists() { Some(p) } else { None }
 }
 

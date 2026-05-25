@@ -63,9 +63,19 @@ interface log {
   emit: func(level: level, message: string);
 }
 
+interface clock {
+  // ADR-0021. Sleep is bounded by the wasm epoch deadline; wall-time may
+  // jump backwards; monotonic-ms is process-start-anchored and only
+  // meaningful as a difference.
+  sleep: func(ms: u64);
+  wall-time-ms: func() -> u64;
+  monotonic-ms: func() -> u64;
+}
+
 world handler {
   import store;
   import log;
+  import clock;
 
   use store.{bucket};
   use http.{request, response};
