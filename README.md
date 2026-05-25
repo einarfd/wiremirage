@@ -302,6 +302,37 @@ traced the request.
 
 ## Using the CLI
 
+### Installing
+
+No pre-built binaries today — `cargo install` from source is the install
+path. The CLI is a thin Rust binary with no native dependencies (it
+shells out to the host's REST API), so it's quick to compile compared
+to the host itself.
+
+From a local clone:
+
+```
+cargo install --path crates/wm-cli
+```
+
+Without a clone, directly from the repo (needs git access since the
+repo is currently private):
+
+```
+cargo install --git https://github.com/einarfd/wiremirage.git --branch main wm-cli
+```
+
+That puts `wm` in `~/.cargo/bin/` — make sure that's on your PATH.
+`wm --version` confirms.
+
+Shell completions: `wm completion bash|zsh|fish|powershell` emits a
+completion script — pipe it into the right place for your shell
+(e.g. `/etc/bash_completion.d/wm`, `${fpath[1]}/_wm`).
+
+Pre-built binaries via GitHub releases land when v0.1.0 ships.
+
+### Using
+
 The `wm` binary wraps the REST API. Auth and host URL come from the
 environment by default:
 
@@ -332,10 +363,6 @@ Pass `--json` on any command for machine-parseable output (the contract
 for scripts and agents); the default human format is column-aligned text.
 Exit codes: `0` ok, `1` generic error, `2` clap usage error, `4` auth, `5`
 not-found, `6` conflict.
-
-`wm completion bash|zsh|fish|powershell` emits a completion script for
-your shell — pipe it into the appropriate location (e.g.
-`/etc/bash_completion.d/wm`, `${fpath[1]}/_wm`).
 
 Admins manage users via `wm users list/show/me/create/update/delete`.
 By design user management is CLI-only; the MCP server does not expose
