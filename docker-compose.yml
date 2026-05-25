@@ -38,29 +38,34 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+    # List-form environment so optional vars are passed through only
+    # when set in the host env (`.env` file or shell). With map-form
+    # `${VAR:-}`, missing vars get set to empty strings in the container,
+    # which the host then has to special-case (and using `:?` for the
+    # bootstrap token broke prod after we dropped it from `.env.tmpl`
+    # post-retirement). The list-form `- KEY` syntax passes KEY through
+    # iff it's set; otherwise it's not present in the container env
+    # at all, which is what the host actually expects for "unset."
     environment:
-      WM_STORAGE: redis://valkey:6379
-      WM_BOOTSTRAP_TOKEN: ${WM_BOOTSTRAP_TOKEN:?set WM_BOOTSTRAP_TOKEN to e.g. wmt_dev_local}
-      WM_LISTEN_ADDR: 0.0.0.0:8080
-      # Every WireMirage env var the host recognises has to be listed
-      # here for it to reach the container — compose's `${VAR}`
-      # interpolation reads from shell env (dev) and `.env` (prod), but
-      # the container only sees what `environment:` enumerates. Empty
-      # defaults mean "not configured" and match how the host treats
-      # unset env vars (see README → Configuration).
-      WM_LOCAL_AUTH: ${WM_LOCAL_AUTH:-}
-      SESSION_SECRET: ${SESSION_SECRET:-}
-      WM_GITHUB_CLIENT_ID: ${WM_GITHUB_CLIENT_ID:-}
-      WM_GITHUB_CLIENT_SECRET: ${WM_GITHUB_CLIENT_SECRET:-}
-      WM_GITHUB_ALLOW_USERS: ${WM_GITHUB_ALLOW_USERS:-}
-      WM_GITHUB_ALLOW_ORGS: ${WM_GITHUB_ALLOW_ORGS:-}
-      WM_GITHUB_ADMIN_USERS: ${WM_GITHUB_ADMIN_USERS:-}
-      WM_SECURE_COOKIES: ${WM_SECURE_COOKIES:-}
-      WM_TRUST_FORWARDED_HEADERS: ${WM_TRUST_FORWARDED_HEADERS:-}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-}
-      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-}
-      WM_MCP_ALLOWED_HOSTS: ${WM_MCP_ALLOWED_HOSTS:-}
+      # Literals — set unconditionally regardless of host env.
+      - WM_STORAGE=redis://valkey:6379
+      - WM_LISTEN_ADDR=0.0.0.0:8080
+      # Passthroughs — present in the container only if the host env
+      # supplies them. See README → Configuration for what each does.
+      - WM_BOOTSTRAP_TOKEN
+      - WM_LOCAL_AUTH
+      - SESSION_SECRET
+      - WM_GITHUB_CLIENT_ID
+      - WM_GITHUB_CLIENT_SECRET
+      - WM_GITHUB_ALLOW_USERS
+      - WM_GITHUB_ALLOW_ORGS
+      - WM_GITHUB_ADMIN_USERS
+      - WM_SECURE_COOKIES
+      - WM_TRUST_FORWARDED_HEADERS
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - OTEL_SERVICE_NAME
+      - OTEL_RESOURCE_ATTRIBUTES
+      - WM_MCP_ALLOWED_HOSTS
     depends_on:
       - valkey
     restart: unless-stopped

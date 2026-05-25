@@ -105,12 +105,8 @@ run-web-docker:
 # Stop the full Docker stack started by `run-web-docker`. Keeps the
 # Valkey volume so a subsequent `run-web-docker` reuses existing
 # routes/users/etc.; use `wipe-dev` to also wipe Valkey state.
-#
-# WM_BOOTSTRAP_TOKEN=stop is a stub value to satisfy the compose
-# interpolation check on the wm-host service env block; any non-empty
-# value works for `down` since the container is just being stopped.
 stop-web-docker:
-    WM_BOOTSTRAP_TOKEN=stop docker compose --profile full down
+    docker compose --profile full down
 
 # Pour a handful of groups + routes + traffic into a running
 # `just run-web` (or `run-web-fast`) host so the UI has something
@@ -125,14 +121,10 @@ seed-dev:
 # `just run-web` starts from an empty store. Useful when a data-shape
 # change makes pre-existing records unreadable, or when you just want
 # a clean slate to re-seed against. Doesn't touch the js-engine
-# builder image used by build.rs.
-#
-# Includes `--profile full` so if `run-web-docker` is running, wm-host
-# comes down with it. WM_BOOTSTRAP_TOKEN=stop is a stub value to
-# satisfy the compose interpolation check; any non-empty value works
-# for `down`.
+# builder image used by build.rs. Includes `--profile full` so if
+# `run-web-docker` is running, wm-host comes down with it.
 wipe-dev:
-    WM_BOOTSTRAP_TOKEN=stop docker compose --profile full down -v
+    docker compose --profile full down -v
 
 run-cli *ARGS:
     cargo run -p wm-cli -- {{ARGS}}
