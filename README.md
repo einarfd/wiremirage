@@ -178,14 +178,20 @@ design — SUTs don't have credentials.
   `127.0.0.1` (combined with `WM_TRUST_FORWARDED_HEADERS=1` — see *Production
   hardening* below).
 
-### API tokens — bootstrap (required on first start)
+### API tokens — bootstrap (optional when a browser-login path is configured)
 
 `WM_BOOTSTRAP_TOKEN=wmt_<some-secret>` creates an admin user named `bootstrap`
 on the very first host startup, with the supplied plaintext as their API
 token. Subsequent starts with the same env var are no-ops *as long as the
-bootstrap user still exists*. The host **refuses to start** if no users
-exist and the variable is unset — this prevents a fresh deployment from
-coming up unreachable.
+bootstrap user still exists*.
+
+The host **refuses to start** when no users exist AND no login method is
+configured at all — that prevents a fresh deployment from coming up
+unreachable. "Login method configured" means *any* of: `WM_BOOTSTRAP_TOKEN`
+is set, `WM_LOCAL_AUTH` is non-empty, or GitHub OAuth is configured. So a
+deployment that wires up GitHub OAuth from day one (allow-list and admin
+list both populated) doesn't need a bootstrap token — the first GitHub
+login provisions the first user.
 
 Generate one with `openssl rand -hex 32` (prefix with `wmt_` to match the
 project's token convention). After first deploy, log in with this token
