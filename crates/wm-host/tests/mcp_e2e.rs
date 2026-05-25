@@ -169,9 +169,100 @@ async fn list_tools_returns_all_expected_tools() {
         "show_route_state",
         // Slice 43
         "update_group",
+        // Capabilities (post-ADR-0021 follow-up)
+        "get_capabilities",
     ];
     expected.sort();
     assert_eq!(names, expected);
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn get_capabilities_returns_overview_and_clock_topic() {
+    // Verifies the MCP-only path for handler-API discovery works
+    // end-to-end: an agent that only sees MCP can fetch the
+    // overview and a specific topic, and the clock primitives
+    // (ADR-0021) appear in the clock section.
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // No-arg call → overview.
+    let result = client
+        .call_tool(CallToolRequestParams::new("get_capabilities"))
+        .await
+        .expect("get_capabilities overview");
+    let structured = result
+        .structured_content
+        .expect("overview structured content");
+    assert_eq!(
+        structured.get("topic").and_then(|v| v.as_str()),
+        Some("overview")
+    );
+    let overview_content = structured
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("content string");
+    assert!(
+        overview_content.contains("function handle"),
+        "overview should show the handler signature: {overview_content}"
+    );
+    // The overview lists known topics inline.
+    assert!(overview_content.contains("clock"));
+    let topics = structured
+        .get("available_topics")
+        .and_then(|v| v.as_array())
+        .expect("available_topics array");
+    let topic_names: Vec<&str> = topics.iter().filter_map(|v| v.as_str()).collect();
+    assert!(topic_names.contains(&"clock"));
+    assert!(topic_names.contains(&"store"));
+    assert!(topic_names.contains(&"gotchas"));
+
+    // Specific topic → clock section with the new primitives named.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("get_capabilities")
+                .with_arguments(json!({ "topic": "clock" }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("get_capabilities clock");
+    let structured = result.structured_content.expect("clock structured");
+    assert_eq!(
+        structured.get("topic").and_then(|v| v.as_str()),
+        Some("clock")
+    );
+    let clock_content = structured
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("clock content");
+    for needle in ["host.sleep", "host.wallTimeMs", "host.monotonicMs"] {
+        assert!(
+            clock_content.contains(needle),
+            "clock content should name `{needle}`: {clock_content}"
+        );
+    }
+
+    // Unknown topic → falls back to overview gracefully.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("get_capabilities").with_arguments(
+                json!({ "topic": "nonexistent" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("get_capabilities nonexistent");
+    let structured = result.structured_content.expect("nonexistent structured");
+    assert_eq!(
+        structured.get("topic").and_then(|v| v.as_str()),
+        Some("overview"),
+        "unknown topic should fall back to overview, not error"
+    );
 
     client.cancel().await.expect("cancel");
 }

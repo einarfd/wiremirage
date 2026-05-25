@@ -153,6 +153,8 @@ mod tests {
             "show_route_source",
             // Slice 43
             "update_group",
+            // Post-ADR-0021: MCP-side handler-API discoverability
+            "get_capabilities",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");

@@ -8,6 +8,7 @@
 //! both depending on `GET /__api/journal/tail` SSE) land in
 //! follow-up slices.
 
+pub mod capabilities;
 pub mod discovery;
 pub mod groups;
 pub mod identity;
