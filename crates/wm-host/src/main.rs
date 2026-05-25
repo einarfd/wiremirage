@@ -75,6 +75,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Final fail-fast: refuse to come up if no users exist AND no
+    // login method is configured. Deferred until here so the check
+    // can see the configured state of bootstrap, local-auth, and
+    // GitHub OAuth all at once.
+    ensure_login_method_available(&state)?;
+
     // Slice 44: opt-in hardening flags for deployments behind a TLS
     // edge + reverse proxy. Defaults stay safe for plain-HTTP dev
     // workflows (no `Secure` cookies, no `X-Forwarded-For` trust).
@@ -249,25 +255,64 @@ fn bootstrap_admin_if_requested(auth: &Auth) -> anyhow::Result<()> {
             Ok(())
         }
         Err(_) => {
-            // No bootstrap token supplied. Fine if some user already
-            // exists (e.g., this is a restart against a populated
-            // backing store); otherwise refuse to start so a fresh
-            // deployment doesn't silently come up with no way to
-            // authenticate.
-            if auth
-                .any_user_exists()
-                .map_err(|e| anyhow!("failed to check user count: {e}"))?
-            {
-                Ok(())
-            } else {
-                Err(anyhow!(
-                    "no users exist and WM_BOOTSTRAP_TOKEN is not set. \
-                     Set WM_BOOTSTRAP_TOKEN=wmt_<plaintext> on first startup \
-                     to provision an admin user named {BOOTSTRAP_USER_NAME:?}."
-                ))
-            }
+            // No bootstrap token. We can't decide whether this is OK
+            // yet — a browser-login method (local-auth or GitHub OAuth)
+            // might be configured below, in which case the first login
+            // will provision the first user. Defer the "no way to
+            // authenticate" check to `ensure_login_method_available`
+            // after all login-method env vars have been parsed.
+            Ok(())
         }
     }
+}
+
+/// Fail-fast guard that runs *after* all login-method setup. Refuses
+/// to start only when no users exist AND no login method is wired up,
+/// so a fresh deployment can't silently come up unreachable.
+///
+/// "Login method configured" means any of:
+///   - `WM_BOOTSTRAP_TOKEN` was set (handled in
+///     [`bootstrap_admin_if_requested`]; if it ran, the bootstrap user
+///     exists and `any_user_exists` returns true).
+///   - `WM_LOCAL_AUTH` is non-empty (parsed into `state.local_auth()`
+///     by [`configure_local_auth`]).
+///   - GitHub OAuth is configured (parsed into `state.github_config()`
+///     by `GitHubConfig::from_env()` in main).
+///
+/// First-login-creates-first-user covers the bootstrap gap for the
+/// browser-login paths, so an operator who only wants GitHub OAuth
+/// doesn't need to also supply a one-shot bootstrap token. Existing
+/// users always make this a no-op.
+fn ensure_login_method_available(state: &AppState) -> anyhow::Result<()> {
+    if state
+        .auth()
+        .any_user_exists()
+        .map_err(|e| anyhow!("failed to check user count: {e}"))?
+    {
+        return Ok(());
+    }
+    let has_local = !state.local_auth().is_empty();
+    let has_github = state.github_oauth().is_some();
+    if has_local || has_github {
+        let methods = match (has_local, has_github) {
+            (true, true) => "local-password and GitHub OAuth",
+            (true, false) => "local-password",
+            (false, true) => "GitHub OAuth",
+            (false, false) => unreachable!(),
+        };
+        tracing::info!(
+            "no users exist yet; first browser login ({methods}) will create the first user"
+        );
+        return Ok(());
+    }
+    Err(anyhow!(
+        "no users exist and no login method is configured. \
+         Either set WM_BOOTSTRAP_TOKEN=wmt_<plaintext> to provision a \
+         bearer-token admin named {BOOTSTRAP_USER_NAME:?}, or configure \
+         WM_LOCAL_AUTH or GitHub OAuth (WM_GITHUB_CLIENT_ID + \
+         WM_GITHUB_CLIENT_SECRET + allow rules) so a browser login can \
+         create the first user."
+    ))
 }
 
 /// Resolve the storage backend from `WM_STORAGE`. No silent fallback: if
