@@ -390,6 +390,16 @@ The host exposes an MCP (Model Context Protocol) service at
 `/__api/mcp` using the streamable-HTTP transport. Authentication is
 the same bearer token used for the REST API and the CLI.
 
+> **The MCP URL is `https://<host>/__api/mcp`, not the host root.**
+> WireMirage serves the OAuth discovery metadata at the host root
+> (RFC 9728 / 8414), so a native MCP client (Claude Desktop, Cursor,
+> MCP Inspector) given just `https://wm.example.com` will successfully
+> walk through the OAuth consent flow and receive a token — but then
+> fail to actually use the integration, because the root URL doesn't
+> speak MCP. The user-visible symptom is "OAuth approved, then
+> connection failed." Always use the full `/__api/mcp` path when
+> configuring an MCP client.
+
 Add the server to Claude Code:
 
 ```sh
