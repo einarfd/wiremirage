@@ -21,11 +21,27 @@ interface engine-host {
   get-source: func() -> string;
 }
 
+// Streaming-response host imports (ADR-0022). A handler that wants to
+// stream calls `start` once to commit the status + headers, then
+// `write-chunk` repeatedly, then `finish`. The host puts the response
+// head on the wire at `start` and flushes each chunk as it arrives.
+// `write-chunk` returns false once the client has disconnected so the
+// handler can stop early. When a handler has called `start`, the host
+// ignores the response value returned from the `handle` export.
+interface response-stream {
+  use http.{header};
+
+  start: func(status: u16, headers: list<header>);
+  write-chunk: func(bytes: list<u8>) -> bool;
+  finish: func();
+}
+
 world engine {
   import store;
   import log;
   import clock;
   import engine-host;
+  import response-stream;
 
   use store.{bucket};
   use http.{request, response};

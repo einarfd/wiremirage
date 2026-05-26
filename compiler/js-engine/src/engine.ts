@@ -36,12 +36,26 @@ declare module "wiremirage:handler/clock@0.1.0" {
   export function monotonicMs(): bigint;
 }
 
+declare module "wiremirage:handler/response-stream@0.1.0" {
+  /** Commit status + headers; switch the response to streaming mode (ADR-0022). */
+  export function start(status: number, headers: [string, string][]): void;
+  /** Flush a body chunk. Returns false once the client has disconnected. */
+  export function writeChunk(bytes: Uint8Array): boolean;
+  /** End the streamed body. */
+  export function finish(): void;
+}
+
 import { getSource } from "wiremirage:handler/engine-host@0.1.0";
 import {
   sleep as clockSleep,
   wallTimeMs as clockWallTimeMs,
   monotonicMs as clockMonotonicMs,
 } from "wiremirage:handler/clock@0.1.0";
+import {
+  start as respStart,
+  writeChunk as respWriteChunk,
+  finish as respFinish,
+} from "wiremirage:handler/response-stream@0.1.0";
 
 // Expose the clock primitives to user code as a `host` global. The
 // WIT signatures use `u64`, which componentize-js maps to `bigint` on
@@ -49,12 +63,35 @@ import {
 // `host.sleep(100)` rather than `host.sleep(100n)` — the same shape
 // most operators will reach for. Values beyond 2^53 truncate, which
 // for ms-units is 285k years and not a real concern.
+// Coerce a chunk (string | Uint8Array | ArrayBuffer) to bytes for the
+// host write-chunk import. Strings are UTF-8 encoded — the common case
+// for SSE / text streams.
+function toBytes(chunk: unknown): Uint8Array {
+  if (chunk instanceof Uint8Array) return chunk;
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  return new TextEncoder().encode(String(chunk));
+}
+
 (globalThis as Record<string, unknown>).host = {
   sleep: (ms: number | bigint): void => {
     clockSleep(typeof ms === "bigint" ? ms : BigInt(Math.max(0, Math.trunc(ms))));
   },
   wallTimeMs: (): number => Number(clockWallTimeMs()),
   monotonicMs: (): number => Number(clockMonotonicMs()),
+  // ADR-0022 streaming responses. `host.responseStream({status, headers})`
+  // commits the head and returns a writer: `.write(chunk)` flushes a
+  // chunk (returns false once the client is gone), `.close()` ends the
+  // body. A handler that streams doesn't need to return a response.
+  responseStream: (init?: {
+    status?: number;
+    headers?: [string, string][];
+  }): { write: (chunk: unknown) => boolean; close: () => void } => {
+    respStart(init?.status ?? 200, init?.headers ?? []);
+    return {
+      write: (chunk: unknown): boolean => respWriteChunk(toBytes(chunk)),
+      close: (): void => respFinish(),
+    };
+  },
 };
 
 // Each call to `handle` is a fresh wasmtime instance, so caching the
@@ -93,11 +130,19 @@ export function handle(
     );
   }
   try {
-    return (userHandle as (a: unknown, b: unknown, c: unknown) => unknown)(
+    const result = (userHandle as (a: unknown, b: unknown, c: unknown) => unknown)(
       req,
       routeStore,
       groupStore,
     );
+    // A streaming handler emits its body via `host.responseStream` and
+    // may return nothing. The host ignores this return value once
+    // `start` was called, but the WIT export still needs a valid
+    // `response` record, so coalesce null/undefined to an empty 200.
+    if (result === null || result === undefined) {
+      return { status: 200, headers: [], body: new Uint8Array() };
+    }
+    return result;
   } catch (e) {
     return errorResponse(500, `engine: handler threw: ${formatError(e)}`);
   }
