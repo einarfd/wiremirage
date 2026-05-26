@@ -878,6 +878,83 @@ async fn patch_route_swaps_path_and_evicts_old_dispatch() {
 }
 
 #[tokio::test]
+async fn streaming_response_journals_counts_and_disposition() {
+    // ADR-0022 slice 2: a streamed response records its chunk/byte
+    // totals and terminal disposition in the journal. The body itself
+    // isn't captured (it streamed to the client), so the byte total
+    // lands in `original_body_size` with `body_truncated` set, and a
+    // synthetic `[stream] …` handler-log line carries the summary.
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/stream",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({ status: 200, headers: [] });
+                  out.write("aaaa");   // 4 bytes
+                  out.write("bbbbbb"); // 6 bytes
+                  out.close();
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap().to_string();
+
+    // Drive the stream and drain the body so the handler finishes.
+    let body = reqwest::Client::new()
+        .get(h.url("/v1/stream"))
+        .send()
+        .await
+        .expect("get")
+        .text()
+        .await
+        .expect("body");
+    assert_eq!(body, "aaaabbbbbb");
+
+    // The journal entry is written by a deferred task after the handler
+    // finishes, so poll briefly for it.
+    let mut entry = serde_json::Value::Null;
+    for _ in 0..40 {
+        let listed: serde_json::Value = h
+            .client
+            .get(h.url(&format!("/__api/journal/{group}")))
+            .send()
+            .await
+            .expect("journal get")
+            .json()
+            .await
+            .expect("json");
+        if let Some(first) = listed["entries"].as_array().and_then(|a| a.first()) {
+            entry = first.clone();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(!entry.is_null(), "expected a journal entry for the stream");
+    assert_eq!(entry["response"]["status"], 200);
+    assert_eq!(
+        entry["response"]["original_body_size"], 10,
+        "byte total (4+6) lands in original_body_size"
+    );
+    assert_eq!(entry["response"]["body_truncated"], true);
+    let logs = entry["handler_logs"].as_array().expect("logs");
+    assert!(
+        logs.iter().any(
+            |l| l["message"].as_str().is_some_and(|m| m.contains("[stream]")
+                && m.contains("2 chunks")
+                && m.contains("10 bytes")
+                && m.contains("finished"))
+        ),
+        "stream summary log line present: {logs:?}"
+    );
+}
+
+#[tokio::test]
 async fn patch_route_replaces_source() {
     let h = Harness::start_with_engine().await;
     // Start with the echo handler, then PATCH in the counter handler

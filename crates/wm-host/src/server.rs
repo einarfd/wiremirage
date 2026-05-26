@@ -34,13 +34,47 @@ use tokio_stream::wrappers::ReceiverStream;
 const STREAM_CHANNEL_CAP: usize = 16;
 
 /// Result of running a handler on the blocking thread: the call result
-/// (or trap), captured logs, and resource usage. The wall-clock field
-/// is filled in by the async caller.
+/// (or trap), captured logs, resource usage, and — for streaming
+/// handlers — a summary of what was streamed. The wall-clock field is
+/// filled in by the async caller.
 type Outcome = (
     Result<WitResponse, wasmtime::Error>,
     Vec<LogRecord>,
     ResourceUsage,
+    Option<StreamSummary>,
 );
+
+/// What a streaming handler produced, captured from `HostState` before
+/// the store drops so the deferred journal task can record it
+/// (ADR-0022 slice 2).
+struct StreamSummary {
+    chunks: u64,
+    bytes: u64,
+    /// Terminal state: `finished` (handler returned cleanly),
+    /// `client_disconnected` (a write failed because the peer left),
+    /// or `trapped` (handler trapped mid-stream, incl. budget-exceeded).
+    disposition: &'static str,
+}
+
+impl StreamSummary {
+    /// Derive the summary from the per-invocation stats and the call
+    /// result. `None` if the handler didn't stream.
+    fn from_state(stats: Option<(u64, u64, bool)>, result_ok: bool) -> Option<Self> {
+        let (chunks, bytes, client_gone) = stats?;
+        let disposition = if client_gone {
+            "client_disconnected"
+        } else if result_ok {
+            "finished"
+        } else {
+            "trapped"
+        };
+        Some(StreamSummary {
+            chunks,
+            bytes,
+            disposition,
+        })
+    }
+}
 
 /// Path prefixes the host owns; user routes can never claim them. Requests
 /// that don't match any actual host endpoint under these prefixes return
@@ -512,6 +546,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                         ))),
                         Vec::new(),
                         ResourceUsage::default(),
+                        None,
                     );
                 }
             };
@@ -520,7 +555,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             let (engine_world, mut store, handles) =
                 match runtime.instantiate_engine(&group_id, &route_id, source) {
                     Ok(t) => t,
-                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default()),
+                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default(), None),
                 };
             drop(instantiate_span);
             let _call =
@@ -533,6 +568,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             let result = engine_world
                 .call_handle(&mut store, &engine_req, handles.route, handles.group)
                 .map(crate::bindings::engine_response_to_handler);
+            // Capture streaming stats before the store drops (ADR-0022
+            // slice 2) so the deferred journal task can record them.
+            let stream_summary =
+                StreamSummary::from_state(store.data().stream_stats(), result.is_ok());
             let logs = store.data_mut().take_logs();
             // Fuel is effectively unbounded on the engine path; we
             // still report consumed for the journal because the
@@ -544,7 +583,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 memory_peak_bytes: store.data().limits.peak_memory_bytes as u64,
                 wall_clock_ms: 0,
             };
-            (result, logs, resources)
+            (result, logs, resources, stream_summary)
         } else {
             let component = component.expect("non-engine path requires a component");
             let instantiate_span =
@@ -552,7 +591,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             let (handler, mut store, handles) =
                 match runtime.instantiate(&component, &group_id, &route_id) {
                     Ok(t) => t,
-                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default()),
+                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default(), None),
                 };
             drop(instantiate_span);
             let _call = tracing::info_span!("wasmtime.call_handle", route.id = %route_id).entered();
@@ -570,7 +609,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 memory_peak_bytes: store.data().limits.peak_memory_bytes as u64,
                 wall_clock_ms: 0,
             };
-            (result, logs, resources)
+            // Per-route components can't stream (the user-facing
+            // `world handler` has no response-stream import), so no
+            // summary on this path.
+            (result, logs, resources, None)
         }
     });
 
@@ -614,7 +656,9 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         res = &mut join => res?,
     };
 
-    let (call_result, handler_logs, mut resources) = outcome;
+    // The buffered path ignores the stream summary (None here — a
+    // handler that streamed took the early return above).
+    let (call_result, handler_logs, mut resources, _stream_summary) = outcome;
     let duration_ms = started.elapsed().as_millis() as u64;
     resources.wall_clock_ms = duration_ms;
     let handler_log_entries: Vec<HandlerLogEntry> = handler_logs
@@ -976,7 +1020,7 @@ fn spawn_streaming_journal(
     ctx: StreamingJournalCtx,
 ) {
     tokio::spawn(async move {
-        let (result, logs, mut resources) = match join.await {
+        let (result, logs, mut resources, summary) = match join.await {
             Ok(o) => o,
             Err(e) => {
                 tracing::warn!(error = %e, "streaming handler task join failed");
@@ -985,7 +1029,7 @@ fn spawn_streaming_journal(
         };
         let duration_ms = ctx.started.elapsed().as_millis() as u64;
         resources.wall_clock_ms = duration_ms;
-        let handler_log_entries: Vec<HandlerLogEntry> = logs
+        let mut handler_log_entries: Vec<HandlerLogEntry> = logs
             .into_iter()
             .map(|r| HandlerLogEntry {
                 level: r.level.as_str().to_string(),
@@ -995,13 +1039,31 @@ fn spawn_streaming_journal(
             .collect();
         // A trap after `start` means the stream was cut mid-flight; the
         // client already saw the head + partial body. Record the error.
-        let error_msg = result.err().map(|e| format!("{e:#}"));
+        let mut error_msg = result.err().map(|e| format!("{e:#}"));
+        // ADR-0022 slice 2: record stream chunk/byte counts + the
+        // terminal disposition. The body itself streamed straight to
+        // the client and isn't captured here, so `original_body_size`
+        // carries the byte total and `body_truncated` flags the
+        // not-captured body. A non-`finished` disposition surfaces in
+        // the error field; the count summary goes in a synthetic
+        // host log line so `wm journal show` reflects it.
+        let (chunks, bytes, disposition) = summary
+            .map(|s| (s.chunks, s.bytes, s.disposition))
+            .unwrap_or((0, 0, "finished"));
+        handler_log_entries.push(HandlerLogEntry {
+            level: "info".to_string(),
+            message: format!("[stream] {chunks} chunks, {bytes} bytes, {disposition}"),
+            timestamp: chrono::Utc::now(),
+        });
+        if error_msg.is_none() && disposition != "finished" {
+            error_msg = Some(format!("stream {disposition} after {chunks} chunks"));
+        }
         let response = ResponseEnvelope {
             status: ctx.status,
             headers: ctx.headers,
             body: Vec::new(),
-            body_truncated: false,
-            original_body_size: 0,
+            body_truncated: true,
+            original_body_size: bytes as usize,
         };
         let entry = NewJournalEntry {
             trace_id: ctx.trace_id,
