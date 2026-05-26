@@ -103,6 +103,14 @@ struct StreamSink {
     head: Option<tokio::sync::oneshot::Sender<StreamHead>>,
     chunks: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     started: bool,
+    /// When `start` was called — anchors the streaming-budget check in
+    /// the engine's epoch-deadline callback (ADR-0022 slice 2).
+    started_at: Option<std::time::Instant>,
+    /// Running totals for the journal entry (ADR-0022 slice 2).
+    chunk_count: u64,
+    byte_count: u64,
+    /// Set when a `write-chunk` failed because the client had gone.
+    client_disconnected: bool,
 }
 
 /// Per-invocation host state plumbed into the wasmtime `Store`.
@@ -154,6 +162,10 @@ impl HostState {
             head: Some(head),
             chunks: Some(chunks),
             started: false,
+            started_at: None,
+            chunk_count: 0,
+            byte_count: 0,
+            client_disconnected: false,
         });
     }
 
@@ -162,6 +174,25 @@ impl HostState {
     /// streamed body in that case and ignores `handle`'s return value.
     pub fn streaming_started(&self) -> bool {
         self.stream.as_ref().is_some_and(|s| s.started)
+    }
+
+    /// Wall-clock since `response-stream.start`, or `None` if the
+    /// handler hasn't started streaming. Drives the streaming-budget
+    /// check in the engine epoch-deadline callback.
+    pub fn streaming_elapsed(&self) -> Option<std::time::Duration> {
+        self.stream
+            .as_ref()
+            .and_then(|s| s.started_at)
+            .map(|t| t.elapsed())
+    }
+
+    /// Final streaming stats for the journal entry: `(chunks, bytes,
+    /// client_disconnected)`. `None` if the handler didn't stream.
+    pub fn stream_stats(&self) -> Option<(u64, u64, bool)> {
+        self.stream
+            .as_ref()
+            .filter(|s| s.started)
+            .map(|s| (s.chunk_count, s.byte_count, s.client_disconnected))
     }
 
     pub fn table_mut(&mut self) -> &mut ResourceTable {
@@ -450,6 +481,7 @@ impl EngineResponseStreamHost for HostState {
             && let Some(head) = sink.head.take()
         {
             sink.started = true;
+            sink.started_at = Some(std::time::Instant::now());
             // Receiver dropped (client already gone) → nothing to do.
             let _ = head.send(StreamHead { status, headers });
         }
@@ -462,19 +494,30 @@ impl EngineResponseStreamHost for HostState {
         // send here could fill the buffer and deadlock. The shim's
         // `host.responseStream` always calls `start` before handing
         // back the writer, so this only guards misuse of the raw imports.
-        let Some(sink) = self.stream.as_ref() else {
+        let Some(sink) = self.stream.as_mut() else {
             return Ok(false);
         };
         if !sink.started {
             return Ok(false);
         }
+        let Some(tx) = sink.chunks.as_ref() else {
+            return Ok(false);
+        };
+        let len = bytes.len() as u64;
         // `blocking_send` parks this (spawn_blocking) thread when the
         // channel is full — that's the backpressure. An error means the
         // receiver was dropped: the client disconnected, so report
         // false and let the handler stop early.
-        match sink.chunks.as_ref() {
-            Some(tx) => Ok(tx.blocking_send(bytes).is_ok()),
-            None => Ok(false),
+        match tx.blocking_send(bytes) {
+            Ok(()) => {
+                sink.chunk_count += 1;
+                sink.byte_count += len;
+                Ok(true)
+            }
+            Err(_) => {
+                sink.client_disconnected = true;
+                Ok(false)
+            }
         }
     }
 
