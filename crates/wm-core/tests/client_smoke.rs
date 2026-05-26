@@ -420,18 +420,18 @@ async fn route_create_body_omits_unset_fields() {
     let (_state, host, server) = start_mock().await;
     let _client = Client::builder(host).build().expect("build");
     // We don't have a route mock here; just verify the body
-    // serializes correctly via a direct serde check.
+    // serializes correctly via a direct serde check: an unset optional
+    // field (group) is omitted, and source is carried through.
     let body = CreateRouteBody {
-        group: Some("stripe-mock".into()),
+        group: None,
         methods: vec!["POST".into()],
         path: "/v1/charges".into(),
-        language: "wasm".into(),
-        bindings_version: Some("0.1.0".into()),
-        compiled_wasm: Some("AAAA".into()),
-        source: None,
+        language: "javascript".into(),
+        source: Some("function handle() {}".into()),
     };
     let json = serde_json::to_value(&body).unwrap();
-    assert!(json.get("source").is_none());
-    assert_eq!(json["language"], "wasm");
+    assert!(json.get("group").is_none(), "unset group omitted");
+    assert_eq!(json["language"], "javascript");
+    assert_eq!(json["source"], "function handle() {}");
     server.abort();
 }

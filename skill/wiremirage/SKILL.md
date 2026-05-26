@@ -65,9 +65,8 @@ wm routes add --group stripe-mock --method POST --path /v1/charges \
 # `add`; pass only what you want to change. Owner-or-admin only.
 # wm routes update stripe-mock/1 --source-file /tmp/charge-v2.ts
 
-# Print the handler source for a source-language route. Prints
-# the literal source to stdout (or "(no source stored — …)" for
-# pre-compiled wasm uploads). Owner-or-admin only.
+# Print the handler source for a route. Prints the literal source
+# to stdout. Owner-or-admin only.
 # wm routes source stripe-mock/1
 
 # Inspect / clear the route's private kv state (useful between test

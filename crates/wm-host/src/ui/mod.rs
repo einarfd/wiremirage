@@ -2104,8 +2104,6 @@ async fn route_source_edit_submit(
         methods: None,
         path: None,
         language: Some(language),
-        bindings_version: None,
-        compiled_wasm: None,
         source: Some(form.source.clone()),
     };
     match crate::api::patch_route_core(&state, &auth, &group_ref, number, body).await {
@@ -3026,8 +3024,6 @@ async fn route_new_submit(
         methods: vec![form.method.clone()],
         path: form.path.clone(),
         language: form.language.clone(),
-        bindings_version: None,
-        compiled_wasm: None,
         source: Some(form.source.clone()),
     };
 

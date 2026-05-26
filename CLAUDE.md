@@ -14,8 +14,13 @@ lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
 `RouteTable` keyed by `{group}/{n}` slugs per `route-model.md`. The
-REST API at `/__api/routes` supports POST/GET/PATCH/DELETE for both
-pre-compiled wasm uploads and source-language handlers. Source-language
+REST API at `/__api/routes` supports POST/GET/PATCH/DELETE for
+source-language handlers. The only public artifact input is `source`
++ `language` (`typescript` / `javascript`); pre-compiled wasm upload
+was retired from the public surface in ADR-0023 (routes still run as
+wasm internally, and the registry's internal `NewRoute` keeps the
+`compiled_wasm` field for the shared engine, fixtures, and a future
+AOT sidecar). Source-language
 (JS / TS) compiles in-host (ADR-0020): a shared `js-engine.wasm` is
 embedded into the host binary, TypeScript runs through pure-Rust swc
 before storage, dispatch instantiates the shared engine per request

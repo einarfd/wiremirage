@@ -1,10 +1,10 @@
 //! REST API at `/__api/*`.
 //!
-//! Routes (`/__api/routes`): POST/GET/DELETE per `rest-api.md`. Body has
-//! two shapes: pre-compiled (`language: "wasm"`, `compiled_wasm` base64)
-//! and source-based (`language: "javascript" | "typescript"`, `source`).
-//! Source-based requests are handled in-process: JS is stored verbatim
-//! and dispatched through the shared `js-engine.wasm` component, TS goes
+//! Routes (`/__api/routes`): POST/GET/DELETE per `rest-api.md`. The
+//! only public artifact input is source (`language: "javascript" |
+//! "typescript"`, `source`); pre-compiled wasm upload was retired in
+//! ADR-0023. Requests are handled in-process: JS is stored verbatim and
+//! dispatched through the shared `js-engine.wasm` component, TS goes
 //! through `ts_transpile::transpile` (pure-Rust swc) first and is stored
 //! as JS. No external compiler.
 //!
@@ -24,8 +24,6 @@ use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 use crate::api_filters::{FilterParseError, SortDir, glob_match, parse_since, validate_method};
@@ -38,13 +36,11 @@ use crate::registry::{
 use crate::server::is_reserved_path;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
-/// Maximum size of a `/__api/*` JSON body. axum's default is 2 MiB,
-/// which is fine for everything except `POST /__api/routes` and
-/// `PATCH /__api/routes/{group}/{n}` — both can carry base64-encoded
-/// wasm component bytes, and componentize-js output can exceed 2 MiB
-/// for non-trivial handlers. 16 MiB gives ~12 MiB of raw wasm after
-/// base64 expansion. Smaller than the dispatch limit (10 MiB on a
-/// public surface; this one is auth-gated).
+/// Maximum size of a `/__api/*` JSON body. axum's default is 2 MiB;
+/// `POST /__api/routes` and `PATCH /__api/routes/{group}/{n}` carry
+/// handler source, which is comfortably under that for any realistic
+/// handler. 16 MiB is a generous ceiling that keeps the auth-gated
+/// JSON surface uniform without being a target.
 pub(crate) const MAX_API_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
@@ -134,30 +130,21 @@ pub(crate) struct CreateRouteBody {
     pub(crate) methods: Vec<String>,
     pub(crate) path: String,
     pub(crate) language: String,
-    pub(crate) bindings_version: Option<String>,
-    /// Base64-encoded `.component.wasm` bytes. Required when
-    /// `language == "wasm"`.
-    pub(crate) compiled_wasm: Option<String>,
-    /// Source code for the source-based path. Stored verbatim for
-    /// `javascript`; transpiled in-process for `typescript`.
+    /// Handler source. Stored verbatim for `javascript`; transpiled
+    /// in-process for `typescript`. The only public artifact input
+    /// (ADR-0023 — pre-compiled wasm upload was retired).
     pub(crate) source: Option<String>,
 }
 
 /// Partial-update payload for `PATCH /__api/routes/{group}/{n}`. Every
-/// field is optional; the handler validates that the (language,
-/// source-or-compiled_wasm, bindings_version) triple is consistent
-/// when the artifact is being replaced.
+/// field is optional; `language` is required when replacing the
+/// artifact (i.e. when `source` is present).
 #[derive(Debug, Deserialize)]
 pub(crate) struct PatchRouteBody {
     pub(crate) methods: Option<Vec<String>>,
     pub(crate) path: Option<String>,
     pub(crate) language: Option<String>,
-    pub(crate) bindings_version: Option<String>,
-    /// Base64-encoded `.component.wasm` bytes. Pairs with
-    /// `language: "wasm"`.
-    pub(crate) compiled_wasm: Option<String>,
-    /// Source code for source-based languages
-    /// (`javascript` | `typescript`).
+    /// Replacement handler source (`javascript` | `typescript`).
     pub(crate) source: Option<String>,
 }
 
@@ -537,12 +524,6 @@ pub(crate) async fn create_route_core(
         )));
     }
 
-    if body.source.is_some() && body.compiled_wasm.is_some() {
-        return Err(ApiError::validation(
-            "send either `source` or `compiled_wasm`, not both",
-        ));
-    }
-
     // Cheap conflict precheck so idempotent retries don't burn an
     // swc transpile per attempt — the same scan runs again inside
     // `registry.create_route()` after we have an artifact, but
@@ -555,26 +536,13 @@ pub(crate) async fn create_route_core(
 
     let (compiled_wasm, language, bindings_version, source) = match body.language.as_str() {
         "wasm" => {
-            let encoded = body
-                .compiled_wasm
-                .ok_or_else(|| ApiError::validation("compiled_wasm required when language=wasm"))?;
-            let bytes = B64
-                .decode(encoded.as_bytes())
-                .map_err(|e| ApiError::validation(format!("compiled_wasm base64 decode: {e}")))?;
-            let bv = body.bindings_version.ok_or_else(|| {
-                ApiError::validation("bindings_version required when language=wasm")
-            })?;
-            if bv != SUPPORTED_BINDINGS_VERSION {
-                return Err(ApiError::validation(format!(
-                    "bindings_version {bv:?} is not supported (expected {SUPPORTED_BINDINGS_VERSION:?})"
-                )));
-            }
-            // Validate the bytes parse as a wasm Component up front, so a
-            // malformed upload fails at create time instead of at first
-            // request.
-            wasmtime::component::Component::from_binary(state.runtime().engine(), &bytes)
-                .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
-            (bytes, "wasm".to_string(), bv, None)
+            // ADR-0023: pre-compiled wasm upload was removed from the
+            // public surface. Routes still execute as wasm internally,
+            // but the only public artifact input is source.
+            return Err(ApiError::validation(
+                "pre-compiled wasm upload is no longer supported; send `source` \
+                 with `language: \"typescript\"` or `\"javascript\"`",
+            ));
         }
         "javascript" => {
             // ADR-0020 shared-engine path: source is stored verbatim
@@ -889,18 +857,11 @@ pub(crate) async fn patch_route_core(
     let any_field = body.methods.is_some()
         || body.path.is_some()
         || body.language.is_some()
-        || body.bindings_version.is_some()
-        || body.compiled_wasm.is_some()
         || body.source.is_some();
     if !any_field {
         return Err(ApiError::validation(
             "PATCH body must include at least one mutable field \
-             (`methods`, `path`, `source`, `compiled_wasm`)",
-        ));
-    }
-    if body.source.is_some() && body.compiled_wasm.is_some() {
-        return Err(ApiError::validation(
-            "send either `source` or `compiled_wasm`, not both",
+             (`methods`, `path`, `source`)",
         ));
     }
     if let Some(ref new_path) = body.path
@@ -912,41 +873,27 @@ pub(crate) async fn patch_route_core(
     }
 
     // Compute the artifact triple (language, bindings_version,
-    // compiled_wasm) when the body changes the wasm bytes. When neither
-    // `source` nor `compiled_wasm` is present, the existing artifact is
-    // preserved; `language` and `bindings_version` are ignored in that
-    // case to keep the metadata in sync with what's actually loaded.
-    let artifact_changing = body.compiled_wasm.is_some() || body.source.is_some();
+    // compiled_wasm) when the body changes the source. When `source`
+    // is absent the existing artifact is preserved; `language` is
+    // ignored in that case to keep the metadata in sync with what's
+    // actually loaded.
+    let artifact_changing = body.source.is_some();
     // `source_patch` mirrors `PatchRoute::source`: outer `Option` is
     // "field present in patch?", inner is the actual value to store.
-    // A wasm swap clears any prior source (Some(None)); a source-lang
-    // swap stores the new source (Some(Some(_))); no artifact change
-    // leaves source alone (None).
+    // A source-lang swap stores the new source (Some(Some(_))); no
+    // artifact change leaves source alone (None).
     let (compiled_wasm, language, bindings_version, source_patch) = if artifact_changing {
         let lang = body.language.as_deref().ok_or_else(|| {
-            ApiError::validation(
-                "`language` is required when changing the route's source/wasm artifact",
-            )
+            ApiError::validation("`language` is required when changing the route's source")
         })?;
         match lang {
             "wasm" => {
-                let encoded = body.compiled_wasm.as_deref().ok_or_else(|| {
-                    ApiError::validation("compiled_wasm required when language=wasm")
-                })?;
-                let bytes = B64.decode(encoded.as_bytes()).map_err(|e| {
-                    ApiError::validation(format!("compiled_wasm base64 decode: {e}"))
-                })?;
-                let bv = body.bindings_version.clone().ok_or_else(|| {
-                    ApiError::validation("bindings_version required when language=wasm")
-                })?;
-                if bv != SUPPORTED_BINDINGS_VERSION {
-                    return Err(ApiError::validation(format!(
-                        "bindings_version {bv:?} is not supported (expected {SUPPORTED_BINDINGS_VERSION:?})"
-                    )));
-                }
-                wasmtime::component::Component::from_binary(state.runtime().engine(), &bytes)
-                    .map_err(|e| ApiError::compile_failed(format!("component validation: {e}")))?;
-                (Some(bytes), Some("wasm".to_string()), Some(bv), Some(None))
+                // ADR-0023: pre-compiled wasm upload is no longer a
+                // public artifact input.
+                return Err(ApiError::validation(
+                    "pre-compiled wasm upload is no longer supported; send `source` \
+                     with `language: \"typescript\"` or `\"javascript\"`",
+                ));
             }
             "javascript" => {
                 // ADR-0020 shared-engine swap: store source, drop

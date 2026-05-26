@@ -230,9 +230,8 @@ pub struct UpdateGroupArgs {
 pub enum RoutesCommand {
     /// List routes.
     List(RoutesListArgs),
-    /// Add a route. Pass exactly one of `--source-file` (handler
-    /// source for compile via the sidecar) or `--wasm-file`
-    /// (pre-built `.component.wasm`).
+    /// Add a route. Pass `--source-file` (handler source, compiled
+    /// in-process) and optionally `--language`.
     Add(AddRouteArgs),
     /// Show one route.
     Show {
@@ -240,7 +239,7 @@ pub enum RoutesCommand {
         slug: String,
     },
     /// Update a route's mutable fields. Pass at least one of `--method`,
-    /// `--path`, `--source-file`, or `--wasm-file`. Owner-or-admin only.
+    /// `--path`, or `--source-file`. Owner-or-admin only.
     Update(UpdateRouteArgs),
     /// List or clear the route's per-route kv state. Default lists;
     /// `--clear` wipes (route record stays). Owner-or-admin only.
@@ -318,26 +317,15 @@ pub struct AddRouteArgs {
     /// Path pattern. May contain `{param}` segments.
     #[arg(long)]
     pub path: String,
-    /// Read handler source from this file. The file's contents are
-    /// shipped to the host as the `source` field; the host forwards
-    /// to the compiler sidecar.
-    #[arg(long, conflicts_with = "wasm_file")]
-    pub source_file: Option<String>,
-    /// Read a pre-built component from this file. The file's bytes
-    /// are base64-encoded and shipped as `compiled_wasm` with
-    /// `language: "wasm"`.
+    /// Read handler source from this file. The contents are shipped
+    /// to the host as the `source` field; the host compiles in-process
+    /// (TS via swc, JS verbatim). This is the only artifact input.
     #[arg(long)]
-    pub wasm_file: Option<String>,
-    /// Source language. Required (and validated host-side) when
-    /// using `--source-file`. Defaults to `typescript`. Ignored when
-    /// using `--wasm-file`.
+    pub source_file: Option<String>,
+    /// Source language. Defaults to `typescript`; pass `javascript`
+    /// for plain JS. Validated host-side.
     #[arg(long, default_value = "typescript")]
     pub language: String,
-    /// `bindings_version` declared on the upload. Required for
-    /// `--wasm-file`; ignored for `--source-file` (the compiler
-    /// sets it).
-    #[arg(long, default_value = "0.1.0")]
-    pub bindings_version: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -352,22 +340,13 @@ pub struct UpdateRouteArgs {
     /// alone.
     #[arg(long)]
     pub path: Option<String>,
-    /// Replace the handler with source from this file. Compiled via
-    /// the sidecar. Mutually exclusive with `--wasm-file`.
-    #[arg(long, conflicts_with = "wasm_file")]
-    pub source_file: Option<String>,
-    /// Replace the handler with a pre-built component from this file.
-    /// Mutually exclusive with `--source-file`.
+    /// Replace the handler with source from this file. Compiled
+    /// in-process (TS via swc, JS verbatim).
     #[arg(long)]
-    pub wasm_file: Option<String>,
+    pub source_file: Option<String>,
     /// Source language for `--source-file`. Defaults to `typescript`.
-    /// Ignored for `--wasm-file`.
     #[arg(long, default_value = "typescript")]
     pub language: String,
-    /// `bindings_version` for `--wasm-file`. Ignored for
-    /// `--source-file` (the compiler sets it).
-    #[arg(long, default_value = "0.1.0")]
-    pub bindings_version: String,
 }
 
 #[derive(Debug, clap::Args)]
