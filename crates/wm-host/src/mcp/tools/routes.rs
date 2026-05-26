@@ -120,8 +120,8 @@ pub struct ShowRouteSourceResult {
     pub slug: String,
     pub language: String,
     /// Original handler source as submitted by the caller. `None` for
-    /// pre-compiled `wasm` uploads (no source ever existed in the
-    /// host) and for records that pre-date source storage.
+    /// records with no stored source (e.g. routes that pre-date source
+    /// storage).
     pub source: Option<String>,
 }
 
@@ -134,21 +134,13 @@ pub struct CreateRouteArgs {
     pub methods: Vec<String>,
     /// Path pattern. May contain `{param}` segments.
     pub path: String,
-    /// Source language: `typescript`, `javascript`, or `wasm`.
+    /// Source language: `typescript` or `javascript`.
     pub language: String,
-    /// Handler source as a string. Required when `language` is a
-    /// source language (e.g. `typescript`). TypeScript is transpiled
-    /// in-host via swc (no external compiler); the host surfaces
+    /// Handler source as a string. TypeScript is transpiled in-host
+    /// via swc (no external compiler); the host surfaces
     /// `compile_failed` with diagnostics back to the caller on
     /// failure. Call `get_capabilities()` for the handler API spec.
     pub source: Option<String>,
-    /// Required when `language: "wasm"`. Pre-compiled component
-    /// bytes, base64-encoded. Mutually exclusive with `source`.
-    pub compiled_wasm_b64: Option<String>,
-    /// Bindings version the upload was built against. Required for
-    /// wasm uploads. For source-language routes the host sets this
-    /// automatically; the field is ignored.
-    pub bindings_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -160,21 +152,13 @@ pub struct UpdateRouteArgs {
     /// Replace the path pattern. Omit to leave it unchanged.
     pub path: Option<String>,
     /// New language for the artifact. Required when changing the
-    /// artifact (i.e. when `source` or `compiled_wasm_b64` is set).
-    /// `typescript`, `javascript`, or `wasm`. Omit to leave the
-    /// artifact unchanged.
+    /// handler `source`. `typescript` or `javascript`. Omit to leave
+    /// the artifact unchanged.
     pub language: Option<String>,
     /// Replace the handler with this source string. TypeScript is
-    /// transpiled in-host via swc; mutually exclusive with
-    /// `compiled_wasm_b64`. Call `get_capabilities()` for the handler
-    /// API spec.
+    /// transpiled in-host via swc. Call `get_capabilities()` for the
+    /// handler API spec.
     pub source: Option<String>,
-    /// Replace the compiled wasm. Base64-encoded component bytes.
-    /// Mutually exclusive with `source`.
-    pub compiled_wasm_b64: Option<String>,
-    /// Bindings version of the new wasm. Required for wasm uploads;
-    /// ignored for source-language (the host sets it automatically).
-    pub bindings_version: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -319,7 +303,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "show_route_source",
-        description = "Return the original handler source the route was created from. `source` is null for routes uploaded as pre-compiled `wasm` (no source ever existed). Owner-or-admin."
+        description = "Return the original handler source the route was created from. `source` is null for records with no stored source (e.g. routes that pre-date source storage). Owner-or-admin."
     )]
     pub async fn show_route_source(
         &self,
@@ -338,7 +322,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "create_route",
-        description = "Create a new route. Accepts either a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source` — TypeScript is transpiled to JS in-host via swc, then dispatched through the embedded js-engine.wasm per ADR-0020) or a pre-compiled wasm component (`language: \"wasm\"` plus `compiled_wasm_b64`). Returns `compile_failed` with diagnostics if the source doesn't compile. **Before writing your first handler, call `get_capabilities()` to see the handler signature, request/response shape, store/log/clock API, and gotchas.**"
+        description = "Create a new route from a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source`). TypeScript is transpiled to JS in-host via swc, then dispatched through the embedded js-engine.wasm per ADR-0020. Returns `compile_failed` with diagnostics if the source doesn't compile. **Before writing your first handler, call `get_capabilities()` to see the handler signature, request/response shape, store/log/clock API, and gotchas.**"
     )]
     pub async fn create_route(
         &self,
@@ -351,8 +335,6 @@ impl WmMcpServer {
             methods: args.methods,
             path: args.path,
             language: args.language,
-            bindings_version: args.bindings_version,
-            compiled_wasm: args.compiled_wasm_b64,
             source: args.source,
         };
         let route = crate::api::create_route_core(&self.state, &auth, body)
@@ -363,7 +345,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "update_route",
-        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, `source` (with `language`), or `compiled_wasm_b64` (with `language: \"wasm\"`). Source swaps re-transpile in-host via swc (for TypeScript) or store JS verbatim; wasm swaps clear any previously-stored source. Call `get_capabilities()` for the handler API spec."
+        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, or `source` (with `language`). Source swaps re-transpile in-host via swc (for TypeScript) or store JS verbatim. Call `get_capabilities()` for the handler API spec."
     )]
     pub async fn update_route(
         &self,
@@ -376,8 +358,6 @@ impl WmMcpServer {
             methods: args.methods,
             path: args.path,
             language: args.language,
-            bindings_version: args.bindings_version,
-            compiled_wasm: args.compiled_wasm_b64,
             source: args.source,
         };
         let updated = crate::api::patch_route_core(&self.state, &auth, &group_ref, number, body)

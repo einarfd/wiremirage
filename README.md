@@ -16,11 +16,11 @@ isn't practical. A small web UI exists for human inspection.
 Early implementation. The WIT script API (`wit/wiremirage.wit`) is in
 place, the host runs components against it, storage is abstracted behind
 in-memory and Valkey backends, routes are stored in a registry keyed by
-`{group}/{n}`, and the REST API accepts pre-compiled wasm uploads as
-well as `language: "javascript" | "typescript"` source — JS and TS
-both dispatch through an embedded shared js-engine.wasm component
-(ADR-0020), with TypeScript transpiled to JS in-host via pure-Rust
-swc. No external compiler. Routes are mutable via `PATCH
+`{group}/{n}`, and the REST API takes handler `source` with
+`language: "javascript" | "typescript"` (ADR-0023 retired pre-compiled
+wasm upload from the public surface). JS and TS both dispatch through an
+embedded shared js-engine.wasm component (ADR-0020), with TypeScript
+transpiled to JS in-host via pure-Rust swc. No external compiler. Routes are mutable via `PATCH
 /__api/routes/{group}/{n}` (slice 15): `methods`, `path`, and the
 handler artifact swap together; path/method changes re-run pattern
 conflict detection, and any wasm swap evicts the in-memory component
