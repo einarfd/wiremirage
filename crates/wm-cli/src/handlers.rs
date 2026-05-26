@@ -82,6 +82,9 @@ pub async fn dispatch(
         Command::Tokens(cmd) => handle_tokens(&client, cmd, format).await,
         Command::Users(cmd) => handle_users(&client, cmd, format).await,
         Command::Match { method, path } => handle_match(&client, &method, &path, format).await,
+        Command::Capabilities { topic } => {
+            handle_capabilities(&client, topic.as_deref(), format).await
+        }
         Command::Completion { shell } => {
             handle_completion(shell);
             return Ok(ExitCode::from(0));
@@ -927,6 +930,33 @@ async fn handle_match(
 ) -> Result<(), ClientError> {
     let resp = client.match_route(method, path).await?;
     format::render_match(&resp, format);
+    Ok(())
+}
+
+async fn handle_capabilities(
+    client: &Client,
+    topic: Option<&str>,
+    format: Format,
+) -> Result<(), ClientError> {
+    let resp = client.capabilities(topic).await?;
+    match format {
+        Format::Json => {
+            // Structured form. Useful for `wm capabilities --json | jq` and
+            // for scripts that want the topic list.
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&resp).expect("serialize capabilities")
+            );
+        }
+        Format::Human => {
+            // Markdown comes back ready to read; piping through `less` or
+            // `glow` is up to the user. Just print verbatim, no framing.
+            print!("{}", resp.content);
+            if !resp.content.ends_with('\n') {
+                println!();
+            }
+        }
+    }
     Ok(())
 }
 

@@ -54,8 +54,10 @@ export function handle(req, routeStore, groupStore) {
 }
 EOF
 
-# Add a route pointing at the handler. The host compiles it via the
-# TypeScript sidecar.
+# Add a route pointing at the handler. The host transpiles TypeScript
+# to JavaScript in-process (via swc) and dispatches both languages
+# through the embedded js-engine.wasm (ADR-0020). No external compile
+# step, no Node sidecar.
 wm routes add --group stripe-mock --method POST --path /v1/charges \
   --source-file /tmp/charge.ts
 
@@ -102,7 +104,7 @@ Read the scripts before running — they're written to be readable as documentat
 
 ## Handler API in 30 seconds
 
-The handler exports a single function with three positional parameters: the request, the per-route store, and the per-group store. Both stores expose the same `bucket` interface (get / set / delete / incr / list_push / list_range / hash_*; see the `wit/wiremirage.wit` file shipped with the host for the full API).
+The handler exports a single function with three positional parameters: the request, the per-route store, and the per-group store. Both stores expose the same `bucket` interface (get / set / delete / incr / list_push / list_range / hash_*; for the full API surface, run `wm capabilities store` against any reachable host — or `get_capabilities(topic: "store")` if you're driving via MCP).
 
 ```ts
 export function handle(req, routeStore, groupStore) {
@@ -158,6 +160,7 @@ If you've created a route and your SUT still gets 404, the journal isn't showing
 
 ## Where to look for more
 
+- `wm capabilities [topic]` — the full handler API as markdown, fetched live from the connected host. Topics: `overview`, `request`, `response`, `store`, `log`, `clock`, `gotchas`. Always agrees with the host's actual capabilities (the CLI fetches `/__api/capabilities` rather than embedding a static copy). The same content is reachable via the MCP `get_capabilities` tool.
 - `wm <command> --help` — the source of truth for command details. Always more current than this skill.
 - `wm --help` — the surface map.
 - `wm completion bash|zsh|fish|powershell` — emit a completion script for your shell. Pipe it into the appropriate location once.
