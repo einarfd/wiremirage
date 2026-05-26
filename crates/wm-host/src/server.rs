@@ -16,14 +16,31 @@ use crate::Runtime;
 use crate::bindings::wiremirage::handler::http::{
     Header, Request as WitRequest, Response as WitResponse,
 };
+use crate::host_state::StreamHead;
 use crate::journal::{
     HANDLED_BODY_LIMIT, HandlerLogEntry, NewJournalEntry, NewUnmatchedEntry, RequestEnvelope,
     ResourceUsage, ResponseEnvelope, UNMATCHED_BODY_LIMIT, UnmatchedNearMiss,
     UnmatchedNearMissReason, truncate_body,
 };
 use crate::log::LogRecord;
-use crate::route_table::{NearMiss, NearMissReason, RouteTable};
+use crate::route_table::{MatchedRoute, NearMiss, NearMissReason, RouteTable};
 use crate::telemetry::HeaderExtractor;
+use futures::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+
+/// Bounded chunk-channel depth for streaming responses (ADR-0022). A
+/// small buffer smooths bursts; past it `blocking_send` parks the
+/// handler thread, backpressuring a slow client.
+const STREAM_CHANNEL_CAP: usize = 16;
+
+/// Result of running a handler on the blocking thread: the call result
+/// (or trap), captured logs, and resource usage. The wall-clock field
+/// is filled in by the async caller.
+type Outcome = (
+    Result<WitResponse, wasmtime::Error>,
+    Vec<LogRecord>,
+    ResourceUsage,
+);
 
 /// Path prefixes the host owns; user routes can never claim them. Requests
 /// that don't match any actual host endpoint under these prefixes return
@@ -475,13 +492,14 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // blocking task because the wasmtime `Store` doesn't cross the
     // await boundary cleanly; the wall-clock number is filled in by
     // the async caller from its own `Instant::now()` reference.
-    type Outcome = (
-        Result<WitResponse, wasmtime::Error>,
-        Vec<LogRecord>,
-        ResourceUsage,
-    );
     let fuel_budget = runtime.handler_fuel();
-    let outcome: Outcome = tokio::task::spawn_blocking(move || -> Outcome {
+    // ADR-0022 streaming: the head oneshot fires if the handler calls
+    // `response-stream.start`; the bounded chunk channel carries body
+    // bytes from the (spawn_blocking) handler thread to the response
+    // body stream, with blocking_send providing backpressure.
+    let (head_tx, mut head_rx) = tokio::sync::oneshot::channel::<StreamHead>();
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(STREAM_CHANNEL_CAP);
+    let mut join = tokio::task::spawn_blocking(move || -> Outcome {
         let _enter = parent_span.enter();
 
         if use_engine {
@@ -507,6 +525,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             drop(instantiate_span);
             let _call =
                 tracing::info_span!("wasmtime.engine_call_handle", route.id = %route_id).entered();
+            // ADR-0022: wire the streaming sink so a handler calling
+            // `host.responseStream` (response-stream.start) hands the
+            // head + chunks back to the dispatch task while it runs.
+            store.data_mut().set_response_stream_sink(head_tx, chunk_tx);
             let engine_req = crate::bindings::handler_request_to_engine(wit_request);
             let result = engine_world
                 .call_handle(&mut store, &engine_req, handles.route, handles.group)
@@ -550,8 +572,47 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             };
             (result, logs, resources)
         }
-    })
-    .await?;
+    });
+
+    // Wait for whichever happens first: the handler commits a streaming
+    // head (`response-stream.start`), or it finishes/traps without
+    // streaming. `biased` checks the head first so a handler that
+    // streams then returns immediately still takes the streaming path.
+    let outcome: Outcome = tokio::select! {
+        biased;
+        head = &mut head_rx => {
+            match head {
+                Ok(head) => {
+                    // Streaming: return the response head now and pump
+                    // chunks from `chunk_rx` to the wire while the
+                    // handler keeps running on its blocking thread. The
+                    // journal entry is written when the handler finishes
+                    // (see `spawn_streaming_journal`).
+                    span.record("outcome", "streaming");
+                    let status = head.status;
+                    let headers = head.headers.clone();
+                    let resp = build_streaming_response(head, chunk_rx, &trace_id);
+                    spawn_streaming_journal(
+                        state.clone(),
+                        join,
+                        StreamingJournalCtx {
+                            trace_id: trace_id.clone(),
+                            matched: matched.clone(),
+                            request: request_envelope,
+                            started,
+                            status,
+                            headers,
+                        },
+                    );
+                    return Ok(resp);
+                }
+                // Sender dropped without `start` — handler finished or
+                // trapped before streaming. Fall back to its result.
+                Err(_) => join.await?,
+            }
+        }
+        res = &mut join => res?,
+    };
 
     let (call_result, handler_logs, mut resources) = outcome;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -857,6 +918,126 @@ fn reserved_response_header(name: &str) -> bool {
         lower.as_str(),
         "content-length" | "transfer-encoding" | "connection"
     )
+}
+
+/// Build the axum response for a streaming handler (ADR-0022). The head
+/// (status + headers) is committed; the body is a stream fed by the
+/// handler's `write-chunk` calls over `chunk_rx`. No `Content-Length`
+/// is set, so hyper uses chunked transfer-encoding and the chunks reach
+/// the client incrementally. Reserved headers are dropped as for
+/// buffered responses; the client-disconnect signal travels back the
+/// other way (dropping `chunk_rx` makes `write-chunk` return false).
+fn build_streaming_response(
+    head: StreamHead,
+    chunk_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    trace_id: &Option<String>,
+) -> Response {
+    let status = StatusCode::from_u16(head.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let body_stream = ReceiverStream::new(chunk_rx)
+        .map(|chunk| Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)));
+
+    let mut builder = Response::builder().status(status);
+    for (name, value) in &head.headers {
+        if reserved_response_header(name) {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    let mut resp = match builder.body(Body::from_stream(body_stream)) {
+        Ok(r) => r,
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("invalid streaming response head: {e}"),
+        ),
+    };
+    inject_response_trace_id(trace_id, resp.headers_mut());
+    resp
+}
+
+/// Inputs the deferred streaming-journal task needs once the handler
+/// finishes. The body isn't captured (it streamed straight to the
+/// client); slice 2 adds chunk/byte counts + a head/tail sample.
+struct StreamingJournalCtx {
+    trace_id: Option<String>,
+    matched: MatchedRoute,
+    request: RequestEnvelope,
+    started: std::time::Instant,
+    status: u16,
+    headers: Vec<(String, String)>,
+}
+
+/// Spawn the journal write for a streamed response. Runs after the
+/// handler's blocking task finishes (success or trap) — by then the
+/// body has been streamed to the client. Best-effort, like the
+/// buffered journal write.
+fn spawn_streaming_journal(
+    state: AppState,
+    join: tokio::task::JoinHandle<Outcome>,
+    ctx: StreamingJournalCtx,
+) {
+    tokio::spawn(async move {
+        let (result, logs, mut resources) = match join.await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "streaming handler task join failed");
+                return;
+            }
+        };
+        let duration_ms = ctx.started.elapsed().as_millis() as u64;
+        resources.wall_clock_ms = duration_ms;
+        let handler_log_entries: Vec<HandlerLogEntry> = logs
+            .into_iter()
+            .map(|r| HandlerLogEntry {
+                level: r.level.as_str().to_string(),
+                message: r.message,
+                timestamp: r.timestamp,
+            })
+            .collect();
+        // A trap after `start` means the stream was cut mid-flight; the
+        // client already saw the head + partial body. Record the error.
+        let error_msg = result.err().map(|e| format!("{e:#}"));
+        let response = ResponseEnvelope {
+            status: ctx.status,
+            headers: ctx.headers,
+            body: Vec::new(),
+            body_truncated: false,
+            original_body_size: 0,
+        };
+        let entry = NewJournalEntry {
+            trace_id: ctx.trace_id,
+            group_id: ctx.matched.route.group_id.clone(),
+            group_name: ctx.matched.route.group_name.clone(),
+            route_id: ctx.matched.route.id.clone(),
+            route_number: ctx.matched.route.number,
+            matched_pattern: ctx.matched.matched_pattern.clone(),
+            request: ctx.request,
+            response,
+            path_params: ctx.matched.path_params.clone(),
+            query: vec![],
+            handler_logs: handler_log_entries,
+            duration_ms,
+            resources,
+            error: error_msg,
+            dropped_response_headers: vec![],
+        };
+        if let Err(e) = state.journal().record_handled(entry) {
+            tracing::warn!(error = %e, "failed to record streaming journal entry");
+        }
+        if let Err(e) = state.routes().registry().record_route_hit(
+            &ctx.matched.route.group_id,
+            &ctx.matched.route.id,
+            chrono::Utc::now(),
+        ) {
+            tracing::warn!(error = %e, "activity tracking failed (streaming)");
+        }
+        if let Err(e) = state
+            .routes()
+            .registry()
+            .refresh_group_if_sliding(&ctx.matched.route.group_id)
+        {
+            tracing::warn!(error = %e, "sliding TTL bump failed (streaming)");
+        }
+    });
 }
 
 fn not_found_response(reason: &str) -> Response {

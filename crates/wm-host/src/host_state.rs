@@ -81,6 +81,30 @@ impl wasmtime::ResourceLimiter for HandlerLimits {
     }
 }
 
+/// The status + headers a streaming handler commits via
+/// `response-stream.start` (ADR-0022). Sent to the dispatch path over a
+/// oneshot so it can build the axum response head and begin streaming
+/// the body while the handler keeps running.
+#[derive(Debug, Clone)]
+pub struct StreamHead {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Sink wiring a streaming handler to the dispatch path. The handler
+/// (running on a `spawn_blocking` thread) pushes the head over a
+/// oneshot and each body chunk over a bounded mpsc; the dispatch task
+/// holds the receivers, returns the axum response as soon as the head
+/// arrives, and streams the chunks to the wire. Bounded so a slow
+/// client backpressures the handler (blocking_send parks the wasm
+/// thread); a dropped receiver (client gone) makes `write-chunk`
+/// return false.
+struct StreamSink {
+    head: Option<tokio::sync::oneshot::Sender<StreamHead>>,
+    chunks: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    started: bool,
+}
+
 /// Per-invocation host state plumbed into the wasmtime `Store`.
 ///
 /// One `HostState` is created per request. It owns the resource table for
@@ -100,6 +124,10 @@ pub struct HostState {
     /// instantiates by `Runtime::instantiate_engine` (slice 57 /
     /// ADR-0020).
     current_source: Option<String>,
+    /// Streaming-response sink (ADR-0022). `None` unless the dispatch
+    /// path wired it before the engine call; only the engine world
+    /// imports `response-stream`, so per-route components never set it.
+    stream: Option<StreamSink>,
 }
 
 impl HostState {
@@ -109,7 +137,31 @@ impl HostState {
             logs: LogCapture::new(),
             limits,
             current_source: None,
+            stream: None,
         }
+    }
+
+    /// Wire this invocation for streaming responses. The dispatch path
+    /// holds the matching receivers; when the handler calls
+    /// `response-stream.start` the head goes out the oneshot and the
+    /// dispatch begins streaming chunks from the mpsc.
+    pub fn set_response_stream_sink(
+        &mut self,
+        head: tokio::sync::oneshot::Sender<StreamHead>,
+        chunks: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) {
+        self.stream = Some(StreamSink {
+            head: Some(head),
+            chunks: Some(chunks),
+            started: false,
+        });
+    }
+
+    /// Whether the handler switched this response to streaming mode
+    /// (called `response-stream.start`). The dispatch path uses the
+    /// streamed body in that case and ignores `handle`'s return value.
+    pub fn streaming_started(&self) -> bool {
+        self.stream.as_ref().is_some_and(|s| s.started)
     }
 
     pub fn table_mut(&mut self) -> &mut ResourceTable {
@@ -380,12 +432,60 @@ use crate::bindings::engine_bindings::wiremirage::handler::http::Host as EngineH
 use crate::bindings::engine_bindings::wiremirage::handler::log::{
     Host as EngineLogHost, Level as EngineLogLevel,
 };
+use crate::bindings::engine_bindings::wiremirage::handler::response_stream::Host as EngineResponseStreamHost;
 use crate::bindings::engine_bindings::wiremirage::handler::store::{
     Host as EngineStoreHost, HostBucket as EngineHostBucket,
 };
 
 impl EngineHttpHost for HostState {}
 impl EngineStoreHost for HostState {}
+
+impl EngineResponseStreamHost for HostState {
+    fn start(&mut self, status: u16, headers: Vec<(String, String)>) -> Result<()> {
+        // First `start` wins. Send the head over the oneshot so the
+        // dispatch task can build the response head and begin
+        // streaming. If the sink isn't wired (e.g. dry-run) or `start`
+        // was already called, this is a no-op.
+        if let Some(sink) = self.stream.as_mut()
+            && let Some(head) = sink.head.take()
+        {
+            sink.started = true;
+            // Receiver dropped (client already gone) → nothing to do.
+            let _ = head.send(StreamHead { status, headers });
+        }
+        Ok(())
+    }
+
+    fn write_chunk(&mut self, bytes: Vec<u8>) -> Result<bool> {
+        // Require `start` first: until the head is sent the dispatch
+        // task hasn't begun draining the chunk channel, so a blocking
+        // send here could fill the buffer and deadlock. The shim's
+        // `host.responseStream` always calls `start` before handing
+        // back the writer, so this only guards misuse of the raw imports.
+        let Some(sink) = self.stream.as_ref() else {
+            return Ok(false);
+        };
+        if !sink.started {
+            return Ok(false);
+        }
+        // `blocking_send` parks this (spawn_blocking) thread when the
+        // channel is full — that's the backpressure. An error means the
+        // receiver was dropped: the client disconnected, so report
+        // false and let the handler stop early.
+        match sink.chunks.as_ref() {
+            Some(tx) => Ok(tx.blocking_send(bytes).is_ok()),
+            None => Ok(false),
+        }
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        // Drop the sender so the body stream sees end-of-stream.
+        if let Some(sink) = self.stream.as_mut() {
+            sink.chunks = None;
+        }
+        Ok(())
+    }
+}
 
 impl EngineClockHost for HostState {
     fn sleep(&mut self, ms: u64) -> Result<()> {

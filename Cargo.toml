@@ -35,7 +35,7 @@ axum = "0.8"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
-reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls", "stream"] }
 redis = "1"
 testcontainers = { version = "0.27", features = ["blocking"] }
 ulid = "1"
