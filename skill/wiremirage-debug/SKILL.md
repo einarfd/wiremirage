@@ -32,15 +32,15 @@ To confirm whether the request actually reached WireMirage:
 wm journal list <group> --limit 5
 ```
 
-For unmatched-traffic inspection, the host's unmatched log is admin-only and not yet on the CLI; query the REST endpoint directly:
+For unmatched-traffic inspection, the host's unmatched log is admin-only:
 
 ```sh
-curl -H "Authorization: Bearer $WM_TOKEN" $WM_HOST/__api/unmatched | jq .
+wm unmatched list                           # most recent first, cursor-paginated
+wm unmatched list --path-pattern '/v1/*'    # narrow by path
+wm unmatched show <n>                       # full record: headers, body, near-misses
 ```
 
-Each entry has the request method, path, headers, and body — enough to see whether the SUT is calling the right host at all.
-
-A `wm unmatched list` CLI command is planned; the REST endpoint above is the workaround until it ships.
+Each entry has the request method, path, headers, body, and — if any route was close — a `near_misses` list explaining which routes almost matched and why (method mismatch vs. literal-prefix typo). Enough to see whether the SUT is calling the right host and what would have caught it.
 
 ## "My route exists but doesn't fire"
 
@@ -75,7 +75,14 @@ wm journal show <group>/<n>
 
 The `error` field is non-empty when the handler trapped or threw; it includes the trap reason. The `handler_logs` array has anything the handler emitted via the host's `log` interface up to the point of failure. The `response` field shows what the host actually sent — useful when the handler succeeded but the headers/body don't match what the SUT expected.
 
-A `wm routes test <slug>` dry-run that invokes the handler against a synthetic request without journaling is planned; not shipped yet. For now, send the request through the live mock and read the journal. `wm match METHOD PATH` is the closest shipped substitute — it confirms the route would be selected for a given method/path, but doesn't actually run the handler.
+For dry-run-shaped debugging without involving the SUT or polluting the journal, `wm routes test <group>/<n>` invokes the handler against a synthetic request. State reads see a point-in-time snapshot; state writes land in the snapshot and are discarded after the call:
+
+```sh
+wm routes test stripe-mock/1 --method POST --body '{"x":1}'
+wm routes test stripe-mock/1 --kv counter=4   # seed state for this run
+```
+
+`wm match METHOD PATH` is the lighter-weight probe — it confirms the route would be *selected* without running the handler. Use it for "did my path pattern match" questions; use `routes test` for "did my handler produce the right response."
 
 ## "State isn't persisting between requests"
 
@@ -83,13 +90,17 @@ The handler has two stores: the per-route store (scoped to the route alone) and 
 
 ```sh
 # `wm groups state` lists what's actually persisted in either store.
-# (Slice 11 only shows clear; a read variant is planned.)
-wm groups state <group>          # list keys (when supported)
+wm groups state <group>          # list keys + value kinds
 wm groups state <group> --clear  # nuke everything in both stores
 
-# In the meantime, the simplest probe is to write a value and then
-# read it back from the same handler in a follow-up request, both via
-# the same `routeStore.set(...)` / `routeStore.get(...)` interface.
+# `wm routes state` is the per-route counterpart.
+wm routes state <group>/<n>          # list this route's private kv
+wm routes state <group>/<n> --clear  # wipe this route only
+
+# If state still seems wrong after inspection, write a probe handler
+# that does `routeStore.set("probe", ...)` then `routeStore.get("probe")`
+# in the same request and assert the round-trip — `wm routes test` is
+# the easiest way to drive it without involving the SUT.
 ```
 
 Common pitfall: each invocation gets a fresh wasmtime instance — don't expect global JS variables to persist. Anything you want to remember has to go through `routeStore` or `groupStore`. The ULID counters and rate-limit windows in handler examples persist this way.
@@ -102,7 +113,7 @@ State and journal are separate. `wm groups state <group> --clear` wipes the kv s
 
 If the symptoms don't fit any of the above, two things to try:
 
-1. **Check the host's operational logs.** Bigger problems (Valkey unreachable, compiler sidecar down, OTel pipeline broken) show up there before they show up in any of the user-facing surfaces. Ask the operator running WireMirage to share the relevant host logs.
+1. **Check the host's operational logs.** Bigger problems (Valkey unreachable, the embedded `js-engine.wasm` failing to instantiate, OTel pipeline broken) show up there before they show up in any of the user-facing surfaces. Ask the operator running WireMirage to share the relevant host logs.
 
 2. **Check `/__health` and `/__ready`.** The readiness probe reports per-dependency status. If `valkey: unreachable: ...` shows up there, no amount of journal inspection will help — the host can't write to its backing store.
 

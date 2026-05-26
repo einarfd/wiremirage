@@ -112,6 +112,12 @@ pub fn router() -> Router<AppState> {
             "/__api/groups/{group}/journal",
             axum::routing::delete(delete_group_journal),
         )
+        // Handler-API capabilities. Returns the same markdown the MCP
+        // tool and `wm capabilities` CLI command surface — single
+        // source of truth in `crate::capabilities`. Bearer-token
+        // gated like everything else under /__api/*.
+        .route("/__api/capabilities", get(list_capabilities))
+        .route("/__api/capabilities/{topic}", get(get_capability))
         // Lift axum's 2 MiB default so wasm uploads on POST/PATCH
         // /__api/routes aren't artificially cut off. The lifted limit
         // covers every /__api/* endpoint uniformly — overkill for the
@@ -2267,4 +2273,45 @@ async fn match_probe(
                 .collect(),
         })),
     }
+}
+
+// -- Capabilities -------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct CapabilityResponse {
+    topic: String,
+    content: String,
+    available_topics: Vec<String>,
+}
+
+/// `GET /__api/capabilities` → overview + topic list. Returns the
+/// same shape as `/__api/capabilities/{topic}` with topic="overview".
+async fn list_capabilities(_: AuthContext) -> Json<CapabilityResponse> {
+    let (topic, content) = crate::capabilities::lookup(None);
+    Json(CapabilityResponse {
+        topic: topic.to_string(),
+        content: content.to_string(),
+        available_topics: crate::capabilities::topic_names()
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    })
+}
+
+/// `GET /__api/capabilities/{topic}` → the named topic. Unknown
+/// topics fall back to the overview rather than 404 — matches the
+/// MCP tool's behaviour (typos shouldn't punish an exploring agent).
+async fn get_capability(
+    _: AuthContext,
+    axum::extract::Path(topic): axum::extract::Path<String>,
+) -> Json<CapabilityResponse> {
+    let (topic, content) = crate::capabilities::lookup(Some(&topic));
+    Json(CapabilityResponse {
+        topic: topic.to_string(),
+        content: content.to_string(),
+        available_topics: crate::capabilities::topic_names()
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    })
 }

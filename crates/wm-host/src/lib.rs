@@ -9,6 +9,7 @@ pub mod api_filters;
 pub mod auth;
 pub mod auth_api;
 pub mod bindings;
+pub mod capabilities;
 pub mod dry_run;
 pub mod github_oauth;
 pub mod host_state;

@@ -612,3 +612,19 @@ pub struct ApiErrorDetail {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
 }
+
+// -- Capabilities ------------------------------------------------------------
+
+/// Response from `GET /__api/capabilities[/{topic}]`. Markdown
+/// documentation for the WireMirage handler API; same content the
+/// MCP `get_capabilities` tool returns.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CapabilityResponse {
+    /// Resolved topic name. Echoes the request when known, "overview"
+    /// when the requested topic was empty or unknown.
+    pub topic: String,
+    /// The markdown body for this topic.
+    pub content: String,
+    /// All topic names the host knows about.
+    pub available_topics: Vec<String>,
+}

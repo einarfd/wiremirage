@@ -232,3 +232,96 @@ async fn dispatch_accepts_body_below_limit() {
     );
     server.abort();
 }
+
+// -- /__api/capabilities (ADR-0021 follow-up) -------------------------------
+
+#[tokio::test]
+async fn capabilities_endpoint_lists_overview_and_topics() {
+    // GET /__api/capabilities → overview + topic list. Same content
+    // the MCP `get_capabilities` tool returns, since both back to
+    // `crate::capabilities`. Bearer-token gated like the rest of
+    // /__api/*; unauth gets 401.
+    let (addr, server) = start_empty().await;
+
+    // Unauth → 401.
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/__api/capabilities"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 401);
+
+    // Authed → 200 with overview content.
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/__api/capabilities"))
+        .header("authorization", "Bearer wmt_test")
+        .send()
+        .await
+        .expect("get authed");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["topic"], "overview");
+    let content = body["content"].as_str().expect("content");
+    assert!(content.contains("function handle"));
+    let topics: Vec<&str> = body["available_topics"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for needle in [
+        "overview", "request", "response", "store", "log", "clock", "gotchas",
+    ] {
+        assert!(
+            topics.contains(&needle),
+            "available_topics should contain `{needle}`: {topics:?}"
+        );
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn capabilities_endpoint_returns_specific_topic() {
+    // GET /__api/capabilities/clock → the clock section, naming the
+    // three time primitives.
+    let (addr, server) = start_empty().await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/__api/capabilities/clock"))
+        .header("authorization", "Bearer wmt_test")
+        .send()
+        .await
+        .expect("get clock");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["topic"], "clock");
+    let content = body["content"].as_str().expect("content");
+    for needle in ["host.sleep", "host.wallTimeMs", "host.monotonicMs"] {
+        assert!(
+            content.contains(needle),
+            "clock topic should mention `{needle}`: {content}"
+        );
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn capabilities_endpoint_unknown_topic_falls_back_to_overview() {
+    // Unknown topic → overview, not 404. The MCP tool does the same;
+    // exploratory typos shouldn't punish the caller.
+    let (addr, server) = start_empty().await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/__api/capabilities/nonexistent"))
+        .header("authorization", "Bearer wmt_test")
+        .send()
+        .await
+        .expect("get nonexistent");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["topic"], "overview");
+
+    server.abort();
+}

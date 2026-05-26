@@ -474,6 +474,22 @@ impl Client {
             .await
     }
 
+    // -- Capabilities ---------------------------------------------------
+
+    /// Fetch the handler-API documentation. `topic = None` returns
+    /// the overview + topic list. Unknown topics fall back to the
+    /// overview server-side, matching the MCP tool's behaviour.
+    pub async fn capabilities(
+        &self,
+        topic: Option<&str>,
+    ) -> Result<crate::models::CapabilityResponse, ClientError> {
+        let path = match topic {
+            Some(t) if !t.is_empty() => format!("/__api/capabilities/{}", urlencode(t)),
+            _ => "/__api/capabilities".to_string(),
+        };
+        self.send(Method::GET, &path, None::<&()>).await
+    }
+
     // -- Match probe ----------------------------------------------------
 
     /// Probe what would match a hypothetical request. Returns either

@@ -73,6 +73,15 @@ pub enum Command {
         /// Request path (must start with `/`).
         path: String,
     },
+    /// Print handler-API documentation (same content as the MCP
+    /// `get_capabilities` tool). Call without `topic` for the
+    /// overview + topic list. Known topics: `overview`, `request`,
+    /// `response`, `store`, `log`, `clock`, `gotchas`.
+    Capabilities {
+        /// Topic name. Omit for the overview. Unknown topics fall
+        /// back to the overview.
+        topic: Option<String>,
+    },
     /// Generate a shell completion script. Pipe into the appropriate
     /// location for your shell (e.g. `wm completion bash >
     /// /etc/bash_completion.d/wm`). No host or token required.
