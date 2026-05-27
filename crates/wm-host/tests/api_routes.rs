@@ -4,40 +4,98 @@
 //! POST/GET/DELETE on `/__api/routes`, and verifies that mock-traffic
 //! requests get routed to the registered components.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use reqwest::Client;
 use serde_json::json;
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
-use wm_host::registry::Registry;
+use wm_host::registry::{NewRoute, Registry};
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
 
 const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
 
+// Pre-compiled fixture components for tests that need a *dispatching*
+// route but aren't testing route creation itself (journal, state,
+// trace, cascade, pagination). Seeding these via the internal registry
+// is fast — it skips the ~30s StarlingMonkey compile that attaching the
+// shared engine for source dispatch would cost. The public create API
+// is source-only (ADR-0023); this is the internal path other tier-2
+// suites (http_smoke, ui_*) already use.
 const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
 const COUNTER_COMPONENT_PATH: &str = env!("WM_FIXTURE_COUNTER_HANDLER_COMPONENT");
 
-fn echo_b64() -> String {
-    B64.encode(std::fs::read(ECHO_COMPONENT_PATH).expect("read echo fixture"))
+fn echo_wasm() -> Vec<u8> {
+    std::fs::read(ECHO_COMPONENT_PATH).expect("read echo fixture")
 }
 
-fn counter_b64() -> String {
-    B64.encode(std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture"))
+fn counter_wasm() -> Vec<u8> {
+    std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture")
+}
+
+// Source-language handlers replacing the old wasm fixtures (ADR-0023
+// retired public wasm upload). `echo_source` mirrors the echo fixture
+// ("echo: METHOD PATH"); `counter_source` mirrors the counter fixture
+// (route-private `count` incremented per request, body "count=N").
+// Both dispatch through the embedded js-engine.wasm attached in
+// `Harness::start`.
+fn echo_source() -> &'static str {
+    r#"function handle(req, route, group) {
+        return {
+            status: 200,
+            headers: [["content-type", "text/plain"]],
+            body: new TextEncoder().encode("echo: " + req.method + " " + req.path),
+        };
+    }"#
+}
+
+fn counter_source() -> &'static str {
+    r#"function handle(req, route, group) {
+        const n = route.incr("count", 1n);
+        return {
+            status: 200,
+            headers: [["content-type", "text/plain"]],
+            body: new TextEncoder().encode("count=" + n.toString()),
+        };
+    }"#
+}
+
+/// Path to the build-time js-engine.wasm (ADR-0020 slice C stamps
+/// `WM_JS_ENGINE_WASM`). `None` only in a broken build without the
+/// engine artifact — dispatch-asserting tests need it.
+fn js_engine_path() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("WM_JS_ENGINE_WASM"));
+    if p.exists() { Some(p) } else { None }
 }
 
 struct Harness {
     addr: String,
     client: Client,
     auth: Auth,
+    state: AppState,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl Harness {
+    /// Fast harness for API-surface tests (create / list / patch /
+    /// auth / conflict). Storing source never touches the engine, so
+    /// these don't pay the StarlingMonkey compile cost.
     async fn start() -> Self {
+        Self::start_inner(false).await
+    }
+
+    /// Harness with the shared js-engine attached, so source-language
+    /// routes actually *dispatch*. Only the handful of tests that hit
+    /// a mock URL and assert on the response need this — attaching the
+    /// engine compiles StarlingMonkey (~30s in debug), so the default
+    /// `start()` skips it.
+    async fn start_with_engine() -> Self {
+        Self::start_inner(true).await
+    }
+
+    async fn start_inner(attach_engine: bool) -> Self {
         // Install the W3C propagator once per process so the tier-2
         // tests that send `traceparent` headers see the trace_id
         // stamped on journal records. Idempotent; the global subscriber
@@ -49,12 +107,17 @@ impl Harness {
         let auth = Auth::new(storage.clone());
         auth.bootstrap_admin("bootstrap", BOOTSTRAP_TOKEN)
             .expect("bootstrap admin");
-        let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+        let runtime = Runtime::new(storage.clone()).expect("runtime");
+        let runtime = match (attach_engine, js_engine_path()) {
+            (true, Some(p)) => runtime.with_js_engine(&p).expect("attach js engine"),
+            _ => runtime,
+        };
+        let runtime = Arc::new(runtime);
         let registry = Arc::new(Registry::new(storage.clone()));
         let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
         let journal = Journal::new(storage);
         let state = AppState::new(runtime, routes, auth.clone(), journal);
-        let app = router(state);
+        let app = router(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -82,6 +145,7 @@ impl Harness {
             addr,
             client,
             auth,
+            state,
             server,
         }
     }
@@ -89,6 +153,52 @@ impl Harness {
     /// Reqwest client with no Authorization header — for testing 401 paths.
     fn unauthenticated_client(&self) -> Client {
         Client::new()
+    }
+
+    /// Seed a *dispatching* route directly via the internal registry
+    /// using a pre-compiled fixture component, owned by the bootstrap
+    /// admin. For tests that need a working handler to drive journal /
+    /// state / trace / cascade behaviour without paying the engine
+    /// compile cost of source dispatch. Returns `(group, number)`.
+    fn seed_route(&self, methods: &[&str], path: &str, wasm: Vec<u8>) -> (String, u64) {
+        self.seed_route_inner(None, methods, path, wasm)
+    }
+
+    /// As `seed_route`, but attaches to an existing named group.
+    fn seed_route_in_group(&self, group: &str, methods: &[&str], path: &str, wasm: Vec<u8>) {
+        self.seed_route_inner(Some(group), methods, path, wasm);
+    }
+
+    fn seed_route_inner(
+        &self,
+        group: Option<&str>,
+        methods: &[&str],
+        path: &str,
+        wasm: Vec<u8>,
+    ) -> (String, u64) {
+        let owner = self
+            .auth
+            .get_user_by_name("bootstrap")
+            .expect("lookup bootstrap")
+            .expect("bootstrap exists")
+            .id;
+        let route = self
+            .state
+            .routes()
+            .registry()
+            .create_route(NewRoute {
+                group: group.map(String::from),
+                methods: methods.iter().map(|m| m.to_string()).collect(),
+                path: path.into(),
+                language: "wasm".into(),
+                bindings_version: "0.1.0".into(),
+                compiled_wasm: wasm,
+                source: None,
+                owner_id: owner,
+            })
+            .expect("seed route");
+        self.state.routes().refresh_after_create(route.clone());
+        (route.group_name, u64::from(route.number))
     }
 
     /// Provision an additional non-admin user with one token, and return a
@@ -136,16 +246,15 @@ impl Drop for Harness {
 
 #[tokio::test]
 async fn create_then_call_then_delete_then_404() {
-    let h = Harness::start().await;
+    let h = Harness::start_with_engine().await;
 
     // Create a route via the API.
     let resp = h
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/charges",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 201);
@@ -207,17 +316,15 @@ async fn list_routes_returns_created() {
     h.create_route_body(json!({
         "methods": ["GET"],
         "path": "/a",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
     h.create_route_body(json!({
         "methods": ["GET"],
         "path": "/b",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
 
@@ -236,14 +343,7 @@ async fn list_routes_returns_created() {
 #[tokio::test]
 async fn path_params_extracted_for_user_routes() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["GET"],
-        "path": "/users/{id}",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
-    }))
-    .await;
+    h.seed_route(&["GET"], "/users/{id}", echo_wasm());
 
     for id in ["123", "me", "abc-def"] {
         let body = h
@@ -262,14 +362,7 @@ async fn path_params_extracted_for_user_routes() {
 #[tokio::test]
 async fn counter_state_persists_across_calls_in_memory() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["GET"],
-        "path": "/bump",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": counter_b64(),
-    }))
-    .await;
+    h.seed_route(&["GET"], "/bump", counter_wasm());
     for expected in 1..=3u32 {
         let body = h
             .client
@@ -289,23 +382,19 @@ async fn counter_state_persists_across_calls_in_memory() {
 #[tokio::test]
 async fn activity_fields_bump_on_dispatch() {
     let h = Harness::start().await;
-    let created: serde_json::Value = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/v1/activity",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .await
-        .json()
-        .await
-        .expect("json");
-    let group = created["group"]["name"].as_str().unwrap().to_string();
-    let number = created["number"].as_u64().unwrap();
+    let (group, number) = h.seed_route(&["GET"], "/v1/activity", echo_wasm());
     let location = format!("/__api/routes/{group}/{number}");
 
     // Fresh route: never hit.
+    let created: serde_json::Value = h
+        .client
+        .get(h.url(&location))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
     assert_eq!(created["hits_total"], 0);
     assert!(
         created.get("last_hit_at").is_none() || created["last_hit_at"].is_null(),
@@ -364,14 +453,7 @@ async fn list_routes_reflects_dispatch_hits() {
     // dozens of hits rendered as 'never hit'. Fix reads from the
     // registry directly in list_routes_core.
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["GET"],
-        "path": "/v1/list-hits",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
-    }))
-    .await;
+    h.seed_route(&["GET"], "/v1/list-hits", echo_wasm());
 
     // Drive a handful of dispatches.
     for _ in 0..4 {
@@ -503,39 +585,6 @@ async fn source_is_persisted_for_source_language_routes() {
 }
 
 #[tokio::test]
-async fn source_is_null_for_wasm_uploaded_routes() {
-    let h = Harness::start().await;
-    let resp = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/wasm",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .await;
-    assert_eq!(resp.status().as_u16(), 201);
-    let body: serde_json::Value = resp.json().await.expect("json");
-    let group = body["group"]["name"].as_str().unwrap().to_string();
-    let number = body["number"].as_u64().unwrap();
-
-    let resp = h
-        .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
-        .send()
-        .await
-        .expect("get source");
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["language"], "wasm");
-    // `source` is `None` -> omitted by skip_serializing_if.
-    assert!(
-        body.get("source").map(|v| v.is_null()).unwrap_or(true),
-        "expected null/missing source for wasm-only route, got {body}"
-    );
-}
-
-#[tokio::test]
 async fn source_updates_on_source_language_patch() {
     let h = Harness::start().await;
     let resp = h
@@ -568,50 +617,6 @@ async fn source_updates_on_source_language_patch() {
         .expect("get source");
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["source"], new_src);
-}
-
-#[tokio::test]
-async fn source_cleared_when_wasm_swapped_in() {
-    let h = Harness::start().await;
-    let resp = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/v1/swap",
-            "language": "javascript",
-            "source": JS_SOURCE,
-        }))
-        .await;
-    let body: serde_json::Value = resp.json().await.expect("json");
-    let group = body["group"]["name"].as_str().unwrap().to_string();
-    let number = body["number"].as_u64().unwrap();
-
-    // Swap the artifact to a raw wasm component — source should now be
-    // cleared (a wasm record has no meaningful source).
-    let resp = h
-        .client
-        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
-        .json(&json!({
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .send()
-        .await
-        .expect("patch");
-    assert_eq!(resp.status().as_u16(), 200);
-
-    let resp = h
-        .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
-        .send()
-        .await
-        .expect("get source");
-    let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["language"], "wasm");
-    assert!(
-        body.get("source").map(|v| v.is_null()).unwrap_or(true),
-        "source should be cleared after wasm swap, got {body}"
-    );
 }
 
 #[tokio::test]
@@ -661,9 +666,8 @@ async fn rejects_request_without_authorization_header() {
         .json(&json!({
             "methods": ["GET"],
             "path": "/foo",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .send()
         .await
@@ -683,9 +687,8 @@ async fn rejects_request_with_bogus_token() {
         .json(&json!({
             "methods": ["GET"],
             "path": "/foo",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .send()
         .await
@@ -711,14 +714,7 @@ async fn mock_traffic_does_not_require_auth() {
     // SUTs hitting mock routes don't carry tokens. The dispatch handler
     // (everything not under a reserved prefix) stays open.
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["GET"],
-        "path": "/v1/anonymous",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
-    }))
-    .await;
+    h.seed_route(&["GET"], "/v1/anonymous", echo_wasm());
 
     let resp = h
         .unauthenticated_client()
@@ -736,9 +732,8 @@ async fn rejects_reserved_path() {
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/__api/sneaky",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 400);
@@ -747,37 +742,27 @@ async fn rejects_reserved_path() {
 }
 
 #[tokio::test]
-async fn rejects_unsupported_bindings_version() {
+async fn rejects_wasm_language_upload() {
+    // ADR-0023: pre-compiled wasm upload was retired from the public
+    // surface. `language: "wasm"` is rejected with a validation error
+    // pointing the caller at source upload.
     let h = Harness::start().await;
     let resp = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/foo",
             "language": "wasm",
-            "bindings_version": "9.9.9",
-            "compiled_wasm": echo_b64(),
+            "source": "ignored",
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 400);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], "validation_failed");
-}
-
-#[tokio::test]
-async fn rejects_malformed_compiled_wasm() {
-    let h = Harness::start().await;
-    let resp = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/foo",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": B64.encode(b"definitely not wasm"),
-        }))
-        .await;
-    assert_eq!(resp.status().as_u16(), 400);
-    let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "compile_failed");
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("source") && msg.contains("no longer supported"),
+        "message should steer to source upload, got {msg:?}"
+    );
 }
 
 #[tokio::test]
@@ -787,9 +772,8 @@ async fn rejects_invalid_path_pattern() {
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "no-leading-slash",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 400);
@@ -803,9 +787,8 @@ async fn rejects_pattern_shape_conflict() {
     h.create_route_body(json!({
         "methods": ["GET"],
         "path": "/users/{id}",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
     // /users/me has the same shape as /users/{id} — must conflict.
@@ -813,9 +796,8 @@ async fn rejects_pattern_shape_conflict() {
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/users/me",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 409);
@@ -835,9 +817,8 @@ async fn source_create_conflict_is_detected_before_transpile() {
     h.create_route_body(json!({
         "methods": ["POST"],
         "path": "/v1/charges",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
 
@@ -864,20 +845,7 @@ async fn source_create_conflict_is_detected_before_transpile() {
 #[tokio::test]
 async fn patch_route_swaps_path_and_evicts_old_dispatch() {
     let h = Harness::start().await;
-    let created: serde_json::Value = h
-        .create_route_body(json!({
-            "methods": ["POST"],
-            "path": "/v1/charges",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .await
-        .json()
-        .await
-        .expect("json");
-    let group = created["group"]["name"].as_str().unwrap();
-    let number = created["number"].as_u64().unwrap();
+    let (group, number) = h.seed_route(&["POST"], "/v1/charges", echo_wasm());
     let location = format!("/__api/routes/{group}/{number}");
 
     // Move the route to a new path.
@@ -910,17 +878,286 @@ async fn patch_route_swaps_path_and_evicts_old_dispatch() {
 }
 
 #[tokio::test]
-async fn patch_route_replaces_compiled_wasm() {
-    let h = Harness::start().await;
+async fn streaming_response_journals_counts_and_disposition() {
+    // ADR-0022 slice 2: a streamed response records its chunk/byte
+    // totals and terminal disposition in the journal. The body itself
+    // isn't captured (it streamed to the client), so the byte total
+    // lands in `original_body_size` with `body_truncated` set, and a
+    // synthetic `[stream] …` handler-log line carries the summary.
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/stream",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({ status: 200, headers: [] });
+                  out.write("aaaa");   // 4 bytes
+                  out.write("bbbbbb"); // 6 bytes
+                  out.close();
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap().to_string();
+
+    // Drive the stream and drain the body so the handler finishes.
+    let body = reqwest::Client::new()
+        .get(h.url("/v1/stream"))
+        .send()
+        .await
+        .expect("get")
+        .text()
+        .await
+        .expect("body");
+    assert_eq!(body, "aaaabbbbbb");
+
+    // The journal entry is written by a deferred task after the handler
+    // finishes, so poll briefly for it.
+    let mut entry = serde_json::Value::Null;
+    for _ in 0..40 {
+        let listed: serde_json::Value = h
+            .client
+            .get(h.url(&format!("/__api/journal/{group}")))
+            .send()
+            .await
+            .expect("journal get")
+            .json()
+            .await
+            .expect("json");
+        if let Some(first) = listed["entries"].as_array().and_then(|a| a.first()) {
+            entry = first.clone();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(!entry.is_null(), "expected a journal entry for the stream");
+    assert_eq!(entry["response"]["status"], 200);
+    assert_eq!(
+        entry["response"]["original_body_size"], 10,
+        "byte total (4+6) lands in original_body_size"
+    );
+    assert_eq!(entry["response"]["body_truncated"], true);
+    let logs = entry["handler_logs"].as_array().expect("logs");
+    assert!(
+        logs.iter().any(
+            |l| l["message"].as_str().is_some_and(|m| m.contains("[stream]")
+                && m.contains("2 chunks")
+                && m.contains("10 bytes")
+                && m.contains("finished"))
+        ),
+        "stream summary log line present: {logs:?}"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_captures_streamed_chunks() {
+    // ADR-0022 slice 3: dry-run of a streaming source handler. Two
+    // things this proves: (a) dry-run works for source/engine routes
+    // at all (it goes through the shared engine, not component bytes),
+    // and (b) a handler that streams via host.responseStream has its
+    // head + concatenated chunks captured in the dry-run response —
+    // no real client, the chunks are collected in-process.
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/dry-stream",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({
+                    status: 202,
+                    headers: [["content-type", "text/event-stream"]],
+                  });
+                  out.write("data: a\n\n");
+                  out.write("data: b\n\n");
+                  out.close();
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+
+    let resp = h
+        .client
+        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .json(&json!({ "method": "GET", "path": "/v1/dry-stream" }))
+        .send()
+        .await
+        .expect("dry-run");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    // Status comes from the streamed head, not the (ignored) return.
+    assert_eq!(body["status"], 202);
+    let bytes: Vec<u8> = body["body"]
+        .as_array()
+        .expect("body array")
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect();
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        "data: a\n\ndata: b\n\n",
+        "dry-run captures the concatenated streamed chunks"
+    );
+}
+
+/// Poll a group's journal until the first entry appears (the streaming
+/// journal write is deferred to a task after the handler finishes).
+async fn poll_first_journal_entry(h: &Harness, group: &str) -> serde_json::Value {
+    for _ in 0..80 {
+        let listed: serde_json::Value = h
+            .client
+            .get(h.url(&format!("/__api/journal/{group}")))
+            .send()
+            .await
+            .expect("journal get")
+            .json()
+            .await
+            .expect("json");
+        if let Some(first) = listed["entries"].as_array().and_then(|a| a.first()) {
+            return first.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("no journal entry appeared for group {group}");
+}
+
+#[tokio::test]
+async fn streaming_handler_error_after_start_keeps_committed_response() {
+    // ADR-0022 slice 3: once a handler commits the head via `start`,
+    // an error afterwards can't un-send it. The status + the chunk
+    // already streamed are what the client gets — the handler can't
+    // retroactively turn a streamed 200 into a 500. (A JS `throw` is
+    // caught by the engine shim, which would otherwise return a 500;
+    // because the 200 head is already on the wire, that 500 is
+    // discarded.)
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/stream-then-throw",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({ status: 200, headers: [] });
+                  out.write("before the throw\n");
+                  throw new Error("too late to change the status");
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap().to_string();
+
+    let resp = reqwest::Client::new()
+        .get(h.url("/v1/stream-then-throw"))
+        .send()
+        .await
+        .expect("get");
+    // Head committed at `start`, not the 500 the shim makes from the
+    // throw.
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("before the throw"),
+        "client saw the streamed chunk, not a 500 body: {body:?}"
+    );
+
+    // The journal entry reflects the committed 200 with a streamed
+    // (not-captured) body, not a 500.
+    let entry = poll_first_journal_entry(&h, &group).await;
+    assert_eq!(entry["response"]["status"], 200);
+    assert_eq!(entry["response"]["body_truncated"], true);
+}
+
+#[tokio::test]
+async fn streaming_handler_sees_client_disconnect() {
+    // ADR-0022 slice 3: when the client disconnects mid-stream, the
+    // next `write-chunk` returns false so the handler can stop, and the
+    // journal records the `client_disconnected` disposition. The
+    // handler records how far it got in route state for the assertion.
+    use futures::StreamExt;
+
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/stream-cancel",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({ status: 200, headers: [] });
+                  for (let i = 0; i < 200; i++) {
+                    if (!out.write("chunk " + i + "\n")) { break; }
+                    host.sleep(30);
+                  }
+                  out.close();
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap().to_string();
+
+    // Read the first chunk, then drop the stream → client disconnect.
+    {
+        let resp = reqwest::Client::new()
+            .get(h.url("/v1/stream-cancel"))
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(resp.status().as_u16(), 200);
+        let mut stream = resp.bytes_stream();
+        let _first = stream.next().await.expect("first chunk").expect("ok");
+        // Drop the stream/response → hyper closes the connection.
+    }
+
+    // The handler keeps sleeping 30ms between writes, so within a few
+    // hundred ms its next write fails and it breaks out; the deferred
+    // journal write then records client_disconnected.
+    let entry = poll_first_journal_entry(&h, &group).await;
+    let err = entry["error"].as_str().unwrap_or_default();
+    let logs_have_disconnect = entry["handler_logs"]
+        .as_array()
+        .map(|a| {
+            a.iter().any(|l| {
+                l["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("[stream]") && m.contains("client_disconnected"))
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        err.contains("client_disconnected") || logs_have_disconnect,
+        "journal records the client disconnect (error={err:?})"
+    );
+}
+
+#[tokio::test]
+async fn patch_route_replaces_source() {
+    let h = Harness::start_with_engine().await;
     // Start with the echo handler, then PATCH in the counter handler
     // and confirm the response shape changes.
     let created: serde_json::Value = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/v1/bump",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await
         .json()
@@ -930,7 +1167,7 @@ async fn patch_route_replaces_compiled_wasm() {
     let number = created["number"].as_u64().unwrap();
     let location = format!("/__api/routes/{group}/{number}");
 
-    // Sanity: the original wasm is the echo handler.
+    // Sanity: the original handler is the echo handler.
     let echo_body = h
         .client
         .get(h.url("/v1/bump"))
@@ -947,9 +1184,8 @@ async fn patch_route_replaces_compiled_wasm() {
         .client
         .patch(h.url(&location))
         .json(&json!({
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": counter_b64(),
+            "language": "javascript",
+            "source": counter_source(),
         }))
         .send()
         .await
@@ -977,18 +1213,16 @@ async fn patch_route_rejects_path_conflict() {
     h.create_route_body(json!({
         "methods": ["GET"],
         "path": "/v1/a",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
     let second: serde_json::Value = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/v1/b",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await
         .json()
@@ -1016,9 +1250,8 @@ async fn patch_route_with_empty_body_is_bad_request() {
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/empty",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await
         .json()
@@ -1045,20 +1278,7 @@ async fn route_state_list_and_clear_round_trip() {
     let h = Harness::start().await;
     // Counter handler ticks an `incr("count", 1)` per request; after
     // two calls we should see kv:{group}:{route}:count == 2.
-    let created: serde_json::Value = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/v1/bump-state",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": counter_b64(),
-        }))
-        .await
-        .json()
-        .await
-        .expect("json");
-    let group = created["group"]["name"].as_str().unwrap();
-    let number = created["number"].as_u64().unwrap();
+    let (group, number) = h.seed_route(&["GET"], "/v1/bump-state", counter_wasm());
 
     // Drive two real calls to populate state.
     for _ in 0..2 {
@@ -1109,9 +1329,8 @@ async fn route_state_endpoints_are_owner_or_admin() {
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/v1/state-locked",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await
         .json()
@@ -1137,20 +1356,7 @@ async fn route_state_endpoints_are_owner_or_admin() {
 #[tokio::test]
 async fn dry_run_does_not_journal_or_mutate_state() {
     let h = Harness::start().await;
-    let created: serde_json::Value = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/v1/dryrun-target",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": counter_b64(),
-        }))
-        .await
-        .json()
-        .await
-        .expect("json");
-    let group = created["group"]["name"].as_str().unwrap();
-    let number = created["number"].as_u64().unwrap();
+    let (group, number) = h.seed_route(&["GET"], "/v1/dryrun-target", counter_wasm());
 
     // One real call so there's state to snapshot.
     let real = h
@@ -1219,20 +1425,7 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
     // override value as starting state instead of whatever the real
     // counter holds, and the real counter stays untouched.
     let h = Harness::start().await;
-    let created: serde_json::Value = h
-        .create_route_body(json!({
-            "methods": ["GET"],
-            "path": "/v1/dryrun-with-seed",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": counter_b64(),
-        }))
-        .await
-        .json()
-        .await
-        .expect("json");
-    let group = created["group"]["name"].as_str().unwrap();
-    let number = created["number"].as_u64().unwrap();
+    let (group, number) = h.seed_route(&["GET"], "/v1/dryrun-with-seed", counter_wasm());
 
     // No real traffic — real `count` is unset. Seed `count=5`; the
     // handler `incr`s it and should return `count=6`.
@@ -1293,9 +1486,8 @@ async fn dry_run_non_owner_forbidden() {
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/dryrun-locked",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await
         .json()
@@ -1320,9 +1512,8 @@ async fn patch_route_non_owner_non_admin_forbidden() {
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/locked",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await
         .json()
@@ -1498,9 +1689,8 @@ async fn create_route_records_callers_user_id_as_owner() {
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/things",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 201);
@@ -1530,9 +1720,8 @@ async fn non_owner_non_admin_cannot_delete_route() {
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/billing",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .await
         .json()
@@ -1568,9 +1757,8 @@ async fn admin_can_delete_route_owned_by_someone_else() {
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .send()
         .await
@@ -1601,9 +1789,8 @@ async fn owner_can_delete_their_own_route() {
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing-2",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .send()
         .await
@@ -1857,9 +2044,8 @@ async fn delete_user_refused_when_user_owns_routes() {
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .send()
         .await
@@ -1920,19 +2106,7 @@ async fn user_endpoints_require_auth() {
 /// group name so tests can inspect the journal that should now hold one
 /// entry. Mock traffic doesn't need an auth header.
 async fn seed_one_request(h: &Harness) -> String {
-    let create: serde_json::Value = h
-        .create_route_body(json!({
-            "methods": ["POST"],
-            "path": "/v1/charges",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .await
-        .json()
-        .await
-        .expect("json");
-    let group = create["group"]["name"].as_str().unwrap().to_string();
+    let (group, _number) = h.seed_route(&["POST"], "/v1/charges", echo_wasm());
     let unauth = Client::new();
     let resp = unauth
         .post(h.url("/v1/charges"))
@@ -2011,9 +2185,8 @@ async fn unmatched_record_carries_near_misses_for_method_mismatch() {
     h.create_route_body(json!({
         "methods": ["POST"],
         "path": "/v1/charges",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
     let unauth = Client::new();
@@ -2048,9 +2221,8 @@ async fn unmatched_record_carries_near_misses_for_prefix_typo() {
     h.create_route_body(json!({
         "methods": ["POST"],
         "path": "/v1/refunds",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
     let unauth = Client::new();
@@ -2107,21 +2279,7 @@ async fn reserved_path_404_does_not_journal() {
 #[tokio::test]
 async fn trace_id_is_stamped_from_inbound_traceparent() {
     let h = Harness::start().await;
-    let group = {
-        let create: serde_json::Value = h
-            .create_route_body(json!({
-                "methods": ["POST"],
-                "path": "/v1/things",
-                "language": "wasm",
-                "bindings_version": "0.1.0",
-                "compiled_wasm": echo_b64(),
-            }))
-            .await
-            .json()
-            .await
-            .expect("json");
-        create["group"]["name"].as_str().unwrap().to_string()
-    };
+    let (group, _number) = h.seed_route(&["POST"], "/v1/things", echo_wasm());
     // Send a request with a hand-crafted W3C traceparent.
     let trace_id = "0123456789abcdef0123456789abcdef";
     let traceparent = format!("00-{trace_id}-aaaaaaaaaaaaaaaa-01");
@@ -2151,14 +2309,7 @@ async fn trace_id_is_stamped_from_inbound_traceparent() {
 #[tokio::test]
 async fn response_carries_x_trace_id_back_to_sut() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["POST"],
-        "path": "/v1/echo",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
-    }))
-    .await;
+    h.seed_route(&["POST"], "/v1/echo", echo_wasm());
 
     let trace_id = "0123456789abcdef0123456789abcdef";
     let inbound = format!("00-{trace_id}-aaaaaaaaaaaaaaaa-01");
@@ -2209,14 +2360,7 @@ async fn unmatched_response_carries_x_trace_id() {
 #[tokio::test]
 async fn response_without_inbound_traceparent_has_no_x_trace_id() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["POST"],
-        "path": "/v1/no-trace",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
-    }))
-    .await;
+    h.seed_route(&["POST"], "/v1/no-trace", echo_wasm());
     let unauth = Client::new();
     let resp = unauth
         .post(h.url("/v1/no-trace"))
@@ -2315,9 +2459,8 @@ async fn group_owner_can_read_journal_admin_can_too() {
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
+            "language": "javascript",
+            "source": echo_source(),
         }))
         .send()
         .await
@@ -2556,21 +2699,7 @@ async fn delete_group_cascades_routes_and_state() {
     assert_eq!(group_create["name"], "cascadable");
 
     // Create a route inside the group.
-    let route_create = h
-        .client
-        .post(h.url("/__api/routes"))
-        .json(&json!({
-            "group": "cascadable",
-            "methods": ["POST"],
-            "path": "/v1/billed",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .send()
-        .await
-        .expect("post");
-    assert_eq!(route_create.status().as_u16(), 201);
+    h.seed_route_in_group("cascadable", &["POST"], "/v1/billed", echo_wasm());
 
     // Hit the route once so the journal has an entry.
     let unauth = Client::new();
@@ -2683,19 +2812,7 @@ async fn delete_group_state_clears_kv_but_leaves_routes() {
         .send()
         .await
         .expect("post");
-    h.client
-        .post(h.url("/__api/routes"))
-        .json(&json!({
-            "group": "stateful",
-            "methods": ["GET"],
-            "path": "/v1/state-test",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .send()
-        .await
-        .expect("post");
+    h.seed_route_in_group("stateful", &["GET"], "/v1/state-test", echo_wasm());
 
     let resp = h
         .client
@@ -2724,19 +2841,7 @@ async fn delete_group_journal_clears_entries_but_leaves_routes() {
         .send()
         .await
         .expect("post");
-    h.client
-        .post(h.url("/__api/routes"))
-        .json(&json!({
-            "group": "journal-clear",
-            "methods": ["GET"],
-            "path": "/v1/journal-test",
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        }))
-        .send()
-        .await
-        .expect("post");
+    h.seed_route_in_group("journal-clear", &["GET"], "/v1/journal-test", echo_wasm());
     let unauth = Client::new();
     unauth
         .get(h.url("/v1/journal-test"))
@@ -2815,9 +2920,8 @@ async fn match_probe_returns_hit_for_matching_route() {
     h.create_route_body(json!({
         "methods": ["POST"],
         "path": "/v1/charges/{id}",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
 
@@ -2842,9 +2946,8 @@ async fn match_probe_returns_method_mismatch_near_miss() {
     h.create_route_body(json!({
         "methods": ["POST"],
         "path": "/v1/charges",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
 
@@ -2877,9 +2980,8 @@ async fn match_probe_returns_prefix_match_near_miss() {
     h.create_route_body(json!({
         "methods": ["GET"],
         "path": "/v1/charges",
-        "language": "wasm",
-        "bindings_version": "0.1.0",
-        "compiled_wasm": echo_b64(),
+        "language": "javascript",
+        "source": echo_source(),
     }))
     .await;
 
@@ -2927,11 +3029,10 @@ async fn match_probe_rejects_bad_path() {
 
 async fn make_three_routes(h: &Harness) {
     // Three routes across two explicit groups so we can exercise the
-    // `group` filter as well as multi-method matching. Wasm bytes
-    // shared — the bytes don't matter for list queries. Groups have to
-    // be created up-front because POST /__api/routes treats a named
-    // group as a reference (404 if missing); only the no-group form
-    // creates an implicit group.
+    // `group` filter as well as multi-method matching. Seeded with the
+    // echo fixture (the list/filter queries don't care about the
+    // artifact, and one caller dispatches them). Groups are created
+    // up-front because a named group is a reference, not a create.
     for name in ["alpha", "beta"] {
         let r = h
             .client
@@ -2943,43 +3044,9 @@ async fn make_three_routes(h: &Harness) {
         assert_eq!(r.status().as_u16(), 201, "{name} group create");
     }
 
-    let body = |group: &str, methods: serde_json::Value, path: &str| {
-        json!({
-            "group": group,
-            "methods": methods,
-            "path": path,
-            "language": "wasm",
-            "bindings_version": "0.1.0",
-            "compiled_wasm": echo_b64(),
-        })
-    };
-    let r = h
-        .create_route_body(body("alpha", json!(["GET"]), "/v1/a"))
-        .await;
-    assert_eq!(
-        r.status().as_u16(),
-        201,
-        "alpha/GET create: {}",
-        r.text().await.unwrap()
-    );
-    let r = h
-        .create_route_body(body("alpha", json!(["POST"]), "/v1/b"))
-        .await;
-    assert_eq!(
-        r.status().as_u16(),
-        201,
-        "alpha/POST create: {}",
-        r.text().await.unwrap()
-    );
-    let r = h
-        .create_route_body(body("beta", json!(["GET", "POST"]), "/v2/c"))
-        .await;
-    assert_eq!(
-        r.status().as_u16(),
-        201,
-        "beta create: {}",
-        r.text().await.unwrap()
-    );
+    h.seed_route_in_group("alpha", &["GET"], "/v1/a", echo_wasm());
+    h.seed_route_in_group("alpha", &["POST"], "/v1/b", echo_wasm());
+    h.seed_route_in_group("beta", &["GET", "POST"], "/v2/c", echo_wasm());
 }
 
 #[tokio::test]

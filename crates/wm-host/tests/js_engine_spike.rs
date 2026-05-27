@@ -29,6 +29,7 @@ use wm_host::bindings::engine_bindings::wiremirage::handler::http::{
 use wm_host::bindings::engine_bindings::wiremirage::handler::log::{
     Host as LogHost, Level as LogLevel,
 };
+use wm_host::bindings::engine_bindings::wiremirage::handler::response_stream::Host as ResponseStreamHost;
 use wm_host::bindings::engine_bindings::wiremirage::handler::store::{
     Host as StoreHost, HostBucket,
 };
@@ -73,6 +74,20 @@ impl EngineHostTrait for EngineState {
 
 impl HttpHost for EngineState {}
 impl StoreHost for EngineState {}
+
+// Streaming-response stub (ADR-0022) — the spike test doesn't exercise
+// streaming; it just needs the trait satisfied so the engine world links.
+impl ResponseStreamHost for EngineState {
+    fn start(&mut self, _status: u16, _headers: Vec<(String, String)>) -> wasmtime::Result<()> {
+        Ok(())
+    }
+    fn write_chunk(&mut self, _bytes: Vec<u8>) -> wasmtime::Result<bool> {
+        Ok(true)
+    }
+    fn finish(&mut self) -> wasmtime::Result<()> {
+        Ok(())
+    }
+}
 impl LogHost for EngineState {
     fn emit(&mut self, level: LogLevel, message: String) -> wasmtime::Result<()> {
         self.logs

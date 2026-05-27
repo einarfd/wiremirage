@@ -59,6 +59,13 @@ pub const EPOCH_TICK_INTERVAL_MS: u64 = 10;
 pub const ENGINE_FUEL: u64 = u64::MAX;
 pub const ENGINE_EPOCH_TICKS: u64 = 3000;
 pub const ENGINE_MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+/// Max wall-clock a *streaming* engine handler may run (ADR-0022). A
+/// buffered handler is capped at `ENGINE_EPOCH_TICKS` (~30 s); once a
+/// handler streams, the epoch deadline is re-extended until this
+/// budget, then it traps. 5 min comfortably covers SSE / LLM streams
+/// and MCP long-polls without letting a stuck stream pin a thread
+/// forever.
+pub const ENGINE_STREAM_MAX: Duration = Duration::from_secs(300);
 
 /// Wraps a wasmtime `Engine`, a `Linker` configured with all WireMirage
 /// host imports, and the `Storage` backend that mints per-request buckets.
@@ -84,6 +91,17 @@ pub struct Runtime {
     /// configurations). Loaded once via `with_js_engine`; the
     /// `Arc<Component>` is cheap to clone across requests.
     js_engine: Option<JsEngine>,
+    /// Engine-path epoch deadline (ADR-0020). For a buffered handler
+    /// this is the hard wall-clock cap; for a streaming handler
+    /// (ADR-0022) it's the *extension granularity* — the
+    /// epoch-deadline callback re-extends by this much while the
+    /// handler is streaming, up to `engine_stream_max`.
+    engine_epoch_ticks: u64,
+    /// Max wall-clock a streaming engine handler may run (ADR-0022).
+    /// Once a handler has called `response-stream.start`, the epoch
+    /// deadline stops being the ~30s buffered cap and is re-extended
+    /// until this budget is reached, then the handler traps.
+    engine_stream_max: Duration,
 }
 
 struct JsEngine {
@@ -133,7 +151,19 @@ impl Runtime {
             epoch_ticks,
             max_memory_bytes,
             js_engine: None,
+            engine_epoch_ticks: ENGINE_EPOCH_TICKS,
+            engine_stream_max: ENGINE_STREAM_MAX,
         })
+    }
+
+    /// Test-only override for the engine-path streaming budget so
+    /// streaming-deadline behaviour can be exercised without 30 s+
+    /// tests. `epoch_ticks` is the buffered/extension granularity;
+    /// `stream_max` is the total a streaming handler may run.
+    pub fn with_engine_stream_limits(mut self, epoch_ticks: u64, stream_max: Duration) -> Self {
+        self.engine_epoch_ticks = epoch_ticks;
+        self.engine_stream_max = stream_max;
+        self
     }
 
     /// Load the shared JS engine component from `path` and prepare
@@ -391,7 +421,23 @@ impl Runtime {
         // effectively disabled (set to max); epoch is the
         // runaway-loop backstop.
         store.set_fuel(ENGINE_FUEL)?;
-        store.set_epoch_deadline(ENGINE_EPOCH_TICKS);
+        store.set_epoch_deadline(self.engine_epoch_ticks);
+        // ADR-0022 streaming budget: when the deadline fires, a handler
+        // that has switched to streaming mode gets its deadline
+        // re-extended (up to `engine_stream_max`) so a long SSE stream
+        // isn't killed at the ~30 s buffered cap; a non-streaming
+        // handler that ran this long is a runaway and traps.
+        let epoch_ticks = self.engine_epoch_ticks;
+        let stream_max = self.engine_stream_max;
+        store.epoch_deadline_callback(move |ctx| {
+            use wasmtime::UpdateDeadline;
+            let st = ctx.data();
+            match st.streaming_elapsed() {
+                Some(elapsed) if elapsed < stream_max => Ok(UpdateDeadline::Continue(epoch_ticks)),
+                // Not streaming, or the stream budget is spent → trap.
+                _ => Ok(UpdateDeadline::Interrupt),
+            }
+        });
         store.limiter(|state| &mut state.limits);
 
         let route = store.data_mut().push_bucket(route_bucket)?;

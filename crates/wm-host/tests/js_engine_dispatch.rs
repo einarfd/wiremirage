@@ -68,6 +68,57 @@ async fn start_with_js_route(
     Some((addr, server))
 }
 
+/// As `start_with_js_route`, but with a custom engine epoch budget and
+/// streaming max, and with the epoch ticker running so deadlines
+/// actually fire (the default harness doesn't run it). Lets the
+/// streaming-budget behaviour be exercised in well under a second
+/// instead of waiting out the real ~30 s engine epoch.
+async fn start_with_js_route_limited(
+    source: &str,
+    epoch_ticks: u64,
+    stream_max: std::time::Duration,
+) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    let engine_path = vendored_engine_path()?;
+    let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    auth.bootstrap_admin("bootstrap", "wmt_test")
+        .expect("bootstrap");
+    let runtime = Runtime::new(storage.clone())
+        .expect("runtime")
+        .with_js_engine(&engine_path)
+        .expect("attach engine")
+        .with_engine_stream_limits(epoch_ticks, stream_max);
+    let runtime = Arc::new(runtime);
+    // Detached: dropping the handle doesn't stop the ticker.
+    runtime.spawn_epoch_ticker();
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["POST".into()],
+            path: "/v1/echo".into(),
+            language: "javascript".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: Vec::new(),
+            source: Some(source.to_string()),
+            owner_id: "test-owner".into(),
+        })
+        .expect("create route");
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    routes.refresh_after_create(route);
+    let journal = Journal::new(storage);
+    let app = router(AppState::new(runtime, routes, auth, journal));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum::serve");
+    });
+    Some((addr, server))
+}
+
 #[tokio::test]
 async fn javascript_route_dispatches_through_shared_engine() {
     let source = r#"
@@ -278,6 +329,199 @@ async fn javascript_route_monotonic_ms_is_non_decreasing_across_requests() {
     assert!(
         second >= first,
         "monotonic should be non-decreasing across requests; got {first} then {second}"
+    );
+    server.abort();
+}
+
+// -- ADR-0022: streaming responses (prototype) ------------------------------
+
+#[tokio::test]
+async fn javascript_route_can_stream_response_via_host_response_stream() {
+    // ADR-0022 prototype: a handler emits its body through
+    // `host.responseStream` (the response-stream.start / write-chunk /
+    // finish host imports) instead of returning a buffered response.
+    // The host currently collects the chunks and flushes them as one
+    // response (incremental wire-streaming is the follow-up); this
+    // proves the new engine host imports are wired end to end through a
+    // rebuilt js-engine.wasm.
+    let source = r#"
+        function handle(req, route, group) {
+          const out = host.responseStream({
+            status: 201,
+            headers: [["content-type", "text/event-stream"]],
+          });
+          for (let i = 0; i < 3; i++) {
+            out.write("data: chunk" + i + "\n\n");
+          }
+          out.close();
+          // No return value — the host uses the streamed chunks.
+        }
+    "#;
+    let Some((addr, server)) = start_with_js_route(source).await else {
+        eprintln!("skipping: vendored js-engine.wasm not present");
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 201, "streamed status comes from start()");
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/event-stream"),
+        "streamed headers come from start()"
+    );
+    let body = resp.text().await.expect("body");
+    assert_eq!(
+        body, "data: chunk0\n\ndata: chunk1\n\ndata: chunk2\n\n",
+        "body is the concatenation of the written chunks"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn javascript_route_streams_chunks_incrementally_over_time() {
+    // True incremental streaming (ADR-0022): the handler writes a
+    // chunk, sleeps 120ms, repeats. The chunks must reach the client
+    // *as they're written* (chunked transfer-encoding), not buffered
+    // and flushed at the end — so the wall-clock spread between the
+    // first and last received chunk reflects the handler's sleeps.
+    use futures::StreamExt;
+
+    let source = r#"
+        function handle(req, route, group) {
+          const out = host.responseStream({
+            status: 200,
+            headers: [["content-type", "text/event-stream"]],
+          });
+          for (let i = 0; i < 3; i++) {
+            out.write("data: " + i + "\n\n");
+            host.sleep(120);
+          }
+          out.close();
+        }
+    "#;
+    let Some((addr, server)) = start_with_js_route(source).await else {
+        eprintln!("skipping: vendored js-engine.wasm not present");
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+
+    let start = std::time::Instant::now();
+    let mut stream = resp.bytes_stream();
+    let mut first_at: Option<std::time::Duration> = None;
+    let mut last_at = std::time::Duration::ZERO;
+    let mut body = Vec::new();
+    while let Some(item) = stream.next().await {
+        let bytes = item.expect("stream chunk");
+        if bytes.is_empty() {
+            continue;
+        }
+        let now = start.elapsed();
+        first_at.get_or_insert(now);
+        last_at = now;
+        body.extend_from_slice(&bytes);
+    }
+
+    let spread = last_at - first_at.expect("at least one chunk");
+    // Three writes with two 120ms sleeps between them → ~240ms ideal.
+    // Assert a generous floor so a buffered-then-flushed implementation
+    // (spread ≈ 0) fails but timing jitter doesn't.
+    assert!(
+        spread >= std::time::Duration::from_millis(150),
+        "chunks should arrive spread over time (handler sleeps between writes); spread={spread:?}"
+    );
+    assert_eq!(
+        String::from_utf8(body).expect("utf8"),
+        "data: 0\n\ndata: 1\n\ndata: 2\n\n"
+    );
+    server.abort();
+}
+
+// -- ADR-0022 slice 2: streaming budget ------------------------------------
+
+#[tokio::test]
+async fn streaming_handler_runs_past_the_non_streaming_epoch() {
+    // The engine epoch is set to 20 ticks (~200ms) — the buffered cap.
+    // A streaming handler runs ~600ms (6 chunks × 100ms sleeps), which
+    // is well past that cap but under the 5s stream budget. The
+    // epoch-deadline callback must re-extend while streaming so the
+    // handler completes and the client sees all six chunks, rather than
+    // trapping at ~200ms.
+    let source = r#"
+        function handle(req, route, group) {
+          const out = host.responseStream({ status: 200, headers: [] });
+          for (let i = 0; i < 6; i++) {
+            out.write("data: " + i + "\n\n");
+            host.sleep(100);
+          }
+          out.close();
+        }
+    "#;
+    let Some((addr, server)) =
+        start_with_js_route_limited(source, 20, std::time::Duration::from_secs(5)).await
+    else {
+        eprintln!("skipping: vendored js-engine.wasm not present");
+        return;
+    };
+
+    let body = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .expect("body");
+    assert!(
+        body.contains("data: 5"),
+        "streaming handler should run to completion past the 200ms buffered epoch; body={body:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn non_streaming_handler_still_traps_at_the_epoch() {
+    // Sibling to the above: with the same 200ms epoch and the ticker
+    // running, a *non-streaming* handler that sleeps 800ms must still
+    // trap at the deadline (proving the epoch is actually enforced, so
+    // the streaming test's survival is meaningful and not just "the
+    // ticker never fired").
+    let source = r#"
+        function handle(req, route, group) {
+          host.sleep(800);
+          return { status: 200, headers: [], body: new Uint8Array() };
+        }
+    "#;
+    let Some((addr, server)) =
+        start_with_js_route_limited(source, 20, std::time::Duration::from_secs(5)).await
+    else {
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        500,
+        "non-streaming handler over the epoch budget should trap"
     );
     server.abort();
 }

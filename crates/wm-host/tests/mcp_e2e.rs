@@ -8,8 +8,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, ClientInfo};
@@ -26,14 +24,9 @@ use wm_host::{AppState, Runtime, Storage, router};
 
 const BOOTSTRAP_TOKEN: &str = "wmt_test_bootstrap_token";
 const COUNTER_COMPONENT_PATH: &str = env!("WM_FIXTURE_COUNTER_HANDLER_COMPONENT");
-const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
 
 fn counter_wasm() -> Vec<u8> {
     std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture")
-}
-
-fn echo_wasm() -> Vec<u8> {
-    std::fs::read(ECHO_COMPONENT_PATH).expect("read echo fixture")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1206,9 +1199,9 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
     use base64::engine::general_purpose::STANDARD as B64;
     let h = start().await;
 
-    // Register the counter route directly via the registry (avoids
-    // round-tripping through `create_route` MCP, which would also
-    // need a wasm artifact uploaded).
+    // Register the counter route directly via the registry with the
+    // counter fixture component — simpler than seeding source + the
+    // shared engine just to get a stateful handler for the dry-run.
     let route = h
         .state
         .routes()
@@ -1351,40 +1344,6 @@ async fn create_route_typescript_with_bad_source_returns_compile_failed() {
 }
 
 #[tokio::test]
-async fn create_route_rejects_source_and_wasm_together() {
-    let h = start().await;
-    let client = DummyClient
-        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
-        .await
-        .expect("connect");
-
-    let err = client
-        .call_tool(
-            CallToolRequestParams::new("create_route").with_arguments(
-                json!({
-                    "methods": ["POST"],
-                    "path": "/v1/either-or",
-                    "language": "typescript",
-                    "source": "export function handle() {}",
-                    "compiled_wasm_b64": B64.encode(echo_wasm()),
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-        )
-        .await;
-    let err = err.expect_err("either source or wasm, not both");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("not both") || msg.contains("validation_failed"),
-        "validation surfaces: {msg}",
-    );
-
-    client.cancel().await.expect("cancel");
-}
-
-#[tokio::test]
 async fn update_route_swaps_typescript_source() {
     let h = start().await;
     let client = DummyClient
@@ -1461,27 +1420,25 @@ async fn update_route_swaps_typescript_source() {
 }
 
 #[tokio::test]
-async fn update_route_can_switch_wasm_to_source_and_back() {
-    // Start wasm, swap to TS, swap back to wasm. Each transition must
-    // recompute the artifact cleanly: TS swap stores source + sets
-    // language=typescript; wasm swap clears stored source +
-    // sets language=wasm.
+async fn update_route_swaps_to_javascript_source() {
+    // Seed a TS route, swap it to JS source via MCP, confirm the
+    // language flips and the new source is stored. (ADR-0023 retired
+    // the wasm artifact path; source-to-source is the swap that
+    // remains.)
     let h = start().await;
     let client = DummyClient
         .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
         .await
         .expect("connect");
 
-    // Wasm create.
     let created = client
         .call_tool(
             CallToolRequestParams::new("create_route").with_arguments(
                 json!({
                     "methods": ["POST"],
                     "path": "/v1/flip",
-                    "language": "wasm",
-                    "bindings_version": "0.1.0",
-                    "compiled_wasm_b64": B64.encode(echo_wasm()),
+                    "language": "typescript",
+                    "source": "export function handle() { return { status: 200, headers: [], body: new Uint8Array() }; }",
                 })
                 .as_object()
                 .unwrap()
@@ -1489,7 +1446,7 @@ async fn update_route_can_switch_wasm_to_source_and_back() {
             ),
         )
         .await
-        .expect("wasm create");
+        .expect("ts create");
     let group = created.structured_content.as_ref().unwrap()["group"]["name"]
         .as_str()
         .unwrap()
@@ -1499,14 +1456,14 @@ async fn update_route_can_switch_wasm_to_source_and_back() {
         .unwrap();
     let slug = format!("{group}/{number}");
 
-    // Swap to TS source.
-    let ts = client
+    // Swap to JS source.
+    let js = client
         .call_tool(
             CallToolRequestParams::new("update_route").with_arguments(
                 json!({
                     "route": &slug,
-                    "language": "typescript",
-                    "source": "export function handle() {}",
+                    "language": "javascript",
+                    "source": "function handle() { return { status: 201, headers: [], body: new Uint8Array() }; }",
                 })
                 .as_object()
                 .unwrap()
@@ -1514,68 +1471,26 @@ async fn update_route_can_switch_wasm_to_source_and_back() {
             ),
         )
         .await
-        .expect("swap to ts");
+        .expect("swap to js");
     assert_eq!(
-        ts.structured_content.as_ref().unwrap()["language"],
-        "typescript"
+        js.structured_content.as_ref().unwrap()["language"],
+        "javascript"
     );
 
-    // Confirm source is stored.
+    // Confirm the new source is stored.
     let src = client
         .call_tool(
             CallToolRequestParams::new("show_route_source")
                 .with_arguments(json!({ "route": &slug }).as_object().unwrap().clone()),
         )
         .await
-        .expect("show after ts");
+        .expect("show after js");
     assert!(
-        src.structured_content
-            .as_ref()
-            .unwrap()
-            .get("source")
-            .map(|v| v.is_string())
-            .unwrap_or(false),
-        "source present after TS swap"
-    );
-
-    // Swap back to wasm.
-    let back = client
-        .call_tool(
-            CallToolRequestParams::new("update_route").with_arguments(
-                json!({
-                    "route": &slug,
-                    "language": "wasm",
-                    "bindings_version": "0.1.0",
-                    "compiled_wasm_b64": B64.encode(echo_wasm()),
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-        )
-        .await
-        .expect("swap back to wasm");
-    assert_eq!(
-        back.structured_content.as_ref().unwrap()["language"],
-        "wasm"
-    );
-
-    // Confirm source was cleared.
-    let src2 = client
-        .call_tool(
-            CallToolRequestParams::new("show_route_source")
-                .with_arguments(json!({ "route": &slug }).as_object().unwrap().clone()),
-        )
-        .await
-        .expect("show after wasm");
-    assert!(
-        src2.structured_content
-            .as_ref()
-            .unwrap()
-            .get("source")
-            .map(|v| v.is_null())
-            .unwrap_or(true),
-        "source cleared after wasm swap"
+        src.structured_content.as_ref().unwrap()["source"]
+            .as_str()
+            .unwrap_or("")
+            .contains("status: 201"),
+        "updated JS source visible"
     );
 
     client.cancel().await.expect("cancel");

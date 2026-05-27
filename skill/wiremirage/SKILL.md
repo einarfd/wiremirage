@@ -65,9 +65,8 @@ wm routes add --group stripe-mock --method POST --path /v1/charges \
 # `add`; pass only what you want to change. Owner-or-admin only.
 # wm routes update stripe-mock/1 --source-file /tmp/charge-v2.ts
 
-# Print the handler source for a source-language route. Prints
-# the literal source to stdout (or "(no source stored — …)" for
-# pre-compiled wasm uploads). Owner-or-admin only.
+# Print the handler source for a route. Prints the literal source
+# to stdout. Owner-or-admin only.
 # wm routes source stripe-mock/1
 
 # Inspect / clear the route's private kv state (useful between test
@@ -99,6 +98,7 @@ The `scripts/` directory next to this `SKILL.md` ships ready-to-run examples you
 - **`scripts/reset-state.sh GROUP`** — clears all per-route and per-group state for the named group. Use between test phases when you need a clean slate without recreating routes.
 - **`scripts/flaky-mock.sh PATH [EVERY_N]`** — creates a single route that returns 503 on every Nth call. Demonstrates stateful behavior (`ctx.store.incr`) and is the canonical pattern for testing retry logic.
 - **`scripts/latency-mock.sh PATH`** — creates a single route whose response latency *grows* with elapsed time since first call (default: +50ms per second, capped at 30s). Demonstrates `host.sleep` and `host.monotonicMs` from ADR-0021. Canonical pattern for reproducing API-gateway cascading-failure modes that depend on response time creeping up toward a timeout threshold.
+- **`scripts/streaming-llm-mock.sh PATH`** — creates a route that streams an OpenAI-style chat completion token-by-token over Server-Sent Events (default 60ms/token). Demonstrates `host.responseStream` from ADR-0022 — the pattern for mocking streaming LLM APIs (Vertex `streamGenerateContent`, OpenAI/Anthropic streaming) and the MCP streamable-HTTP transport. Pace with `DELAY_MS`, change the text with `PROMPT`.
 
 Read the scripts before running — they're written to be readable as documentation. The handlers are intentionally small; copy and adapt for your own routes.
 
@@ -135,6 +135,8 @@ A `host` global exposes three time primitives (ADR-0021):
 - **`host.wallTimeMs()`** — current wall-clock time in milliseconds since the Unix epoch. May jump backwards on NTP correction; use `monotonicMs` for measuring elapsed time.
 - **`host.monotonicMs()`** — opaque monotonically non-decreasing counter, milliseconds. Useful only as a *difference* — store the value at T₁, read it again at T₂, subtract. Doesn't reset across requests within the same host process.
 
+For **streaming responses** (Server-Sent Events, chunked bodies — mocking streaming LLM APIs or the MCP transport), `host.responseStream({status, headers})` returns a writer with `.write(chunk)` (flushes each chunk to the client as it's written; returns `false` once the client disconnects) and `.close()`. A streaming handler doesn't return a value — the host uses the streamed body. Pace chunks with `host.sleep` to simulate inter-token latency. Streaming handlers may run up to ~5 min (vs the ~30s buffered cap). See `scripts/streaming-llm-mock.sh` and `wm capabilities streaming` (ADR-0022).
+
 ## Inspecting what happened
 
 `wm journal list <group>` shows every dispatched request to that group, newest first. `wm journal show <group>/<n>` shows the full entry: request, response, handler logs, timing, errors. The journal has a 1-hour TTL; for longer-lived debugging, pull entries off and store them yourself.
@@ -160,7 +162,7 @@ If you've created a route and your SUT still gets 404, the journal isn't showing
 
 ## Where to look for more
 
-- `wm capabilities [topic]` — the full handler API as markdown, fetched live from the connected host. Topics: `overview`, `request`, `response`, `store`, `log`, `clock`, `gotchas`. Always agrees with the host's actual capabilities (the CLI fetches `/__api/capabilities` rather than embedding a static copy). The same content is reachable via the MCP `get_capabilities` tool.
+- `wm capabilities [topic]` — the full handler API as markdown, fetched live from the connected host. Topics: `overview`, `request`, `response`, `store`, `log`, `clock`, `streaming`, `gotchas`. Always agrees with the host's actual capabilities (the CLI fetches `/__api/capabilities` rather than embedding a static copy). The same content is reachable via the MCP `get_capabilities` tool.
 - `wm <command> --help` — the source of truth for command details. Always more current than this skill.
 - `wm --help` — the surface map.
 - `wm completion bash|zsh|fish|powershell` — emit a completion script for your shell. Pipe it into the appropriate location once.

@@ -13,8 +13,6 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use wm_core::{
     Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateUserBody,
     DryRunBody, ListGroupsParams, ListJournalParams, ListRoutesParams, ListUnmatchedParams,
@@ -323,8 +321,6 @@ async fn create_group_from_spec(
             methods: route.methods.clone(),
             path: route.path.clone(),
             language: route.language.clone(),
-            bindings_version: None,
-            compiled_wasm: None,
             source: Some(route.source.clone()),
         };
         if let Err(e) = client.create_route(&route_body).await {
@@ -495,8 +491,7 @@ async fn handle_routes(
 }
 
 /// Translate `UpdateRouteArgs` into `(slug, PatchRouteBody)`. Returns
-/// a usage error if no mutable field was supplied or if the
-/// `--source-file` / `--wasm-file` combo is invalid.
+/// a usage error if no mutable field was supplied.
 fn build_update_route_body(args: UpdateRouteArgs) -> Result<(String, PatchRouteBody), ClientError> {
     let methods: Option<Vec<String>> = match args.method {
         Some(m) => {
@@ -515,33 +510,14 @@ fn build_update_route_body(args: UpdateRouteArgs) -> Result<(String, PatchRouteB
         None => None,
     };
 
-    let (language, bindings_version, compiled_wasm, source) =
-        match (args.source_file.as_deref(), args.wasm_file.as_deref()) {
-            (Some(path), None) => {
-                let src = read_to_string(path)?;
-                (Some(args.language), None, None, Some(src))
-            }
-            (None, Some(path)) => {
-                let bytes = read_bytes(path)?;
-                (
-                    Some("wasm".to_string()),
-                    Some(args.bindings_version),
-                    Some(B64.encode(bytes)),
-                    None,
-                )
-            }
-            (Some(_), Some(_)) => {
-                return Err(ClientError::Validation(
-                    "pass at most one of --source-file or --wasm-file".into(),
-                ));
-            }
-            (None, None) => (None, None, None, None),
-        };
+    let (language, source) = match args.source_file.as_deref() {
+        Some(path) => (Some(args.language), Some(read_to_string(path)?)),
+        None => (None, None),
+    };
 
-    if methods.is_none() && args.path.is_none() && compiled_wasm.is_none() && source.is_none() {
+    if methods.is_none() && args.path.is_none() && source.is_none() {
         return Err(ClientError::Validation(
-            "wm routes update requires at least one of --method, --path, --source-file, --wasm-file"
-                .into(),
+            "wm routes update requires at least one of --method, --path, --source-file".into(),
         ));
     }
 
@@ -551,8 +527,6 @@ fn build_update_route_body(args: UpdateRouteArgs) -> Result<(String, PatchRouteB
             methods,
             path: args.path,
             language,
-            bindings_version,
-            compiled_wasm,
             source,
         },
     ))
@@ -570,37 +544,18 @@ fn build_add_route_body(args: AddRouteArgs) -> Result<CreateRouteBody, ClientErr
             "--method must be one or more comma-separated HTTP methods".into(),
         ));
     }
-    match (args.source_file.as_deref(), args.wasm_file.as_deref()) {
-        (Some(source_path), None) => {
+    match args.source_file.as_deref() {
+        Some(source_path) => {
             let source = read_to_string(source_path)?;
             Ok(CreateRouteBody {
                 group: args.group,
                 methods,
                 path: args.path,
                 language: args.language,
-                bindings_version: None,
-                compiled_wasm: None,
                 source: Some(source),
             })
         }
-        (None, Some(wasm_path)) => {
-            let bytes = read_bytes(wasm_path)?;
-            Ok(CreateRouteBody {
-                group: args.group,
-                methods,
-                path: args.path,
-                language: "wasm".into(),
-                bindings_version: Some(args.bindings_version),
-                compiled_wasm: Some(B64.encode(bytes)),
-                source: None,
-            })
-        }
-        (Some(_), Some(_)) => Err(ClientError::Validation(
-            "pass exactly one of --source-file or --wasm-file".into(),
-        )),
-        (None, None) => Err(ClientError::Validation(
-            "either --source-file or --wasm-file is required".into(),
-        )),
+        None => Err(ClientError::Validation("--source-file is required".into())),
     }
 }
 
