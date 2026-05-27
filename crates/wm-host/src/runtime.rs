@@ -162,25 +162,30 @@ impl Runtime {
         Ok(self)
     }
 
-    /// Build the engine `Component`, Cranelift-compiling the ~12 MB
-    /// StarlingMonkey wasm **at most once per process**. The compile is
-    /// the dominant cost on the engine path (~30 s in debug); every
-    /// fresh `Runtime` would otherwise recompile it from scratch, which
-    /// is what made the engine-backed test suite slow (and a production
-    /// restart's first source-route request pay ~30 s). Instead we
-    /// precompile to a serialized artifact once (memoized in
-    /// `ENGINE_CWASM`) and `deserialize` it for each `Runtime` —
-    /// deserialize is a fast, lock-free load, so parallel test threads
-    /// don't contend (unlike wasmtime's on-disk compile cache, whose
-    /// per-entry locking serialised the parallel engine tests).
+    /// Build the engine `Component` while Cranelift-compiling the ~12 MB
+    /// StarlingMonkey wasm **at most once per machine**, not once per
+    /// `Runtime`. The compile is the dominant cost on the engine path
+    /// (~30 s in debug); every fresh `Runtime` (each test makes one)
+    /// would otherwise recompile from scratch — that's what made the
+    /// engine-backed test suite slow.
     ///
-    /// All `Runtime`s build their `Engine` with the same `Config`
-    /// (`with_limits`), so an artifact precompiled by one is loadable
-    /// by any other. The memoized artifact is keyed by the engine bytes
-    /// so a changed engine recompiles rather than loading stale code.
+    /// Memoized at two levels, both keyed by a hash of the engine bytes
+    /// (so a changed engine recompiles rather than loading stale code).
+    /// In-process (`ENGINE_CWASM`): the first `Runtime` precompiles to a
+    /// serialized artifact and the rest reuse those bytes. Cross-process:
+    /// the first process to need the engine writes a `.cwasm` to the temp
+    /// dir, and every other process — the next test binary, a restarted
+    /// host — reads + `deserialize`s it, skipping the compile entirely.
+    /// The read is a plain file load (lock-free), avoiding the per-entry
+    /// lock contention that made wasmtime's built-in on-disk cache
+    /// *slower* under parallel tests.
+    ///
+    /// Every `Runtime` builds its `Engine` from the same `Config`
+    /// (`with_limits`), so an artifact precompiled by one loads in any
+    /// other. A stale on-disk artifact (e.g. after a wasmtime upgrade)
+    /// fails `deserialize` and is transparently recompiled + rewritten,
+    /// so the cache is self-healing and needs no manual invalidation.
     fn engine_component(&self, bytes: &[u8]) -> Result<Component> {
-        // (bytes-hash, serialized-cwasm) — recompiles if the engine
-        // artifact ever differs from what was memoized.
         static ENGINE_CWASM: OnceLock<EngineCwasmCache> = OnceLock::new();
         let hash = {
             use std::hash::{Hash, Hasher};
@@ -189,22 +194,60 @@ impl Runtime {
             h.finish()
         };
         let slot = ENGINE_CWASM.get_or_init(|| Mutex::new(None));
-        let cwasm = {
-            let mut guard = slot.lock().expect("poisoned");
-            match guard.as_ref() {
-                Some((h, c)) if *h == hash => c.clone(),
-                _ => {
-                    let compiled = Arc::new(self.engine.precompile_component(bytes)?);
-                    *guard = Some((hash, compiled.clone()));
-                    compiled
-                }
+        let mut guard = slot.lock().expect("poisoned");
+        if let Some((h, cwasm)) = guard.as_ref()
+            && *h == hash
+        {
+            // In-process hit: deserialize the memoized bytes for this
+            // `Runtime`'s engine. (Each `Runtime` has its own `Engine`,
+            // so the Component can't be shared — only the bytes.)
+            let cwasm = cwasm.clone();
+            drop(guard);
+            // SAFETY: produced by `precompile_component` on an `Engine`
+            // with the identical `Config` + wasmtime version.
+            return unsafe { Component::deserialize(&self.engine, cwasm.as_slice()) };
+        }
+        let (component, cwasm) = self.load_or_precompile_engine(bytes, hash)?;
+        *guard = Some((hash, cwasm));
+        Ok(component)
+    }
+
+    /// Cross-process layer behind [`Self::engine_component`]: load the
+    /// precompiled artifact from the temp-dir cache, or compile it and
+    /// write it there for the next process. Returns the `Component` for
+    /// *this* `Runtime` plus the serialized bytes to memoize for sibling
+    /// `Runtime`s in the same process.
+    fn load_or_precompile_engine(
+        &self,
+        bytes: &[u8],
+        hash: u64,
+    ) -> Result<(Component, Arc<Vec<u8>>)> {
+        let cache_path =
+            std::env::temp_dir().join(format!("wiremirage-engine-v1-{hash:016x}.cwasm"));
+
+        // Cache hit: read + deserialize. A read miss, or a stale artifact
+        // that fails to deserialize (wasmtime upgrade, config drift),
+        // simply falls through to a recompile below.
+        if let Ok(cached) = std::fs::read(&cache_path) {
+            // SAFETY: see `engine_component`. An incompatible artifact
+            // returns Err here rather than misbehaving, and we recompile.
+            if let Ok(component) = unsafe { Component::deserialize(&self.engine, &cached) } {
+                return Ok((component, Arc::new(cached)));
             }
-        };
-        // SAFETY: `cwasm` was produced by `precompile_component` on an
-        // `Engine` with the identical `Config` (every `Runtime` shares
-        // `with_limits`'s config) and the same wasmtime version — the
-        // contract `deserialize` requires.
-        unsafe { Component::deserialize(&self.engine, cwasm.as_slice()) }
+        }
+
+        let compiled = self.engine.precompile_component(bytes)?;
+        // SAFETY: just produced by this engine's `precompile_component`.
+        let component = unsafe { Component::deserialize(&self.engine, &compiled)? };
+        // Publish for other processes. Write to a unique temp path then
+        // rename so a concurrent reader never sees a half-written file;
+        // best-effort — a failed cache write just means the next process
+        // recompiles.
+        let tmp = cache_path.with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, &compiled).is_ok() {
+            let _ = std::fs::rename(&tmp, &cache_path);
+        }
+        Ok((component, Arc::new(compiled)))
     }
 
     fn attach_engine(&mut self, component: Component) {
