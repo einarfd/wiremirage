@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -91,6 +91,10 @@ struct JsEngine {
     linker: Linker<HostState>,
 }
 
+/// Process-global memo of the precompiled engine artifact:
+/// `(engine-bytes hash, serialized cwasm)`. See [`Runtime::engine_component`].
+type EngineCwasmCache = Mutex<Option<(u64, Arc<Vec<u8>>)>>;
+
 impl Runtime {
     pub fn new(storage: Storage) -> Result<Self> {
         Self::with_limits(
@@ -142,7 +146,8 @@ impl Runtime {
     /// mismatch with the wit) → returns Err. Each is a startup-
     /// time bug from the operator's POV.
     pub fn with_js_engine(mut self, path: &Path) -> Result<Self> {
-        let component = Component::from_file(&self.engine, path)?;
+        let bytes = std::fs::read(path)?;
+        let component = self.engine_component(&bytes)?;
         self.attach_engine(component);
         Ok(self)
     }
@@ -152,9 +157,54 @@ impl Runtime {
     /// vendored `js-engine.wasm` and feeds it through here so the
     /// runtime has no on-disk filesystem dependency.
     pub fn with_js_engine_bytes(mut self, bytes: &[u8]) -> Result<Self> {
-        let component = Component::from_binary(&self.engine, bytes)?;
+        let component = self.engine_component(bytes)?;
         self.attach_engine(component);
         Ok(self)
+    }
+
+    /// Build the engine `Component`, Cranelift-compiling the ~12 MB
+    /// StarlingMonkey wasm **at most once per process**. The compile is
+    /// the dominant cost on the engine path (~30 s in debug); every
+    /// fresh `Runtime` would otherwise recompile it from scratch, which
+    /// is what made the engine-backed test suite slow (and a production
+    /// restart's first source-route request pay ~30 s). Instead we
+    /// precompile to a serialized artifact once (memoized in
+    /// `ENGINE_CWASM`) and `deserialize` it for each `Runtime` —
+    /// deserialize is a fast, lock-free load, so parallel test threads
+    /// don't contend (unlike wasmtime's on-disk compile cache, whose
+    /// per-entry locking serialised the parallel engine tests).
+    ///
+    /// All `Runtime`s build their `Engine` with the same `Config`
+    /// (`with_limits`), so an artifact precompiled by one is loadable
+    /// by any other. The memoized artifact is keyed by the engine bytes
+    /// so a changed engine recompiles rather than loading stale code.
+    fn engine_component(&self, bytes: &[u8]) -> Result<Component> {
+        // (bytes-hash, serialized-cwasm) — recompiles if the engine
+        // artifact ever differs from what was memoized.
+        static ENGINE_CWASM: OnceLock<EngineCwasmCache> = OnceLock::new();
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            h.finish()
+        };
+        let slot = ENGINE_CWASM.get_or_init(|| Mutex::new(None));
+        let cwasm = {
+            let mut guard = slot.lock().expect("poisoned");
+            match guard.as_ref() {
+                Some((h, c)) if *h == hash => c.clone(),
+                _ => {
+                    let compiled = Arc::new(self.engine.precompile_component(bytes)?);
+                    *guard = Some((hash, compiled.clone()));
+                    compiled
+                }
+            }
+        };
+        // SAFETY: `cwasm` was produced by `precompile_component` on an
+        // `Engine` with the identical `Config` (every `Runtime` shares
+        // `with_limits`'s config) and the same wasmtime version — the
+        // contract `deserialize` requires.
+        unsafe { Component::deserialize(&self.engine, cwasm.as_slice()) }
     }
 
     fn attach_engine(&mut self, component: Component) {
