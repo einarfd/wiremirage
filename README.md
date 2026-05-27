@@ -110,6 +110,24 @@ just check    # fmt, clippy, test
 just build    # cargo build --workspace
 ```
 
+### Faster local builds (optional)
+
+The test suite links ~28 integration-test binaries, each statically
+linking the large wasmtime + swc dependency tree. The default GNU linker
+is the bottleneck; [`mold`](https://github.com/rui314/mold) links them
+~3× faster. CI already uses it. To opt in locally, install mold
+(`apt install mold`, `brew install mold`, etc.) and point the native
+target at it — kept out of the repo so it isn't forced on everyone:
+
+```toml
+# ~/.cargo/config.toml  (or .cargo/config.toml, gitignored)
+[target.x86_64-unknown-linux-gnu]   # or aarch64-unknown-linux-gnu
+rustflags = ["-Clink-arg=-fuse-ld=mold"]
+```
+
+Scope it to your native target, not a blanket `[build]`, so it doesn't
+reach the wasm32 fixture builds (which link with rust-lld).
+
 To run the host:
 
 ```

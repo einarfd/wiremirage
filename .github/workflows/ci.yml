@@ -7,6 +7,16 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Link native (x86_64) binaries with mold — ~3x faster than GNU ld on
+  # the large wasmtime+swc test binaries, which dominate CI wall time
+  # (~28 integration-test executables, each a full static link).
+  #
+  # Scoped to the x86_64 target on purpose: a blanket RUSTFLAGS would also
+  # reach the wasm32-unknown-unknown fixture builds (build.rs), which link
+  # with rust-lld and would choke on `-fuse-ld=mold`. Kept here (CI only)
+  # rather than in `.cargo/config.toml` so local dev isn't forced to
+  # install mold; see the README for the opt-in local snippet.
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-Clink-arg=-fuse-ld=mold"
 
 jobs:
   check:
@@ -34,6 +44,11 @@ jobs:
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+
+      # mold linker (see the CARGO_TARGET_*_RUSTFLAGS above). In Ubuntu's
+      # universe repo; the runner has it enabled.
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
 
       - uses: Swatinem/rust-cache@v2
 
