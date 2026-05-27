@@ -28,6 +28,7 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("store", STORE),
     ("log", LOG),
     ("clock", CLOCK),
+    ("streaming", STREAMING),
     ("gotchas", GOTCHAS),
 ];
 
@@ -88,6 +89,7 @@ Topics:
 - **`store`** — per-route and per-group state (kv + lists + hashes + sets)
 - **`log`** — emitting log lines that attach to the journal entry
 - **`clock`** — `host.sleep`, wall-time, monotonic time (ADR-0021)
+- **`streaming`** — `host.responseStream` for SSE / chunked responses (ADR-0022)
 - **`gotchas`** — bigint quirks, camelCase field names, and other footguns
 
 ## Key design points
@@ -353,6 +355,75 @@ export function handle(_req, routeStore, _group) {
   };
 }
 ```
+"#;
+
+const STREAMING: &str = r#"# Streaming responses — host.responseStream
+
+By default `handle` returns one buffered response. To stream a response
+incrementally — Server-Sent Events, chunked bodies, anything where the
+client should see bytes as they're produced — call `host.responseStream`
+instead of returning a response (ADR-0022). This is what you reach for to
+mock streaming LLM APIs (Vertex `streamGenerateContent`, OpenAI
+`chat/completions` with `stream: true`, Anthropic `messages`) and the MCP
+streamable-HTTP transport.
+
+## API
+
+```ts
+const out = host.responseStream({
+  status: 200,
+  headers: [["content-type", "text/event-stream"]],
+});
+out.write("data: hello\n\n");   // string or Uint8Array; returns false if the client left
+out.close();                    // end the body
+```
+
+- **`host.responseStream({status, headers})`** commits the response head
+  immediately and returns a writer. After this the status + headers are
+  on the wire and can't be changed.
+- **`.write(chunk)`** flushes one chunk to the client right away. `chunk`
+  is a string (UTF-8 encoded for you) or a `Uint8Array`. Returns `false`
+  once the client has disconnected — stop writing and return.
+- **`.close()`** ends the stream.
+- A streaming handler **doesn't need to return anything** — the host
+  uses the streamed body, not the return value.
+
+## SSE example — token-by-token, paced
+
+```ts
+export function handle(req, routeStore, groupStore) {
+  const out = host.responseStream({
+    status: 200,
+    headers: [["content-type", "text/event-stream"]],
+  });
+  const tokens = ["Hello", " from", " a", " streamed", " mock"];
+  for (const tok of tokens) {
+    const chunk = JSON.stringify({ choices: [{ delta: { content: tok } }] });
+    if (!out.write(`data: ${chunk}\n\n`)) return;  // client gone
+    host.sleep(40);                                 // inter-token latency
+  }
+  out.write("data: [DONE]\n\n");
+  out.close();
+}
+```
+
+## Notes
+
+- **Backpressure is automatic.** A slow client makes `.write` block until
+  the buffer drains; you don't manage it.
+- **Pace with `host.sleep`** between writes (see the `clock` topic) — that
+  is how you reproduce inter-token latency or a slow upstream.
+- **Budget.** A streaming handler may run up to ~5 minutes (vs the ~30s
+  buffered cap); past that it's trapped. Long enough for realistic LLM
+  streams and MCP long-polls.
+- **Source-language only.** `host.responseStream` is available to
+  TypeScript / JavaScript handlers. Pre-compiled wasm components don't
+  have it (they return a buffered response).
+- **Journal.** Streamed responses are journaled with a `[stream] N chunks,
+  M bytes, <disposition>` summary line; the body itself isn't captured.
+- **Dry-run** (`wm routes test` / `dry_run_route`) collects the streamed
+  chunks in-process and returns the concatenated body, so you can inspect
+  a streaming handler without a real client.
 "#;
 
 const GOTCHAS: &str = r#"# Gotchas

@@ -19,11 +19,24 @@ interface engine-host {
   get-source: func() -> string;
 }
 
+// Streaming-response host imports (ADR-0022). See the repo-root
+// `wit/engine.wit` copy for the full contract notes. `start` commits
+// status + headers and switches to streaming mode; `write-chunk`
+// flushes a chunk (false = client gone); `finish` ends the body.
+interface response-stream {
+  use http.{header};
+
+  start: func(status: u16, headers: list<header>);
+  write-chunk: func(bytes: list<u8>) -> bool;
+  finish: func();
+}
+
 world engine {
   import store;
   import log;
   import clock;
   import engine-host;
+  import response-stream;
 
   use store.{bucket};
   use http.{request, response};

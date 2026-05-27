@@ -251,17 +251,6 @@ async fn run_in_snapshot(
         }
     }
 
-    let component = match routes.component_for(route) {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(RunFail {
-                message: format!("compile component: {e}"),
-                logs: Vec::new(),
-                snapshot_keys,
-            });
-        }
-    };
-
     let wit_request = WitRequest {
         method: req.method.to_uppercase(),
         path: req.path.clone(),
@@ -274,6 +263,34 @@ async fn run_in_snapshot(
             .map(|(k, v)| (k.to_lowercase(), v.clone()))
             .collect(),
         body: req.body,
+    };
+
+    // Source-language routes (JS/TS) run through the shared engine,
+    // exactly like dispatch — including streaming via
+    // `host.responseStream`. Pre-compiled / AOT components run the
+    // buffered handler-world path.
+    let use_engine = matches!(route.language.as_str(), "javascript" | "typescript");
+    if use_engine {
+        return run_engine_in_snapshot(
+            runtime,
+            route,
+            route_bucket,
+            group_bucket,
+            wit_request,
+            snapshot_keys,
+        )
+        .await;
+    }
+
+    let component = match routes.component_for(route) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(RunFail {
+                message: format!("compile component: {e}"),
+                logs: Vec::new(),
+                snapshot_keys,
+            });
+        }
     };
 
     let runtime_for_task = runtime;
@@ -309,6 +326,98 @@ async fn run_in_snapshot(
         Err(join_err) => Err(RunFail {
             message: format!("dry-run task join error: {join_err}"),
             logs: Vec::new(),
+            snapshot_keys,
+        }),
+    }
+}
+
+/// Run a source-language (engine) route under the dry-run snapshot.
+/// Mirrors the dispatch engine path but collects any streamed chunks
+/// in-process (no real client) so the dry-run response carries the
+/// full streamed body. A handler that streams via `host.responseStream`
+/// has its head + concatenated chunks returned; a buffered handler
+/// returns its response value as usual.
+async fn run_engine_in_snapshot(
+    runtime: Arc<Runtime>,
+    route: &Route,
+    route_bucket: crate::store::Bucket,
+    group_bucket: crate::store::Bucket,
+    wit_request: WitRequest,
+    snapshot_keys: u64,
+) -> Result<RunOk, RunFail> {
+    let Some(source) = route.source.clone() else {
+        return Err(RunFail {
+            message: format!("source-language route {} has no source stored", route.id),
+            logs: Vec::new(),
+            snapshot_keys,
+        });
+    };
+
+    let (head_tx, mut head_rx) = tokio::sync::oneshot::channel::<crate::host_state::StreamHead>();
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let (engine_world, mut store, handles) =
+            match runtime.instantiate_engine_with_buckets(source, route_bucket, group_bucket) {
+                Ok(t) => t,
+                Err(e) => return (Err(format!("{e:#}")), Vec::new()),
+            };
+        store.data_mut().set_response_stream_sink(head_tx, chunk_tx);
+        let engine_req = crate::bindings::handler_request_to_engine(wit_request);
+        let result = engine_world
+            .call_handle(&mut store, &engine_req, handles.route, handles.group)
+            .map(crate::bindings::engine_response_to_handler);
+        let logs = store.data_mut().take_logs();
+        match result {
+            Ok(resp) => (Ok(resp), logs),
+            Err(e) => (Err(format!("{e:#}")), logs),
+        }
+    });
+
+    // Drain streamed chunks concurrently with the handler so its
+    // `write-chunk` blocking-sends never wedge on a full channel.
+    let mut streamed_body = Vec::new();
+    while let Some(chunk) = chunk_rx.recv().await {
+        streamed_body.extend_from_slice(&chunk);
+    }
+
+    let (result, logs) = match handle.await {
+        Ok(t) => t,
+        Err(join_err) => {
+            return Err(RunFail {
+                message: format!("dry-run task join error: {join_err}"),
+                logs: Vec::new(),
+                snapshot_keys,
+            });
+        }
+    };
+
+    match result {
+        Ok(wit_resp) => {
+            // Streamed (handler called `start`) → the head's status +
+            // headers and the collected chunk body are the response.
+            // Otherwise the buffered return value.
+            if let Ok(head) = head_rx.try_recv() {
+                Ok(RunOk {
+                    status: head.status,
+                    headers: head.headers,
+                    body: streamed_body,
+                    logs,
+                    snapshot_keys,
+                })
+            } else {
+                Ok(RunOk {
+                    status: wit_resp.status,
+                    headers: wit_resp.headers,
+                    body: wit_resp.body,
+                    logs,
+                    snapshot_keys,
+                })
+            }
+        }
+        Err(msg) => Err(RunFail {
+            message: msg,
+            logs,
             snapshot_keys,
         }),
     }

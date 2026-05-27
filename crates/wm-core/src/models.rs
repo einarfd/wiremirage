@@ -119,19 +119,15 @@ pub struct CreateRouteBody {
     pub methods: Vec<String>,
     pub path: String,
     pub language: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings_version: Option<String>,
-    /// Base64-encoded component when `language == "wasm"`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compiled_wasm: Option<String>,
-    /// Source code when `language` is a compiler-supported language.
+    /// Handler source. The only artifact input (ADR-0023); pair with
+    /// `language: "typescript" | "javascript"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
 /// Partial-update payload for `PATCH /__api/routes/{group}/{n}`. Send
 /// only the fields you want to change. `language` is required when
-/// replacing the artifact (either `source` or `compiled_wasm`).
+/// replacing the handler `source`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PatchRouteBody {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,10 +136,6 @@ pub struct PatchRouteBody {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bindings_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compiled_wasm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }

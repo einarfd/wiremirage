@@ -270,7 +270,14 @@ async fn capabilities_endpoint_lists_overview_and_topics() {
         .filter_map(|v| v.as_str())
         .collect();
     for needle in [
-        "overview", "request", "response", "store", "log", "clock", "gotchas",
+        "overview",
+        "request",
+        "response",
+        "store",
+        "log",
+        "clock",
+        "streaming",
+        "gotchas",
     ] {
         assert!(
             topics.contains(&needle),
