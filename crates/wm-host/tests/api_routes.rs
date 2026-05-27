@@ -955,6 +955,199 @@ async fn streaming_response_journals_counts_and_disposition() {
 }
 
 #[tokio::test]
+async fn dry_run_captures_streamed_chunks() {
+    // ADR-0022 slice 3: dry-run of a streaming source handler. Two
+    // things this proves: (a) dry-run works for source/engine routes
+    // at all (it goes through the shared engine, not component bytes),
+    // and (b) a handler that streams via host.responseStream has its
+    // head + concatenated chunks captured in the dry-run response —
+    // no real client, the chunks are collected in-process.
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/dry-stream",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({
+                    status: 202,
+                    headers: [["content-type", "text/event-stream"]],
+                  });
+                  out.write("data: a\n\n");
+                  out.write("data: b\n\n");
+                  out.close();
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+
+    let resp = h
+        .client
+        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .json(&json!({ "method": "GET", "path": "/v1/dry-stream" }))
+        .send()
+        .await
+        .expect("dry-run");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    // Status comes from the streamed head, not the (ignored) return.
+    assert_eq!(body["status"], 202);
+    let bytes: Vec<u8> = body["body"]
+        .as_array()
+        .expect("body array")
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect();
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        "data: a\n\ndata: b\n\n",
+        "dry-run captures the concatenated streamed chunks"
+    );
+}
+
+/// Poll a group's journal until the first entry appears (the streaming
+/// journal write is deferred to a task after the handler finishes).
+async fn poll_first_journal_entry(h: &Harness, group: &str) -> serde_json::Value {
+    for _ in 0..80 {
+        let listed: serde_json::Value = h
+            .client
+            .get(h.url(&format!("/__api/journal/{group}")))
+            .send()
+            .await
+            .expect("journal get")
+            .json()
+            .await
+            .expect("json");
+        if let Some(first) = listed["entries"].as_array().and_then(|a| a.first()) {
+            return first.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("no journal entry appeared for group {group}");
+}
+
+#[tokio::test]
+async fn streaming_handler_error_after_start_keeps_committed_response() {
+    // ADR-0022 slice 3: once a handler commits the head via `start`,
+    // an error afterwards can't un-send it. The status + the chunk
+    // already streamed are what the client gets — the handler can't
+    // retroactively turn a streamed 200 into a 500. (A JS `throw` is
+    // caught by the engine shim, which would otherwise return a 500;
+    // because the 200 head is already on the wire, that 500 is
+    // discarded.)
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/stream-then-throw",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({ status: 200, headers: [] });
+                  out.write("before the throw\n");
+                  throw new Error("too late to change the status");
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap().to_string();
+
+    let resp = reqwest::Client::new()
+        .get(h.url("/v1/stream-then-throw"))
+        .send()
+        .await
+        .expect("get");
+    // Head committed at `start`, not the 500 the shim makes from the
+    // throw.
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("before the throw"),
+        "client saw the streamed chunk, not a 500 body: {body:?}"
+    );
+
+    // The journal entry reflects the committed 200 with a streamed
+    // (not-captured) body, not a 500.
+    let entry = poll_first_journal_entry(&h, &group).await;
+    assert_eq!(entry["response"]["status"], 200);
+    assert_eq!(entry["response"]["body_truncated"], true);
+}
+
+#[tokio::test]
+async fn streaming_handler_sees_client_disconnect() {
+    // ADR-0022 slice 3: when the client disconnects mid-stream, the
+    // next `write-chunk` returns false so the handler can stop, and the
+    // journal records the `client_disconnected` disposition. The
+    // handler records how far it got in route state for the assertion.
+    use futures::StreamExt;
+
+    let h = Harness::start_with_engine().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/stream-cancel",
+            "language": "javascript",
+            "source": r#"
+                function handle(req, route, group) {
+                  const out = host.responseStream({ status: 200, headers: [] });
+                  for (let i = 0; i < 200; i++) {
+                    if (!out.write("chunk " + i + "\n")) { break; }
+                    host.sleep(30);
+                  }
+                  out.close();
+                }
+            "#,
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap().to_string();
+
+    // Read the first chunk, then drop the stream → client disconnect.
+    {
+        let resp = reqwest::Client::new()
+            .get(h.url("/v1/stream-cancel"))
+            .send()
+            .await
+            .expect("get");
+        assert_eq!(resp.status().as_u16(), 200);
+        let mut stream = resp.bytes_stream();
+        let _first = stream.next().await.expect("first chunk").expect("ok");
+        // Drop the stream/response → hyper closes the connection.
+    }
+
+    // The handler keeps sleeping 30ms between writes, so within a few
+    // hundred ms its next write fails and it breaks out; the deferred
+    // journal write then records client_disconnected.
+    let entry = poll_first_journal_entry(&h, &group).await;
+    let err = entry["error"].as_str().unwrap_or_default();
+    let logs_have_disconnect = entry["handler_logs"]
+        .as_array()
+        .map(|a| {
+            a.iter().any(|l| {
+                l["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("[stream]") && m.contains("client_disconnected"))
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        err.contains("client_disconnected") || logs_have_disconnect,
+        "journal records the client disconnect (error={err:?})"
+    );
+}
+
+#[tokio::test]
 async fn patch_route_replaces_source() {
     let h = Harness::start_with_engine().await;
     // Start with the echo handler, then PATCH in the counter handler
