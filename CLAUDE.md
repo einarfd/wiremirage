@@ -25,7 +25,17 @@ AOT sidecar). Source-language
 embedded into the host binary, TypeScript runs through pure-Rust swc
 before storage, dispatch instantiates the shared engine per request
 with the per-route source threaded through a host import. No Node
-sidecar. The
+sidecar. Source handlers can also **stream** responses (ADR-0022):
+`host.responseStream({status,headers})` → `.write(chunk)` / `.close()`
+flushes chunks to the wire incrementally (chunked transfer-encoding)
+for SSE / streaming-LLM / MCP-transport mocks. Engine-internal
+`response-stream` WIT imports (`start`/`write-chunk`/`finish`) on the
+`engine` world; the dispatch `select!`s head-vs-completion and pumps a
+bounded channel with backpressure + client-disconnect signalling.
+Streaming handlers run up to ~5 min (vs the ~30s buffered engine
+epoch); journaled with a `[stream] N chunks, M bytes, <disposition>`
+summary; dry-run collects the chunks in-process. Per-route AOT
+components stay buffered (handler world unchanged). The
 `/__api/*` surface is gated by bearer-token auth (bootstrap via
 `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup); mock traffic to user
 routes stays open by design. Public probes: `GET /__health`,
