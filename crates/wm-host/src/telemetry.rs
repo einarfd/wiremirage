@@ -7,9 +7,10 @@
 //! pure stderr logs.
 //!
 //! Resource attributes default to `service.name=wm-host`,
-//! `service.version=$CARGO_PKG_VERSION`. Operators can override or
-//! extend via the standard `OTEL_SERVICE_NAME` and
-//! `OTEL_RESOURCE_ATTRIBUTES` env vars (handled by the OTel SDK).
+//! `service.version=$CARGO_PKG_VERSION`. Operators override or extend
+//! via the standard `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`
+//! env vars — see [`resource`] for why the precedence is hand-rolled
+//! rather than left to the default builder.
 //!
 //! Returns a `TelemetryGuard` that the caller must hold for the lifetime
 //! of the process and drop on shutdown to flush in-flight spans.
@@ -28,6 +29,7 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::resource::EnvResourceDetector;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -215,14 +217,39 @@ fn build_meter_provider(endpoint: &str) -> anyhow::Result<SdkMeterProvider> {
 
 /// Shared OTel `Resource` for traces + metrics. `service.name` /
 /// `service.version` are the wm defaults; the standard SDK env vars
-/// `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` override / extend.
+/// `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` override them.
+///
+/// Precedence matters and is easy to get wrong: the obvious
+/// `Resource::builder().with_attributes([service.name = "wm-host"])`
+/// does the OPPOSITE of what the doc above promises. `builder()` already
+/// applies the SDK + env detectors, and `with_attributes` merges on top
+/// with the new value winning — so a hardcoded default *clobbers*
+/// `OTEL_SERVICE_NAME`. (Until 2026-05 that bug silently mislabeled the
+/// deployed host as `wm-host` instead of its configured `service.name`,
+/// which a per-service metrics-routing collector then dropped on the
+/// floor.) So we seed the defaults into an EMPTY builder first, layer
+/// the env detector on top (so `OTEL_RESOURCE_ATTRIBUTES` overrides),
+/// then apply `OTEL_SERVICE_NAME` last — giving it top precedence per
+/// the OTel spec.
 fn resource() -> Resource {
-    Resource::builder()
+    let mut builder = Resource::builder_empty()
         .with_attributes([
             KeyValue::new("service.name", SERVICE_NAME),
             KeyValue::new("service.version", SERVICE_VERSION),
         ])
-        .build()
+        .with_detector(Box::new(EnvResourceDetector::new()));
+    if let Some(name) = service_name_override(std::env::var("OTEL_SERVICE_NAME").ok()) {
+        builder = builder.with_attributes([KeyValue::new("service.name", name)]);
+    }
+    builder.build()
+}
+
+/// The `service.name` override from `OTEL_SERVICE_NAME`: the env value
+/// when present and non-empty, else `None` (keep the default). Pulled
+/// out as a pure fn so the precedence is unit-testable without touching
+/// process-global env vars.
+fn service_name_override(env_value: Option<String>) -> Option<String> {
+    env_value.filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -240,6 +267,19 @@ mod tests {
         // fail just because nothing is listening yet.
         let provider = build_tracer_provider("http://127.0.0.1:1").expect("build");
         provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn service_name_override_prefers_nonempty_env() {
+        // The regression guard for the 2026-05 clobber bug: a set,
+        // non-empty OTEL_SERVICE_NAME must override the wm-host default;
+        // unset or empty falls back to the default (None = keep default).
+        assert_eq!(
+            service_name_override(Some("wiremirage".to_string())),
+            Some("wiremirage".to_string())
+        );
+        assert_eq!(service_name_override(None), None);
+        assert_eq!(service_name_override(Some(String::new())), None);
     }
 
     #[test]
