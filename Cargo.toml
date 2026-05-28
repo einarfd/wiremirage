@@ -52,3 +52,12 @@ schemars = { version = "1", features = ["chrono04"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Trim debuginfo on the test profile. wm-host has ~28 integration-test
+# binaries; full debuginfo balloons link time and on-disk size for no
+# real gain — `line-tables-only` keeps backtraces readable (function
+# names + line numbers) but drops the variable/type info a debugger
+# would need. Flip back to `true` locally if you actually attach gdb
+# to an integration test.
+[profile.test]
+debug = "line-tables-only"
