@@ -444,7 +444,23 @@ the 10 ms epoch ticker spawned at host startup), and a
 fires first traps the call; the existing handler-error path
 journals it. `ResourceUsage::fuel_consumed` and
 `memory_peak_bytes` go from 0-placeholders to real numbers
-captured from the store before it drops. Slices 56–58 implemented
+captured from the store before it drops. Slice 47 added
+ADR-0024 OTLP metrics over the existing tracing pipeline:
+`OTEL_EXPORTER_OTLP_ENDPOINT` now toggles BOTH traces and
+metrics through one endpoint; a new `metrics` module
+defines a fixed catalog of `wm.dispatch.*` (duration,
+active_requests, request_body_bytes), `wm.handler.*` (fuel,
+memory, wall, traps_total{reason}), and `wm.streaming.*`
+(head_latency, duration, chunks/bytes, terminations
+{disposition}). Mock traffic only; internal `/__api/*` /
+`/__auth/*` / `/__ui/*` paths intentionally skip recording.
+Cardinality stays bounded by small enums × HTTP method ×
+status — no route / group / user labels by design, with the
+allowlist enforced in the smoke test
+(`metrics_smoke.rs`). Per-route detail is the product surface
+(slice 17 onward), not OTel. README "Observing the host"
+section captures the operator playbook.
+Slices 56–58 implemented
 ADR-0020: a shared `js-engine.wasm` (componentize-js bundle of
 StarlingMonkey + a small dispatch shim) lives under
 `compiler/js-engine/`. Dispatch on `language: "javascript" |

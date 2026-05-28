@@ -26,6 +26,7 @@ use opentelemetry::propagation::{Extractor, Injector};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::EnvFilter;
@@ -71,12 +72,14 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Held for the lifetime of the process. Drop to flush exporters.
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
 }
 
 impl TelemetryGuard {
-    /// Flush exporters and tear down the tracer provider. Idempotent —
-    /// subsequent calls are no-ops. Calling on shutdown ensures the
-    /// last batch of spans actually reaches the collector.
+    /// Flush exporters and tear down the tracer + meter providers.
+    /// Idempotent — subsequent calls are no-ops. Calling on shutdown
+    /// ensures the last batch of spans + metrics actually reaches the
+    /// collector.
     pub fn shutdown(&mut self) {
         if let Some(provider) = self.tracer_provider.take() {
             // SdkTracerProvider::shutdown returns Result; on a clean
@@ -85,6 +88,11 @@ impl TelemetryGuard {
             if let Err(e) = provider.shutdown() {
                 tracing::warn!(error = %e, "OTel tracer provider shutdown failed");
             }
+        }
+        if let Some(provider) = self.meter_provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            tracing::warn!(error = %e, "OTel meter provider shutdown failed");
         }
     }
 }
@@ -118,9 +126,17 @@ pub fn init() -> anyhow::Result<TelemetryGuard> {
 
     let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
 
-    let tracer_provider = match otlp_endpoint.as_deref() {
-        Some(endpoint) if !endpoint.is_empty() => Some(build_tracer_provider(endpoint)?),
-        _ => None,
+    // ADR-0024: one env-var family for both signals. When the endpoint
+    // is set we build BOTH the tracer and meter providers against it;
+    // when unset, neither is installed and the global OTel handles stay
+    // at their no-op defaults so `record_*` calls in the metrics module
+    // remain zero-cost.
+    let (tracer_provider, meter_provider) = match otlp_endpoint.as_deref() {
+        Some(endpoint) if !endpoint.is_empty() => (
+            Some(build_tracer_provider(endpoint)?),
+            Some(build_meter_provider(endpoint)?),
+        ),
+        _ => (None, None),
     };
 
     if let Some(provider) = tracer_provider.as_ref() {
@@ -135,7 +151,7 @@ pub fn init() -> anyhow::Result<TelemetryGuard> {
             .init();
         tracing::info!(
             endpoint = otlp_endpoint.as_deref().unwrap_or(""),
-            "OTel OTLP exporter enabled"
+            "OTel OTLP exporter enabled (traces + metrics)"
         );
     } else {
         tracing_subscriber::registry()
@@ -147,7 +163,14 @@ pub fn init() -> anyhow::Result<TelemetryGuard> {
         );
     }
 
-    Ok(TelemetryGuard { tracer_provider })
+    if let Some(provider) = meter_provider.as_ref() {
+        global::set_meter_provider(provider.clone());
+    }
+
+    Ok(TelemetryGuard {
+        tracer_provider,
+        meter_provider,
+    })
 }
 
 /// Install the W3C Trace Context propagator on the OTel global. Called
@@ -165,17 +188,41 @@ fn build_tracer_provider(endpoint: &str) -> anyhow::Result<SdkTracerProvider> {
         .build()
         .context("build OTLP span exporter")?;
 
-    let resource = Resource::builder()
+    Ok(SdkTracerProvider::builder()
+        .with_resource(resource())
+        .with_batch_exporter(exporter)
+        .build())
+}
+
+fn build_meter_provider(endpoint: &str) -> anyhow::Result<SdkMeterProvider> {
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .context("build OTLP metric exporter")?;
+
+    // The reader drives periodic export on a tokio task. The interval
+    // follows the standard OTel SDK env var
+    // `OTEL_METRIC_EXPORT_INTERVAL` (default 60s), so operators tune
+    // it the same way they tune trace batching.
+    let reader = PeriodicReader::builder(exporter).build();
+
+    Ok(SdkMeterProvider::builder()
+        .with_resource(resource())
+        .with_reader(reader)
+        .build())
+}
+
+/// Shared OTel `Resource` for traces + metrics. `service.name` /
+/// `service.version` are the wm defaults; the standard SDK env vars
+/// `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` override / extend.
+fn resource() -> Resource {
+    Resource::builder()
         .with_attributes([
             KeyValue::new("service.name", SERVICE_NAME),
             KeyValue::new("service.version", SERVICE_VERSION),
         ])
-        .build();
-
-    Ok(SdkTracerProvider::builder()
-        .with_resource(resource)
-        .with_batch_exporter(exporter)
-        .build())
+        .build()
 }
 
 #[cfg(test)]
