@@ -45,6 +45,12 @@ struct Metrics {
     streaming_bytes_total: Counter<u64>,
     streaming_terminations_total: Counter<u64>,
 
+    // MCP per-tool (ADR-0024 follow-up). Keyed by {tool, outcome} — the
+    // tool name is bounded to the known tool set (+ "unknown" for an
+    // unrecognized request), so it's an operator-safe label.
+    mcp_tool_calls_total: Counter<u64>,
+    mcp_tool_duration_ms: Histogram<u64>,
+
     // Internal control-plane HTTP (ADR-0024 slice 2). OTel HTTP-server
     // semconv names — the internal surface has a bounded route set
     // (~60 templates), so `http.route` is a safe label here, unlike the
@@ -133,6 +139,16 @@ fn metrics() -> &'static Metrics {
                 .with_unit("{stream}")
                 .with_description("Streams completed, by disposition.")
                 .build(),
+            mcp_tool_calls_total: meter
+                .u64_counter("wm.mcp.tool.calls_total")
+                .with_unit("{call}")
+                .with_description("MCP tool invocations, by tool + outcome.")
+                .build(),
+            mcp_tool_duration_ms: meter
+                .u64_histogram("wm.mcp.tool.duration_ms")
+                .with_unit("ms")
+                .with_description("MCP tool invocation wall time, by tool.")
+                .build(),
             internal_request_duration_s: meter
                 .f64_histogram("http.server.request.duration")
                 .with_unit("s")
@@ -197,6 +213,23 @@ impl Drop for InFlightGuard {
     fn drop(&mut self) {
         metrics().dispatch_active.add(-1, &self.attrs);
     }
+}
+
+/// Record an MCP tool invocation. `tool` MUST already be bounded to the
+/// known tool set (or "unknown") by the caller — never pass a raw
+/// client-supplied name straight through, or the label space is
+/// unbounded. `outcome` is `ok` / `error`.
+pub fn record_mcp_tool(tool: &str, outcome: &str, duration_ms: u64) {
+    let m = metrics();
+    let tool_kv = KeyValue::new("wm.mcp.tool", tool.to_owned());
+    m.mcp_tool_calls_total.add(
+        1,
+        &[
+            tool_kv.clone(),
+            KeyValue::new("wm.mcp.outcome", outcome.to_owned()),
+        ],
+    );
+    m.mcp_tool_duration_ms.record(duration_ms, &[tool_kv]);
 }
 
 /// Record handler-resource histograms after the handler has finished.

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use rmcp::ServerHandler;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::tool_handler;
+use tracing::Instrument;
 
 use crate::AppState;
 
@@ -44,5 +45,35 @@ impl WmMcpServer {
     }
 }
 
+// `#[tool_handler]` generates `call_tool` ONLY if the impl doesn't
+// already define one (it checks `has_method("call_tool", ...)`). We
+// define our own so every tool invocation gets a `mcp.tool` span and a
+// `wm.mcp.tool.*` metric, then hand off to the exact dispatch the macro
+// would have used (`tool_router.call(tcc)`). list_tools / get_tool /
+// get_info are still macro-generated.
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for WmMcpServer {}
+impl ServerHandler for WmMcpServer {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        // The router IS the cardinality allowlist: a name it routes is a
+        // registered tool (bounded set). An unrecognized name (client
+        // typo / probing) collapses to "unknown" so the metric/span label
+        // space can't be inflated by callers. ADR-0024.
+        let tool = if self.tool_router.has_route(request.name.as_ref()) {
+            request.name.to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        let span = tracing::info_span!("mcp.tool", "wm.mcp.tool" = tool.as_str());
+        let started = std::time::Instant::now();
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).instrument(span).await;
+        let outcome = if result.is_ok() { "ok" } else { "error" };
+        crate::metrics::record_mcp_tool(&tool, outcome, started.elapsed().as_millis() as u64);
+        result
+    }
+}

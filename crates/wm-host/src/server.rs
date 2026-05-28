@@ -11,6 +11,7 @@ use axum::routing::{any, get};
 use http::header;
 use opentelemetry::global;
 use serde_json::json;
+use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::Runtime;
@@ -284,12 +285,20 @@ fn surface_for_route(route: &str) -> Option<&'static str> {
     }
 }
 
-/// Middleware recording the `http.server.*` control-plane metrics. Reads
-/// the route *template* from `MatchedPath` (never the resolved path, so
-/// path-param values can't explode `http.route` cardinality), derives
-/// the bounded `wm.surface` label, and records duration + in-flight +
-/// body size around the inner handler. Requests whose surface is `None`
-/// (probes) pass through unrecorded.
+/// Middleware for the control-plane (API / UI / auth) surfaces. Records
+/// the `http.server.*` metrics AND opens a request span so internal
+/// traffic shows up in traces with per-route latency — the analogue of
+/// arkiv's framework-level request spans, and what lets a trace backend
+/// answer "p95 latency for `/__api/groups/{group}`" that the routeless
+/// aggregate metrics can't.
+///
+/// The route *template* comes from `MatchedPath` (never the resolved
+/// path, so path-param values can't explode `http.route` cardinality);
+/// `wm.surface` is the bounded api/ui/auth enum. Requests whose surface
+/// is `None` (the health/ready probes) pass through untouched. Static
+/// assets get the metric but NOT a span — they're high-volume and
+/// low-diagnostic-value, and per-asset spans would bloat trace storage
+/// (same rationale as arkiv excluding its NiceGUI static traffic).
 async fn internal_http_metrics(req: Request, next: Next) -> Response {
     let Some(route) = req
         .extensions()
@@ -314,17 +323,36 @@ async fn internal_http_metrics(req: Request, next: Next) -> Response {
         crate::metrics::record_internal_request_body_bytes(surface, &method, len);
     }
 
-    let _in_flight = crate::metrics::internal_in_flight(surface, &method);
-    let started = std::time::Instant::now();
-    let resp = next.run(req).await;
-    crate::metrics::record_internal_http(
-        surface,
-        &method,
-        &route,
-        resp.status().as_u16(),
-        started.elapsed().as_secs_f64(),
-    );
-    resp
+    // Static-asset routes get metrics but no span (volume control).
+    let span = if route.starts_with("/__ui/static") {
+        tracing::Span::none()
+    } else {
+        tracing::info_span!(
+            "http.server.request",
+            http.request.method = %method,
+            http.route = %route,
+            wm.surface = surface,
+            http.response.status_code = tracing::field::Empty,
+        )
+    };
+
+    async move {
+        let _in_flight = crate::metrics::internal_in_flight(surface, &method);
+        let started = std::time::Instant::now();
+        let resp = next.run(req).await;
+        let status = resp.status().as_u16();
+        tracing::Span::current().record("http.response.status_code", status);
+        crate::metrics::record_internal_http(
+            surface,
+            &method,
+            &route,
+            status,
+            started.elapsed().as_secs_f64(),
+        );
+        resp
+    }
+    .instrument(span)
+    .await
 }
 
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
