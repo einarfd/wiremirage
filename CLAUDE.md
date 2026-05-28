@@ -473,7 +473,23 @@ recorded. Slice 2 also enriched the dispatch span with
 (buffered) and `streaming.head_latency_ms` (streaming) so
 per-route resource questions are trace queries rather than
 high-cardinality metric labels. README "Observing the host"
-section captures the operator playbook.
+section captures the operator playbook. A follow-up added two
+more obs pieces (ADR-0024 amendment): MCP per-tool
+instrumentation — a hand-written `call_tool` on the
+`ServerHandler` impl (the `#[tool_handler]` macro only generates
+one if absent) wraps the same `tool_router.call` dispatch with an
+`mcp.tool` span + `wm.mcp.tool.{calls_total,duration_ms}` metrics,
+tool label bounded by `tool_router.has_route` (unknown →
+`"unknown"`); and control-plane request spans — the
+`internal_http_metrics` middleware now also opens an
+`http.server.request` span (method / route-template / surface /
+status) so API/UI/auth traffic appears in traces with per-route
+latency (the arkiv-parity piece that lets a trace backend answer
+"p95 for `/__api/groups/{group}`"), static assets excluded from
+spans for volume. The histogram aggregation is explicit-bucket,
+not exponential (ADR-0024 amended): consumed for sum/count
+(rate/mean) only — Logfire stores no sum/count for exponential
+histograms, and metric-side percentiles aren't relied upon.
 Slices 56–58 implemented
 ADR-0020: a shared `js-engine.wasm` (componentize-js bundle of
 StarlingMonkey + a small dispatch shim) lives under
