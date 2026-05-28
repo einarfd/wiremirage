@@ -80,6 +80,9 @@ valkey-tests = []
 hyper.workspace = true
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
+# `testing` exposes `InMemoryMetricExporter`, used by the ADR-0024
+# metrics smoke test. Dev-only feature add on top of the runtime dep.
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # rmcp client features for tier-2 MCP integration tests. Pull just enough
 # to drive a streamable-HTTP client at /__api/mcp from inside our axum
 # in-process harness.

@@ -21,6 +21,7 @@ pub mod log;
 pub mod login_throttle;
 pub mod mcp;
 pub mod mcp_oauth;
+pub mod metrics;
 pub mod pattern;
 pub mod registry;
 pub mod route_table;

@@ -405,6 +405,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     // reserved prefix (`/__api/typo`, `/__auth/typo`) stays JSON —
     // those surfaces are consumed by scripts and agents that want a
     // parseable error.
+    //
+    // ADR-0024: no metrics recorded here — the `wm.*` metric family is
+    // mock-traffic-only, and a typo under a reserved prefix is
+    // internal-shaped. Skipped intentionally.
     if is_reserved_path(path) {
         span.record("outcome", "reserved_path_404");
         let mut resp = if path.starts_with("/__ui/") {
@@ -415,6 +419,14 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         inject_response_trace_id(&trace_id, resp.headers_mut());
         return Ok(resp);
     }
+
+    // ADR-0024: claim a mock-dispatch in-flight slot now that we've
+    // ruled out internal-prefix traffic. The guard decrements on drop,
+    // including on every early-return below; for streaming dispatches
+    // we transfer ownership into the streaming journal task so the
+    // gauge tracks the request for as long as the stream is pumping.
+    let mut in_flight = Some(crate::metrics::dispatch_in_flight(method.as_str()));
+    crate::metrics::record_request_body_bytes(method.as_str(), body_bytes.len() as u64);
 
     let matched = match state.routes.find_match(method.as_str(), path) {
         Some(m) => m,
@@ -466,6 +478,12 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             }) {
                 tracing::warn!(error = %e, "failed to record unmatched journal entry");
             }
+            crate::metrics::record_dispatch(
+                method.as_str(),
+                404,
+                "unmatched_404",
+                started.elapsed().as_millis() as u64,
+            );
             let mut resp = not_found_response("no route matched");
             inject_response_trace_id(&trace_id, resp.headers_mut());
             return Ok(resp);
@@ -633,7 +651,28 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                     span.record("outcome", "streaming");
                     let status = head.status;
                     let headers = head.headers.clone();
+                    // ADR-0024: TTFB and the dispatch-metric record
+                    // both stamp NOW (head delivery is the dispatch
+                    // boundary for streaming; the chunk pump that
+                    // follows lives on the streaming clock).
+                    let head_latency_ms = started.elapsed().as_millis() as u64;
+                    crate::metrics::record_streaming_head(head_latency_ms);
+                    crate::metrics::record_dispatch(
+                        method.as_str(),
+                        status,
+                        "streaming",
+                        head_latency_ms,
+                    );
+                    let head_delivered_at = std::time::Instant::now();
                     let resp = build_streaming_response(head, chunk_rx, &trace_id);
+                    // Hand the in-flight slot off to the streaming
+                    // task — `wm.dispatch.active_requests` should
+                    // count this dispatch for as long as the stream
+                    // is actually pumping bytes, not just until the
+                    // head goes out.
+                    let in_flight = in_flight
+                        .take()
+                        .expect("in-flight slot present on streaming path");
                     spawn_streaming_journal(
                         state.clone(),
                         join,
@@ -642,8 +681,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                             matched: matched.clone(),
                             request: request_envelope,
                             started,
+                            head_delivered_at,
                             status,
                             headers,
+                            in_flight,
                         },
                     );
                     return Ok(resp);
@@ -692,6 +733,12 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                     original_body_size: body.len(),
                 };
                 tracing::error!(error = %e, "handler invocation failed");
+                // ADR-0024: bucket the trap by reason. Slice 1 uses a
+                // string match on the formatted error — adequate for
+                // operator-side aggregation, and trivially upgradable
+                // to `wasmtime::Trap` downcasting later if the
+                // pattern-match becomes brittle.
+                crate::metrics::record_handler_trap(crate::metrics::classify_trap(e));
                 (
                     envelope,
                     Vec::new(),
@@ -703,6 +750,23 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         };
 
     span.record("outcome", outcome_label);
+
+    // ADR-0024: record the dispatch + handler-resource metrics. The
+    // `outcome_label` and `wm.dispatch.outcome` attribute use the same
+    // enum as the span field, so an operator filtering by outcome on a
+    // metric can pivot to spans with the same value.
+    crate::metrics::record_dispatch(
+        method.as_str(),
+        response_envelope.status,
+        outcome_label,
+        duration_ms,
+    );
+    crate::metrics::record_handler_resources(
+        outcome_label,
+        resources.fuel_consumed,
+        resources.memory_peak_bytes,
+        resources.wall_clock_ms,
+    );
 
     // Best-effort journal write: a failure here is logged but doesn't
     // change what the SUT sees.
@@ -1006,8 +1070,17 @@ struct StreamingJournalCtx {
     matched: MatchedRoute,
     request: RequestEnvelope,
     started: std::time::Instant,
+    /// Instant at which the response head reached the wire — used to
+    /// compute `wm.streaming.duration_ms` (post-TTFB) separately from
+    /// `wm.streaming.head_latency_ms`. ADR-0024.
+    head_delivered_at: std::time::Instant,
     status: u16,
     headers: Vec<(String, String)>,
+    /// In-flight slot owned by the streaming dispatch. Dropped when
+    /// the streaming-journal task finishes so `wm.dispatch.active_requests`
+    /// tracks the live stream, not just the time to head delivery.
+    /// ADR-0024.
+    in_flight: crate::metrics::InFlightGuard,
 }
 
 /// Spawn the journal write for a streamed response. Runs after the
@@ -1020,6 +1093,21 @@ fn spawn_streaming_journal(
     ctx: StreamingJournalCtx,
 ) {
     tokio::spawn(async move {
+        // `in_flight` is owned by this task — moved out of `ctx` so it
+        // drops only at task end, even on the early-return error path
+        // below. That's intentional: the dispatch is "in flight" for
+        // as long as the streaming task is alive.
+        let StreamingJournalCtx {
+            trace_id,
+            matched,
+            request,
+            started,
+            head_delivered_at,
+            status,
+            headers,
+            in_flight,
+        } = ctx;
+        let _in_flight = in_flight;
         let (result, logs, mut resources, summary) = match join.await {
             Ok(o) => o,
             Err(e) => {
@@ -1027,7 +1115,7 @@ fn spawn_streaming_journal(
                 return;
             }
         };
-        let duration_ms = ctx.started.elapsed().as_millis() as u64;
+        let duration_ms = started.elapsed().as_millis() as u64;
         resources.wall_clock_ms = duration_ms;
         let mut handler_log_entries: Vec<HandlerLogEntry> = logs
             .into_iter()
@@ -1058,23 +1146,45 @@ fn spawn_streaming_journal(
         if error_msg.is_none() && disposition != "finished" {
             error_msg = Some(format!("stream {disposition} after {chunks} chunks"));
         }
+        // ADR-0024: record streaming-completion metrics + the same
+        // handler-resource histograms the buffered path records.
+        // Outcome bucket for resources is `ok` on a clean stream,
+        // `handler_error` on any trap.
+        let resource_outcome = if error_msg.is_some() {
+            "handler_error"
+        } else {
+            "ok"
+        };
+        crate::metrics::record_handler_resources(
+            resource_outcome,
+            resources.fuel_consumed,
+            resources.memory_peak_bytes,
+            resources.wall_clock_ms,
+        );
+        let streaming_duration_ms = head_delivered_at.elapsed().as_millis() as u64;
+        crate::metrics::record_streaming_completion(
+            chunks,
+            bytes,
+            disposition,
+            streaming_duration_ms,
+        );
         let response = ResponseEnvelope {
-            status: ctx.status,
-            headers: ctx.headers,
+            status,
+            headers,
             body: Vec::new(),
             body_truncated: true,
             original_body_size: bytes as usize,
         };
         let entry = NewJournalEntry {
-            trace_id: ctx.trace_id,
-            group_id: ctx.matched.route.group_id.clone(),
-            group_name: ctx.matched.route.group_name.clone(),
-            route_id: ctx.matched.route.id.clone(),
-            route_number: ctx.matched.route.number,
-            matched_pattern: ctx.matched.matched_pattern.clone(),
-            request: ctx.request,
+            trace_id,
+            group_id: matched.route.group_id.clone(),
+            group_name: matched.route.group_name.clone(),
+            route_id: matched.route.id.clone(),
+            route_number: matched.route.number,
+            matched_pattern: matched.matched_pattern.clone(),
+            request,
             response,
-            path_params: ctx.matched.path_params.clone(),
+            path_params: matched.path_params.clone(),
             query: vec![],
             handler_logs: handler_log_entries,
             duration_ms,
@@ -1086,8 +1196,8 @@ fn spawn_streaming_journal(
             tracing::warn!(error = %e, "failed to record streaming journal entry");
         }
         if let Err(e) = state.routes().registry().record_route_hit(
-            &ctx.matched.route.group_id,
-            &ctx.matched.route.id,
+            &matched.route.group_id,
+            &matched.route.id,
             chrono::Utc::now(),
         ) {
             tracing::warn!(error = %e, "activity tracking failed (streaming)");
@@ -1095,7 +1205,7 @@ fn spawn_streaming_journal(
         if let Err(e) = state
             .routes()
             .registry()
-            .refresh_group_if_sliding(&ctx.matched.route.group_id)
+            .refresh_group_if_sliding(&matched.route.group_id)
         {
             tracing::warn!(error = %e, "sliding TTL bump failed (streaming)");
         }
