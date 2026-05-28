@@ -452,13 +452,27 @@ defines a fixed catalog of `wm.dispatch.*` (duration,
 active_requests, request_body_bytes), `wm.handler.*` (fuel,
 memory, wall, traps_total{reason}), and `wm.streaming.*`
 (head_latency, duration, chunks/bytes, terminations
-{disposition}). Mock traffic only; internal `/__api/*` /
-`/__auth/*` / `/__ui/*` paths intentionally skip recording.
-Cardinality stays bounded by small enums × HTTP method ×
+{disposition}). Mock traffic only; mock-metric
+cardinality stays bounded by small enums × HTTP method ×
 status — no route / group / user labels by design, with the
 allowlist enforced in the smoke test
-(`metrics_smoke.rs`). Per-route detail is the product surface
-(slice 17 onward), not OTel. README "Observing the host"
+(`metrics_smoke.rs`). Per-route mock detail is the product
+surface (slice 17 onward) for at-a-glance counts, and traces
+for distributional slicing — not mock metrics. Slice 2 added
+the control-plane HTTP metrics: a `route_layer` middleware on
+the internal sub-routers (api / auth / ui) records OTel
+HTTP-semconv `http.server.{request.duration,active_requests,
+request.body.size}` keyed by `{method, status, http.route,
+wm.surface}` — `http.route` is the matched *template* (via
+`MatchedPath`, so path params never explode cardinality), and
+the internal route set is bounded by code so the route label
+is operator-safe. The MCP streamable endpoint + the
+`/__health` / `/__ready` probes are intentionally not
+recorded. Slice 2 also enriched the dispatch span with
+`handler.fuel_consumed` / `memory_peak_bytes` / `wall_ms`
+(buffered) and `streaming.head_latency_ms` (streaming) so
+per-route resource questions are trace queries rather than
+high-cardinality metric labels. README "Observing the host"
 section captures the operator playbook.
 Slices 56–58 implemented
 ADR-0020: a shared `js-engine.wasm` (componentize-js bundle of

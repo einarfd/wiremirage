@@ -322,12 +322,22 @@ traced the request.
 
 #### What to watch (operator playbook)
 
-The metrics catalog is mock-traffic-only (the `/__api/*`, `/__auth/*`,
-`/__ui/*` control-plane surface is intentionally out of scope; control-plane
-visibility is the CLI / UI / journal). Each metric below is keyed only by
-small enums + HTTP method + status — never by route, group, user, or trace
-ID. Per-route detail lives on the route record (`hits_total`,
-`last_hit_at`) and is observable through the UI / `wm` CLI / MCP.
+Metrics split by audience. The **mock-traffic** families (`wm.dispatch.*`,
+`wm.handler.*`, `wm.streaming.*`) are keyed only by small enums + HTTP
+method + status — never by route, group, user, or trace ID, because a
+mock server's route count is set by users and would blow up a metric
+series budget. The **control-plane** family (`http.server.*`) covers the
+internal API / UI / auth surfaces, where the route set is bounded by code
+(~60 templates) so `http.route` is safe to label.
+
+For **per-route** mock questions ("p95 latency / fuel for `/v1/charges`"),
+query **traces**, not metrics — the dispatch span carries
+`route.matched_pattern`, `route.id`, `outcome`, and (slice 2)
+`handler.fuel_consumed` / `handler.memory_peak_bytes` / `handler.wall_ms`
+/ `streaming.head_latency_ms`. Trace backends are built to slice by those
+high-cardinality dimensions; metrics aren't. The at-a-glance "did it fire
+/ when last / how many times" lives on the route record (`hits_total`,
+`last_hit_at`) via the UI / `wm` CLI / MCP.
 
 **Mock dispatch:**
 
@@ -369,6 +379,25 @@ ID. Per-route detail lives on the route record (`hits_total`,
   `client_disconnected` means consumers are abandoning streams** —
   inspect the response budget, the network path, or whatever feature is
   cancelling on the client side.
+
+**Control plane (API / UI / auth):**
+
+- `http.server.request.duration` (histogram, **seconds** — OTel HTTP
+  semconv) — by `http.request.method`, `http.response.status_code`,
+  `http.route` (the route *template*, e.g. `/__api/groups/{group}`), and
+  `wm.surface` ∈ `api` / `auth` / `ui`. **Is the control plane itself
+  healthy?** Slice by `wm.surface` for an API-vs-UI breakdown, by
+  `http.route` to find a slow endpoint.
+- `http.server.active_requests` (UpDownCounter) — by `http.request.method`,
+  `wm.surface`. In-flight control-plane requests.
+- `http.server.request.body.size` (histogram, bytes) — by
+  `http.request.method`, `wm.surface`. From `Content-Length`; absent
+  for chunked bodies.
+
+The `/__health` and `/__ready` probes are deliberately **not** recorded
+(high frequency, low value). The MCP streamable endpoint
+(`/__api/mcp`) isn't HTTP-instrumented yet — per-tool MCP metrics are a
+separate slice.
 
 ### MCP transport (optional, required for production)
 
