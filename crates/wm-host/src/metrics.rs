@@ -44,6 +44,17 @@ struct Metrics {
     streaming_chunks_total: Counter<u64>,
     streaming_bytes_total: Counter<u64>,
     streaming_terminations_total: Counter<u64>,
+
+    // Internal control-plane HTTP (ADR-0024 slice 2). OTel HTTP-server
+    // semconv names — the internal surface has a bounded route set
+    // (~60 templates), so `http.route` is a safe label here, unlike the
+    // mock surface. Keyed by {method, status, http.route, wm.surface}.
+    // `http.server.request.duration` is in SECONDS per semconv (the
+    // `wm.dispatch.duration_ms` mock metric stays ms — different
+    // namespace, different convention).
+    internal_request_duration_s: Histogram<f64>,
+    internal_active_requests: UpDownCounter<i64>,
+    internal_request_body_bytes: Histogram<u64>,
 }
 
 fn metrics() -> &'static Metrics {
@@ -109,6 +120,23 @@ fn metrics() -> &'static Metrics {
                 .u64_counter("wm.streaming.terminations_total")
                 .with_unit("{stream}")
                 .with_description("Streams completed, by disposition.")
+                .build(),
+            internal_request_duration_s: meter
+                .f64_histogram("http.server.request.duration")
+                .with_unit("s")
+                .with_description(
+                    "Control-plane (API/UI/auth) HTTP request duration, by surface + route.",
+                )
+                .build(),
+            internal_active_requests: meter
+                .i64_up_down_counter("http.server.active_requests")
+                .with_unit("{request}")
+                .with_description("Concurrent control-plane HTTP requests in flight.")
+                .build(),
+            internal_request_body_bytes: meter
+                .u64_histogram("http.server.request.body.size")
+                .with_unit("By")
+                .with_description("Control-plane HTTP request body size (from Content-Length).")
                 .build(),
         }
     })
@@ -199,6 +227,66 @@ pub fn record_streaming_completion(chunks: u64, bytes: u64, disposition: &str, d
     m.streaming_chunks_total.add(chunks, &[]);
     m.streaming_bytes_total.add(bytes, &[]);
     m.streaming_terminations_total.add(1, &disp);
+}
+
+/// Record a control-plane HTTP request completion (ADR-0024 slice 2).
+/// `route` is the matched axum route template (e.g.
+/// `/__api/groups/{group}`), NOT the resolved path — path-param values
+/// would explode cardinality. `surface` is one of the bounded
+/// [`Surface`] labels. `duration_s` is in seconds per HTTP semconv.
+pub fn record_internal_http(
+    surface: &str,
+    method: &str,
+    route: &str,
+    status: u16,
+    duration_s: f64,
+) {
+    metrics().internal_request_duration_s.record(
+        duration_s,
+        &[
+            KeyValue::new("wm.surface", surface.to_owned()),
+            KeyValue::new("http.request.method", method.to_owned()),
+            KeyValue::new("http.route", route.to_owned()),
+            KeyValue::new("http.response.status_code", status as i64),
+        ],
+    );
+}
+
+/// Record a control-plane request body size (from Content-Length).
+/// Keyed by surface + method only — body size shouldn't multiply by
+/// route. Skip the call entirely when Content-Length is absent rather
+/// than record a misleading zero.
+pub fn record_internal_request_body_bytes(surface: &str, method: &str, bytes: u64) {
+    metrics().internal_request_body_bytes.record(
+        bytes,
+        &[
+            KeyValue::new("wm.surface", surface.to_owned()),
+            KeyValue::new("http.request.method", method.to_owned()),
+        ],
+    );
+}
+
+/// Acquire an in-flight slot for a control-plane request, keyed by
+/// surface + method. Drops the slot when the guard goes out of scope.
+pub fn internal_in_flight(surface: &str, method: &str) -> InternalInFlightGuard {
+    let attrs = vec![
+        KeyValue::new("wm.surface", surface.to_owned()),
+        KeyValue::new("http.request.method", method.to_owned()),
+    ];
+    metrics().internal_active_requests.add(1, &attrs);
+    InternalInFlightGuard { attrs }
+}
+
+/// Drop-guard for `http.server.active_requests`. Decrements on drop,
+/// including the response-stream-still-draining and unwind paths.
+pub struct InternalInFlightGuard {
+    attrs: Vec<KeyValue>,
+}
+
+impl Drop for InternalInFlightGuard {
+    fn drop(&mut self) {
+        metrics().internal_active_requests.add(-1, &self.attrs);
+    }
 }
 
 /// Classify a handler error into one of the trap-reason buckets the ADR

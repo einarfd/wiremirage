@@ -3,8 +3,9 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use http::header;
@@ -244,16 +245,86 @@ impl AppState {
 /// auth layer.
 pub fn router(state: AppState) -> Router {
     let mcp = crate::mcp::router(state.clone());
-    let ui = crate::ui::router(state.clone());
+    // ADR-0024 slice 2: control-plane HTTP metrics. `route_layer` runs
+    // after routing (so `MatchedPath` is populated) and does NOT wrap
+    // the fallback — mock dispatch keeps its own `wm.dispatch.*` metrics
+    // and is never double-counted here. The same middleware layers onto
+    // the UI sub-router, which merges in after `with_state`. The MCP
+    // streamable service is intentionally not instrumented at the HTTP
+    // boundary (per-tool metrics are a deferred slice).
+    let ui =
+        crate::ui::router(state.clone()).route_layer(middleware::from_fn(internal_http_metrics));
     crate::api::router()
         .merge(crate::auth_api::router(state.clone()))
         .merge(crate::mcp_oauth::router(state.clone()))
         .route("/__health", get(health))
         .route("/__ready", get(ready))
+        .route_layer(middleware::from_fn(internal_http_metrics))
         .fallback(any(dispatch))
         .with_state(state)
         .merge(mcp)
         .merge(ui)
+}
+
+/// Map a matched axum route template to its control-plane surface label,
+/// or `None` for paths we don't record (the health/ready probes — high
+/// frequency, low operator value). The label space is a fixed enum so
+/// `wm.surface` stays bounded. ADR-0024 slice 2.
+fn surface_for_route(route: &str) -> Option<&'static str> {
+    if route.starts_with("/__api/mcp") {
+        Some("mcp")
+    } else if route.starts_with("/__api") {
+        Some("api")
+    } else if route.starts_with("/__ui") {
+        Some("ui")
+    } else if route.starts_with("/__auth") || route.starts_with("/.well-known") {
+        Some("auth")
+    } else {
+        None
+    }
+}
+
+/// Middleware recording the `http.server.*` control-plane metrics. Reads
+/// the route *template* from `MatchedPath` (never the resolved path, so
+/// path-param values can't explode `http.route` cardinality), derives
+/// the bounded `wm.surface` label, and records duration + in-flight +
+/// body size around the inner handler. Requests whose surface is `None`
+/// (probes) pass through unrecorded.
+async fn internal_http_metrics(req: Request, next: Next) -> Response {
+    let Some(route) = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| m.as_str().to_owned())
+    else {
+        return next.run(req).await;
+    };
+    let Some(surface) = surface_for_route(&route) else {
+        return next.run(req).await;
+    };
+    let method = req.method().as_str().to_owned();
+
+    // Body size from Content-Length when present — recording a 0 for
+    // chunked/absent bodies would skew the histogram, so skip instead.
+    if let Some(len) = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        crate::metrics::record_internal_request_body_bytes(surface, &method, len);
+    }
+
+    let _in_flight = crate::metrics::internal_in_flight(surface, &method);
+    let started = std::time::Instant::now();
+    let resp = next.run(req).await;
+    crate::metrics::record_internal_http(
+        surface,
+        &method,
+        &route,
+        resp.status().as_u16(),
+        started.elapsed().as_secs_f64(),
+    );
+    resp
 }
 
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -343,6 +414,13 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
 // values is deliberately omitted so OTel attribute cardinality stays
 // finite. `route.id` is recorded after a match so a span can be located
 // by route ULID, but it's only on matched-route spans.
+//
+// ADR-0024 slice 2: the per-route resource attributes (fuel / memory /
+// wall on the buffered path, head-latency on the streaming path) ride
+// the span rather than a labeled metric — traces are exemplar-shaped,
+// so the route-level cardinality that's forbidden on metrics is exactly
+// what trace backends are built to slice. "p95 fuel for /v1/charges" is
+// a span query; the aggregate `wm.handler.*` histograms stay routeless.
 #[tracing::instrument(
     name = "dispatch",
     skip_all,
@@ -351,6 +429,10 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
         route.matched_pattern = tracing::field::Empty,
         route.id = tracing::field::Empty,
         outcome = tracing::field::Empty,
+        handler.fuel_consumed = tracing::field::Empty,
+        handler.memory_peak_bytes = tracing::field::Empty,
+        handler.wall_ms = tracing::field::Empty,
+        streaming.head_latency_ms = tracing::field::Empty,
     ),
 )]
 async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Response> {
@@ -663,6 +745,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                         "streaming",
                         head_latency_ms,
                     );
+                    // Per-route TTFB on the span (ADR-0024 slice 2) — the
+                    // one resource number known before the dispatch span
+                    // closes on the streaming path.
+                    span.record("streaming.head_latency_ms", head_latency_ms);
                     let head_delivered_at = std::time::Instant::now();
                     let resp = build_streaming_response(head, chunk_rx, &trace_id);
                     // Hand the in-flight slot off to the streaming
@@ -767,6 +853,13 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         resources.memory_peak_bytes,
         resources.wall_clock_ms,
     );
+    // ADR-0024 slice 2: per-route resource detail on the span (see the
+    // instrument-macro comment). Buffered path only — the streaming path
+    // records head-latency at head-emit instead, since fuel/memory/wall
+    // aren't known until after the dispatch span has closed.
+    span.record("handler.fuel_consumed", resources.fuel_consumed);
+    span.record("handler.memory_peak_bytes", resources.memory_peak_bytes);
+    span.record("handler.wall_ms", resources.wall_clock_ms);
 
     // Best-effort journal write: a failure here is logged but doesn't
     // change what the SUT sees.
