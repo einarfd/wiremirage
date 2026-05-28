@@ -60,6 +60,18 @@ struct Metrics {
 fn metrics() -> &'static Metrics {
     METRICS.get_or_init(|| {
         let meter = global::meter(METER_NAME);
+        // Histograms use the SDK-default explicit-bucket aggregation (NOT
+        // exponential — ADR-0024's original text said exponential; see its
+        // 2026-05-28 amendment for why explicit-bucket is the deliberate
+        // keep). They're consumed for `sum`/`count` only — rate and mean —
+        // because Logfire stores no `sum`/`count` for exponential
+        // histograms, and the dashboard's control-plane panels need them.
+        // Metric-side percentiles are NOT relied upon (mock percentiles
+        // come from the `dispatch` span; the control plane is mean-by-
+        // design). The default bucket bounds don't resolve our value ranges
+        // (seconds / ms / fuel ticks / bytes), so the distributions aren't
+        // meaningful — per-instrument bounds are a deferred change for if a
+        // consumer ever needs metric-side distributions.
         Metrics {
             dispatch_duration_ms: meter
                 .u64_histogram("wm.dispatch.duration_ms")
