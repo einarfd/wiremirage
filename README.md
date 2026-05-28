@@ -305,16 +305,70 @@ reverse proxy.
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — URL of an OTLP/gRPC collector (e.g.
   `http://localhost:4317`). When unset, the host logs to stderr only; when
-  set, spans are exported in addition. No localhost fallback if the env var
-  is missing — the absence of an endpoint is taken as "don't try."
+  set, **both traces and metrics** are exported. No localhost fallback if
+  the env var is missing — the absence of an endpoint is taken as "don't
+  try." (ADR-0017 for traces, ADR-0024 for metrics.)
 - `OTEL_SERVICE_NAME` — default `wm-host`. Override to disambiguate multiple
   WireMirage instances in the same backend.
 - `OTEL_RESOURCE_ATTRIBUTES` — standard OTel SDK behavior; comma-separated
   `key=value` pairs (e.g. `deployment.environment=prod,service.version=abc123`).
+- `OTEL_METRIC_EXPORT_INTERVAL` — standard OTel SDK env var, milliseconds
+  between metric pushes. Default 60000 (60 s). Lower it for a tighter
+  observation loop during latency-ramp experiments.
 
 Inbound W3C `traceparent` is extracted on every request and used as the
 dispatch span's parent so the host's spans chain under whatever upstream
 traced the request.
+
+#### What to watch (operator playbook)
+
+The metrics catalog is mock-traffic-only (the `/__api/*`, `/__auth/*`,
+`/__ui/*` control-plane surface is intentionally out of scope; control-plane
+visibility is the CLI / UI / journal). Each metric below is keyed only by
+small enums + HTTP method + status — never by route, group, user, or trace
+ID. Per-route detail lives on the route record (`hits_total`,
+`last_hit_at`) and is observable through the UI / `wm` CLI / MCP.
+
+**Mock dispatch:**
+
+- `wm.dispatch.duration_ms` (histogram, ms) — by `http.request.method`,
+  `http.response.status_code`, `wm.dispatch.outcome` ∈ `ok` /
+  `handler_error` / `unmatched_404` / `streaming`. **The latency signal.**
+  For streaming dispatches this is time-to-head (TTFB); the post-head
+  pumping clock is `wm.streaming.duration_ms`.
+- `wm.dispatch.active_requests` (UpDownCounter) — by `http.request.method`.
+  Concurrent mock dispatches. **Rising in step with `duration_ms` is the
+  cascading-failure signature** — pin both on the same dashboard.
+- `wm.dispatch.request_body_bytes` (histogram, bytes) — by
+  `http.request.method`. Spot-check for oversized inputs that the 10 MiB
+  cap is letting through too generously.
+
+**Handler resources (wasm sandbox):**
+
+- `wm.handler.fuel_consumed` (histogram) — by `wm.dispatch.outcome`. Fuel
+  ticks per handler call. **p99 climbing toward the cap is your early
+  warning** that handlers are running close to budget.
+- `wm.handler.memory_peak_bytes` (histogram, bytes) — same key. 64 MiB
+  is the per-call cap (ADR-0002).
+- `wm.handler.wall_ms` (histogram, ms) — same key. Handler-only wall
+  time, separate from dispatch overhead.
+- `wm.handler.traps_total` (counter) — by `wm.trap.reason` ∈ `fuel` /
+  `epoch` / `memory` / `other`. **Non-zero means the sandbox is firing
+  — alert on this.**
+
+**Streaming:**
+
+- `wm.streaming.head_latency_ms` (histogram, ms) — TTFB from dispatch
+  start to head delivery.
+- `wm.streaming.duration_ms` (histogram, ms) — by
+  `wm.streaming.disposition`. Post-head pumping time.
+- `wm.streaming.chunks_total` / `wm.streaming.bytes_total` (counters) —
+  aggregate stream output.
+- `wm.streaming.terminations_total` (counter) — by `wm.streaming.disposition`
+  ∈ `finished` / `client_disconnected` / `trapped`. **Rising
+  `client_disconnected` means consumers are abandoning streams** —
+  inspect the response budget, the network path, or whatever feature is
+  cancelling on the client side.
 
 ### MCP transport (optional, required for production)
 
