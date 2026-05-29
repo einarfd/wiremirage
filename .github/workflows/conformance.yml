@@ -1,0 +1,20 @@
+name: Conformance
+
+# Opt-in / manual. Runs real third-party client libraries against WireMirage
+# mocks to smoke out fidelity gaps (SSE framing, content-type, error shape)
+# that the unit suite can't see. NOT on every PR — it builds + boots the host
+# and pulls an external SDK, so it's heavier than the gating CI. Trigger it
+# from the Actions tab (or on a schedule) when touching dispatch / streaming /
+# the engine.
+on:
+  workflow_dispatch:
+
+jobs:
+  openai-streaming:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ci-setup
+      - name: Run OpenAI streaming conformance
+        run: ./conformance/openai-streaming/run.sh
