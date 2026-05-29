@@ -559,6 +559,15 @@ Wasm guest fixtures used by the host's tier-2 integration tests live at
 component new` on the result; the resulting paths are stamped into env vars
 of the form `WM_FIXTURE_<name>_COMPONENT` for tests to read via `env!()`.
 
+Conformance tests live at `conformance/<name>/` — opt-in, manual lanes that
+run a real third-party client library against a WireMirage mock to smoke out
+fidelity gaps (SSE framing, content-type, error-body shape) the unit suite
+can't see. The first is `conformance/openai-streaming/` (the real `openai`
+Python client vs a mocked `POST /v1/chat/completions`, streaming + buffered).
+Run via that dir's `run.sh`; CI lane is `.github/workflows/conformance.yml`
+(`workflow_dispatch` only — not gating, since it builds + boots the host and
+pulls an external SDK). Not in `just check`.
+
 The product skill (shipped to *users* of WireMirage) lives at
 `skill/wiremirage/` per ADR-0015 (with a debug sub-skill at
 `skill/wiremirage-debug/`). The dev skill at `.claude/skills/wm-dev/`
