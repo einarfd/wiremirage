@@ -94,7 +94,18 @@ wm_host::storage_cases!(decl_cases);
 
 #[tokio::test]
 async fn counter_persists_across_requests_via_http() {
-    let storage = Storage::valkey(&shared().url).expect("connect to valkey");
+    // `shared()` boots the container via testcontainers' SyncRunner, which
+    // drives startup with its own `block_on`. That panics if the OnceLock is
+    // first initialized from inside a tokio runtime. Under `cargo test` a sync
+    // `#[test]` usually wins the init race first (off-runtime), so this test
+    // just reads the cached value — but under nextest each test runs in its
+    // own process, so this test initializes it here, on the async runtime
+    // thread, and `block_on` is illegal. Force init onto a blocking thread
+    // (no runtime entered); idempotent once another test has initialized it.
+    let url = tokio::task::spawn_blocking(|| shared().url.clone())
+        .await
+        .expect("init valkey container");
+    let storage = Storage::valkey(&url).expect("connect to valkey");
     let auth = Auth::new(storage.clone());
     auth.bootstrap_admin("bootstrap", "wmt_test")
         .expect("bootstrap");
