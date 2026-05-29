@@ -1,0 +1,47 @@
+name: CI setup
+description: >-
+  Shared setup for the parallel CI jobs: free runner disk, install the
+  Rust toolchain (+ wasm32 target for the build.rs fixture/js-engine
+  componentization), restore the cargo cache, and install wasm-tools.
+
+runs:
+  using: composite
+  steps:
+    # GHA runners ship with ~30 GB of preinstalled tooling (Android SDK,
+    # .NET, Haskell, large GHC versions) that we don't use. swc +
+    # wasmtime + cranelift produce a target/ that easily exceeds the
+    # remaining disk; the linker then SIGBUSes mid-link. Free the space
+    # before we start building.
+    - name: Free disk space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false
+        swap-storage: false
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+        targets: wasm32-unknown-unknown
+
+    # Per-job cache (rust-cache keys by job, so each job keeps a stable
+    # cache and they don't thrash each other — the test job compiles the
+    # valkey-tests feature the others don't, so a shared key would
+    # invalidate on every run).
+    - uses: Swatinem/rust-cache@v2
+
+    - name: Install wasm-tools
+      # The host's build.rs invokes wasm-tools to componentize fixture
+      # guests; tier-2 integration tests load those components.
+      # Pinned (not @latest): tracking latest means CI breaks whenever a
+      # new wasm-tools release's assets haven't propagated to the
+      # download CDN yet (a fresh release 404s the install for a while).
+      # `component new` is stable across these versions; bump
+      # deliberately when a newer wasm-tools feature is actually needed.
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-tools@1.249.0

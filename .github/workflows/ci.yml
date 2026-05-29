@@ -8,60 +8,40 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Three parallel jobs sharing one composite setup. The `test` job is the
+# long pole (~17 min of compile + run); splitting `lint` and `build` out
+# of its critical path shaves a few minutes of wall-clock and — more
+# usefully — surfaces fmt/clippy/build failures in a few minutes instead
+# of after the full test step. Each job recompiles the workspace from a
+# cached dependency tree; that's inherent (rust-cache only caches deps),
+# not duplicated work the split introduced.
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # GHA runners ship with ~30 GB of preinstalled tooling (Android SDK,
-      # .NET, Haskell, large GHC versions) that we don't use. swc +
-      # wasmtime + cranelift produce a target/ that easily exceeds the
-      # remaining disk; the linker then SIGBUSes mid-link. Free the
-      # space before we start building.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          swap-storage: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install wasm-tools
-        # The host's build.rs invokes wasm-tools to componentize fixture
-        # guests; tier-2 integration tests load those components.
-        # Pinned (not @latest): tracking latest means CI breaks whenever a
-        # new wasm-tools release's assets haven't propagated to the
-        # download CDN yet (a fresh release 404s the install for a while).
-        # `component new` is stable across these versions; bump
-        # deliberately when a newer wasm-tools feature is actually needed.
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-tools@1.249.0
-
+      - uses: ./.github/actions/ci-setup
       - name: Format check
         run: cargo fmt --all -- --check
-
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ci-setup
       - name: Test (host)
         run: cargo test --workspace
-
       - name: Test (Valkey-backed, tier-3)
         # Spins up real `valkey/valkey:8` containers via testcontainers-rs.
         # GitHub-hosted runners have Docker available; ryuk reaps stragglers.
         run: cargo test -p wm-host --features valkey-tests --test valkey_storage
 
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ci-setup
       - name: Build
         run: cargo build --workspace
