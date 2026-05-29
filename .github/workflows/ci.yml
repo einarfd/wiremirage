@@ -31,10 +31,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ci-setup
+      - name: Install nextest
+        # nextest runs every test binary's tests in one global parallel
+        # pool, instead of `cargo test`'s binary-at-a-time serial walk —
+        # the win on our latency-bound integration tests (each spins up an
+        # axum server + wasmtime engine). Pinned like wasm-tools so a fresh
+        # release's CDN propagation can't 404 the install; bump deliberately.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.137
       - name: Test (host)
-        run: cargo test --workspace
+        run: cargo nextest run --workspace
+      - name: Doctests
+        # nextest does not run doctests. The workspace currently has none,
+        # but run them here so coverage doesn't silently vanish if any are
+        # added later.
+        run: cargo test --workspace --doc
       - name: Test (Valkey-backed, tier-3)
-        # Spins up real `valkey/valkey:8` containers via testcontainers-rs.
+        # Plain `cargo test` on purpose — NOT nextest. nextest's
+        # process-per-test isolation would boot a fresh `valkey/valkey:8`
+        # container for each of the ~35 tests; this suite instead shares one
+        # container via a OnceLock for the whole binary. Serial here is
+        # cheap (~1 min) and keeps that shared-container optimization.
         # GitHub-hosted runners have Docker available; ryuk reaps stragglers.
         run: cargo test -p wm-host --features valkey-tests --test valkey_storage
 
