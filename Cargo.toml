@@ -52,3 +52,15 @@ schemars = { version = "1", features = ["chrono04"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Strip debug info from third-party dependencies (wasmtime / cranelift /
+# swc dominate the tree). Our own crates keep full debug info, so
+# backtraces and debugger stepping through wm-* code are unaffected; we
+# only lose line info inside dependencies, which we rarely step into.
+# The payoff is much smaller object files -> faster linking (every
+# wm-host integration test statically links the whole tree) and a far
+# smaller target/ dir. Does not affect the wasm32 fixture sub-builds:
+# build.rs spawns those as separate cargo invocations with their own
+# profile, so this stanza never reaches them.
+[profile.dev.package."*"]
+debug = false
