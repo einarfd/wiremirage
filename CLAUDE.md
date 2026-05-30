@@ -564,9 +564,15 @@ run a real third-party client library against a WireMirage mock to smoke out
 fidelity gaps (SSE framing, content-type, error-body shape) the unit suite
 can't see. The first is `conformance/openai-streaming/` (the real `openai`
 Python client vs a mocked `POST /v1/chat/completions`, streaming + buffered).
-Run via that dir's `run.sh`; CI lane is `.github/workflows/conformance.yml`
-(`workflow_dispatch` only — not gating, since it builds + boots the host and
-pulls an external SDK). Not in `just check`.
+Each lane is a dir with a `Dockerfile` (its language/SDK toolchain, pinned),
+a `routes.json` (sources → paths to register), the mock handler(s), and the
+client test. The shared `conformance/run.sh` boots the host in-memory (native,
+cargo), registers a lane's routes via jq/curl, and runs the lane's client
+**in Docker** (`--network host`) — so the host machine needs only Docker + jq +
+a buildable host, no per-language toolchain. Run with `just conformance [lane]`
+or `conformance/run.sh [lane]` (no arg = all lanes). CI lane is
+`.github/workflows/conformance.yml` (`workflow_dispatch` only — not gating,
+since it builds + boots the host and builds SDK images). Not in `just check`.
 
 The product skill (shipped to *users* of WireMirage) lives at
 `skill/wiremirage/` per ADR-0015 (with a debug sub-skill at

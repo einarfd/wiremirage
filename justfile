@@ -37,6 +37,13 @@ test-valkey:
     trap cleanup EXIT
     cargo test -p wm-host --features valkey-tests --test valkey_storage
 
+# Conformance lanes: run a real third-party client library (in Docker)
+# against a WireMirage mock to smoke out fidelity gaps. Opt-in — NOT part of
+# `just check`. No arg runs every lane; pass a name to run one, e.g.
+# `just conformance openai-streaming`. Needs Docker + jq + a buildable host.
+conformance LANE="":
+    ./conformance/run.sh {{ LANE }}
+
 build:
     cargo build --workspace
 
