@@ -1,0 +1,4 @@
+[
+  { "methods": ["POST"], "path": "/v1/chat/completions", "source": "handler.ts" },
+  { "methods": ["POST"], "path": "/v1-error/chat/completions", "source": "error-handler.ts" }
+]
