@@ -35,10 +35,14 @@ A lane is a subdirectory containing:
 | File | Role |
 |------|------|
 | `Dockerfile` | Builds the client image (its language + SDK, pinned). `CMD` runs the test against `$WM_BASE`. |
-| `routes.json` | The mock routes to register: `[{ "methods": [...], "path": "...", "source": "handler.ts" }]`. Sources are TypeScript handler files in the lane dir. |
+| `routes.json` | The mock routes to register: `[{ "methods": [...], "path": "...", "source": "handler.ts", "group"?: "..." }]`. Sources are TypeScript handler files in the lane dir. An optional `group` attaches routes to a shared (auto-created) group so they share group state. |
 | `<sources>.ts` | The mock handler(s). |
-| the test | Whatever the `Dockerfile`'s `CMD` runs (e.g. `conformance.py`), asserting against `WM_BASE`. |
+| `setup.sh` (optional) | Run after registration with `(base, token)` — for lane-specific seeding (e.g. POSTing config into a mock route). |
+| the test | Whatever the `Dockerfile`'s `CMD` runs (e.g. `conformance.py`, a Go binary), asserting against `WM_BASE`. |
 | `README.md` | What the lane validates + findings. |
+
+All lanes run against **one** host instance (booted once per `run.sh`), so keep
+route paths distinct across lanes.
 
 ## Add a lane
 
@@ -53,3 +57,7 @@ A lane is a subdirectory containing:
 
 - [`openai-streaming/`](openai-streaming/) — the real `openai` Python SDK vs a
   mocked `POST /v1/chat/completions` (streaming + buffered).
+- [`s3-slowdown/`](s3-slowdown/) — the real AWS Go SDK vs a **reusable,
+  config-driven latency/throttle-injection** mock (S3 `GetObject`); proves the
+  SDK auto-retries/recovers from injected `503 SlowDown`. The general form of
+  "slow down some but not all of a set of requests".
