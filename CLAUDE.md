@@ -562,15 +562,21 @@ of the form `WM_FIXTURE_<name>_COMPONENT` for tests to read via `env!()`.
 Conformance tests live at `conformance/<name>/` — opt-in, manual lanes that
 run a real third-party client library against a WireMirage mock to smoke out
 fidelity gaps (SSE framing, content-type, error-body shape) the unit suite
-can't see. The first is `conformance/openai-streaming/` (the real `openai`
-Python client vs a mocked `POST /v1/chat/completions`, streaming + buffered).
-Each lane is a dir with a `Dockerfile` (its language/SDK toolchain, pinned),
-a `routes.json` (sources → paths to register), the mock handler(s), and the
-client test. The shared `conformance/run.sh` boots the host in-memory (native,
-cargo), registers a lane's routes via jq/curl, and runs the lane's client
-**in Docker** (`--network host`) — so the host machine needs only Docker + jq +
-a buildable host, no per-language toolchain. Run with `just conformance [lane]`
-or `conformance/run.sh [lane]` (no arg = all lanes). CI lane is
+can't see. Lanes so far: `conformance/openai-streaming/` (the real `openai`
+Python client vs a mocked `POST /v1/chat/completions`, streaming + buffered) and
+`conformance/s3-slowdown/` (the real AWS Go SDK vs a **reusable, config-driven
+latency/throttle-injection** mock; proves the SDK auto-retries/recovers from
+injected `503 SlowDown`). Each lane is a dir with a `Dockerfile` (its
+language/SDK toolchain, pinned), a `routes.json` (sources → paths, optional
+`group`), the mock handler(s), an optional `setup.sh` (post-registration
+seeding), and the client test. The shared `conformance/run.sh` boots the host
+in-memory (native, cargo), registers a lane's routes via jq/curl, runs any
+`setup.sh`, and runs the lane's client **in Docker** (`--network host`) — so the
+host machine needs only Docker + jq + a buildable host, no per-language
+toolchain. Run with `just conformance [lane]` or `conformance/run.sh [lane]`
+(no arg = all lanes). Note: a reusable runtime-configurable mock seeds its
+config *through a mock route* (the s3 lane's `config.ts`) because there's no
+public kv/gkv-write API — only GET/DELETE. CI lane is
 `.github/workflows/conformance.yml` (`workflow_dispatch` only — not gating,
 since it builds + boots the host and builds SDK images). Not in `just check`.
 

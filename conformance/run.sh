@@ -49,18 +49,35 @@ for lane in "${LANES[@]}"; do
   echo "=== conformance lane: ${lane} ==="
 
   # Register the lane's routes. jq -Rs reads the source file as a raw string
-  # and JSON-encodes it, so handler quoting/newlines survive intact.
+  # and JSON-encodes it, so handler quoting/newlines survive intact. An
+  # optional per-route "group" name attaches the route to a (pre-created)
+  # group so sibling routes share group state.
   while read -r route; do
     path=$(jq -r '.path' <<<"$route")
     src=$(jq -r '.source' <<<"$route")
     methods=$(jq -c '.methods // ["POST"]' <<<"$route")
-    body=$(jq -Rs --argjson m "$methods" --arg p "$path" \
-      '{methods:$m, path:$p, language:"typescript", source:.}' < "${lane}/${src}")
+    group=$(jq -r '.group // empty' <<<"$route")
+    if [ -n "$group" ]; then
+      # Idempotent: a 409 (already exists) is fine.
+      curl -fsS -X POST "${BASE}/__api/groups" \
+        -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' \
+        -d "{\"name\":\"${group}\"}" >/dev/null 2>&1 || true
+    fi
+    body=$(jq -Rs --argjson m "$methods" --arg p "$path" --arg g "$group" \
+      'if $g == "" then {methods:$m, path:$p, language:"typescript", source:.}
+       else {group:$g, methods:$m, path:$p, language:"typescript", source:.} end' \
+      < "${lane}/${src}")
     curl -fsS -X POST "${BASE}/__api/routes" \
       -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' \
       -d "$body" >/dev/null
-    echo "  registered ${methods} ${path}"
+    echo "  registered ${methods} ${path}${group:+ (group: ${group})}"
   done < <(jq -c '.[]' "${lane}/routes.json")
+
+  # Optional per-lane seeding (e.g. POST config into a mock route), run from
+  # the lane dir with (base, token).
+  if [ -f "${lane}/setup.sh" ]; then
+    ( cd "$lane" && bash setup.sh "$BASE" "$TOKEN" )
+  fi
 
   # Build + run the lane's client in Docker.
   img="wiremirage-conformance-${lane}"
