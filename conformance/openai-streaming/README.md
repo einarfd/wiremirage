@@ -12,15 +12,17 @@ error-body shape) that WireMirage's own unit tests can't see.
 ## Run it
 
 ```sh
-./run.sh
+just conformance openai-streaming
+# or: ./conformance/run.sh openai-streaming
 ```
 
-Boots the host in-memory, registers the routes, runs `conformance.py`, tears the
-host down. **Opt-in** — not part of `just check`.
+The shared runner boots the host in-memory, registers the routes (from
+`routes.json`), and runs this lane's client **in Docker** against the host, then
+tears the host down. **Opt-in** — not part of `just check`.
 
-Prereqs: a buildable host (Docker, for the js-engine build) and `python3` with
-`venv`. The `openai` client is pinned in `requirements.txt` and installed into a
-local `.venv` on first run.
+Prereqs on the machine: Docker + jq + a buildable host. The `openai` client and
+Python live in this lane's `Dockerfile` (pinned via `requirements.txt`), not on
+the host.
 
 ## What it pins down
 
@@ -36,8 +38,13 @@ local `.venv` on first run.
 
 - `handler.ts` — the mock served at `/v1/chat/completions` (streaming + buffered, honors `mock_delay_ms`)
 - `error-handler.ts` — an OpenAI-shaped 429, served at `/v1-error/chat/completions` (check 5)
-- `conformance.py` — the client-side assertions
-- `run.sh` — orchestrator
+- `routes.json` — which sources mount at which paths (read by the shared runner)
+- `conformance.py` — the client-side assertions (run inside the container against `WM_BASE`)
+- `Dockerfile` — the client image: Python + pinned `openai`
+- `requirements.txt` — `openai==1.99.1`
+
+Orchestration (boot host, register routes, run the container) lives in the
+shared [`../run.sh`](../run.sh).
 
 ## Notes from building this
 
