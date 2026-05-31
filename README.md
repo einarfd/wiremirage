@@ -53,9 +53,10 @@ wraps the REST surface end-to-end: groups, routes (including `wm
 routes update`, `wm routes state`, `wm routes test`), journal,
 tokens, and the public probes — see "Using the CLI" below. The MCP
 server is part of the host and mounts at `/__api/mcp` over the
-streamable-HTTP transport; 20 tools cover identity, discovery,
+streamable-HTTP transport; 25 tools cover identity, discovery,
 group/route CRUD (now including `update_route`), per-route state
-(`show_route_state`, `clear_route_state`), dry-run (`dry_run_route`),
+(`show_route_state`, `set_route_state`, `set_group_state`,
+`clear_route_state`), dry-run (`dry_run_route`),
 the live-tail streaming pair (`wait_for_request`, `tail_journal`),
 and the match probe (`find_route`, mirrored by `wm match` and `GET
 /__api/match`). All behind the same bearer-token auth. Live tail
@@ -469,6 +470,9 @@ wm routes list
 wm routes update stripe-mock/1 --source-file new-handler.ts  # PATCH
 wm routes source stripe-mock/1             # print stored handler source
 wm routes state stripe-mock/1              # list per-route kv
+wm routes state stripe-mock/1 --set config='{"x":1}'  # seed/upsert a key
+wm routes state stripe-mock/1 --snapshot   # round-trippable JSON dump
+wm routes state stripe-mock/1 --reset-from baseline.json  # clear + reseed
 wm routes test stripe-mock/1 --method POST # dry-run (no journal, isolated state)
 wm journal list stripe-mock                # newest first, paginated
 wm tokens create ci-runner                 # plaintext printed once
@@ -514,13 +518,14 @@ claude mcp add --transport http wiremirage \
   --header "Authorization: Bearer wmt_..."
 ```
 
-The current surface is 21 tools — identity (`who_am_i`), discovery
+The current surface is 25 tools — identity (`who_am_i`), discovery
 (`summarize_workspace`, `list_recent_unmatched`, `find_route`),
 group CRUD (`list_groups`, `show_group`, `create_group`,
-`delete_group`, `refresh_group_ttl`), route CRUD (`list_routes`,
-`show_route`, `show_route_source`, `create_route`, `update_route`,
-`delete_route`), state + dry-run (`clear_group_state`,
-`show_route_state`, `clear_route_state`, `dry_run_route`), and the
+`update_group`, `delete_group`, `refresh_group_ttl`), route CRUD
+(`list_routes`, `show_route`, `show_route_source`, `create_route`,
+`update_route`, `delete_route`), state + dry-run (`clear_group_state`,
+`set_group_state`, `show_route_state`, `set_route_state`,
+`clear_route_state`, `dry_run_route`), and the
 slice-11 streaming pair (`wait_for_request`, `tail_journal`). The streaming tools
 subscribe to a single-host broadcast bus inside the host and return
 accumulated entries when their stop condition fires (count + timeout

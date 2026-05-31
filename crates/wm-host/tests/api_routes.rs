@@ -1435,9 +1435,8 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
         .json(&json!({
             "method": "GET",
             "path": "/v1/dryrun-with-seed",
-            // Vec<u8> on the wire is an array of ints (matches `body`
-            // serialization). `"5"` as ASCII = [53].
-            "kv_overrides": {"count": [53]}
+            // ADR-0025: state values are UTF-8 strings (or {base64}).
+            "kv_overrides": {"count": "5"}
         }))
         .send()
         .await
@@ -1456,7 +1455,7 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
         .json(&json!({
             "method": "GET",
             "path": "/v1/dryrun-with-seed",
-            "kv_overrides": {"count": [49]} // "1"
+            "kv_overrides": {"count": "1"}
         }))
         .send()
         .await
@@ -1503,6 +1502,187 @@ async fn dry_run_non_owner_forbidden() {
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 403);
+}
+
+// -- ADR-0025: writable handler state ---------------------------------------
+
+/// Create a plain route and return `(group, number)` for state tests.
+async fn seed_state_route(h: &Harness) -> (String, u64) {
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/state-target",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    (
+        created["group"]["name"].as_str().unwrap().to_string(),
+        created["number"].as_u64().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn put_route_state_seed_snapshot_round_trips() {
+    let h = Harness::start().await;
+    let (group, number) = seed_state_route(&h).await;
+    let url = h.url(&format!("/__api/routes/{group}/{number}/state"));
+
+    let put = h
+        .client
+        .put(&url)
+        .json(&json!({"entries": {"config": "hello", "n": "42"}}))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status().as_u16(), 204);
+
+    let snap: serde_json::Value = h
+        .client
+        .get(format!("{url}?format=snapshot"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    // String values round-trip as bare strings (ADR-0025), not int arrays.
+    assert_eq!(snap["entries"]["config"], "hello");
+    assert_eq!(snap["entries"]["n"], "42");
+}
+
+#[tokio::test]
+async fn put_route_state_upserts_then_reset_replaces() {
+    let h = Harness::start().await;
+    let (group, number) = seed_state_route(&h).await;
+    let url = h.url(&format!("/__api/routes/{group}/{number}/state"));
+    let snap_url = format!("{url}?format=snapshot");
+
+    // Two upserts: both keys present (upsert, not replace).
+    for body in [json!({"entries":{"a":"1"}}), json!({"entries":{"b":"2"}})] {
+        let r = h.client.put(&url).json(&body).send().await.expect("put");
+        assert_eq!(r.status().as_u16(), 204);
+    }
+    let snap: serde_json::Value = h
+        .client
+        .get(&snap_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(snap["entries"]["a"], "1");
+    assert_eq!(snap["entries"]["b"], "2");
+
+    // Reset = clear + write a baseline; old keys gone.
+    h.client.delete(&url).send().await.expect("delete");
+    h.client
+        .put(&url)
+        .json(&json!({"entries":{"a":"9"}}))
+        .send()
+        .await
+        .expect("put");
+    let snap: serde_json::Value = h
+        .client
+        .get(&snap_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(snap["entries"]["a"], "9");
+    assert!(
+        snap["entries"].get("b").is_none(),
+        "reset should have dropped old keys"
+    );
+}
+
+#[tokio::test]
+async fn put_route_state_binary_round_trips_as_base64() {
+    let h = Harness::start().await;
+    let (group, number) = seed_state_route(&h).await;
+    let url = h.url(&format!("/__api/routes/{group}/{number}/state"));
+    // 0xFF 0xFE is not valid UTF-8; base64 of those two bytes is "//4=".
+    let put = h
+        .client
+        .put(&url)
+        .json(&json!({"entries": {"bin": {"base64": "//4="}}}))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status().as_u16(), 204);
+    let snap: serde_json::Value = h
+        .client
+        .get(format!("{url}?format=snapshot"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Non-UTF-8 bytes come back as the {base64} form, preserving them exactly.
+    assert_eq!(snap["entries"]["bin"]["base64"], "//4=");
+}
+
+#[tokio::test]
+async fn put_route_state_rejects_oversize_value() {
+    let h = Harness::start().await;
+    let (group, number) = seed_state_route(&h).await;
+    let big = "x".repeat(1024 * 1024 + 1);
+    let r = h
+        .client
+        .put(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .json(&json!({"entries": {"big": big}}))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(r.status().as_u16(), 400);
+    let body: serde_json::Value = r.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "validation_failed");
+}
+
+#[tokio::test]
+async fn put_route_state_non_owner_forbidden() {
+    let h = Harness::start().await;
+    let (group, number) = seed_state_route(&h).await;
+    let (_id, alice) = h.provision_user("alice-state", false);
+    let r = alice
+        .put(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .json(&json!({"entries": {"a": "1"}}))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(r.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn put_group_state_seed_snapshot_round_trips() {
+    let h = Harness::start().await;
+    let (group, _number) = seed_state_route(&h).await;
+    let url = h.url(&format!("/__api/groups/{group}/state"));
+    let put = h
+        .client
+        .put(&url)
+        .json(&json!({"entries": {"inject:rules": "[1,2,3]"}}))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(put.status().as_u16(), 204);
+    let snap: serde_json::Value = h
+        .client
+        .get(format!("{url}?format=snapshot"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(snap["entries"]["inject:rules"], "[1,2,3]");
 }
 
 #[tokio::test]

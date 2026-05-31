@@ -160,6 +160,9 @@ async fn list_tools_returns_all_expected_tools() {
         "clear_route_state",
         "dry_run_route",
         "show_route_state",
+        // ADR-0025
+        "set_group_state",
+        "set_route_state",
         // Slice 43
         "update_group",
         // Capabilities (post-ADR-0021 follow-up)
@@ -1230,8 +1233,8 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
         .await
         .expect("connect");
 
-    // Seed `count=9` (base64 of byte 0x39 = '9'), expect the
-    // handler's `incr` to return `count=10`.
+    // Seed `count=9` as a plain string (ADR-0025 string-first), expect
+    // the handler's `incr` to return `count=10`.
     let resp = client
         .call_tool(
             CallToolRequestParams::new("dry_run_route").with_arguments(
@@ -1239,7 +1242,7 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
                     "route": format!("{}/{}", route.group_name, route.number),
                     "method": "GET",
                     "path": "/v1/dryrun-mcp",
-                    "kv_overrides_b64": { "count": B64.encode(b"9") },
+                    "kv_overrides": { "count": "9" },
                 })
                 .as_object()
                 .unwrap()
@@ -1253,23 +1256,28 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
     let body_bytes = B64.decode(body_b64).expect("decode body");
     assert_eq!(String::from_utf8(body_bytes).unwrap(), "count=10");
 
-    // Bad base64 in the override map surfaces a typed error.
-    let bad = client
+    // The `{base64}` escape hatch seeds the same bytes.
+    let resp = client
         .call_tool(
             CallToolRequestParams::new("dry_run_route").with_arguments(
                 serde_json::json!({
                     "route": format!("{}/{}", route.group_name, route.number),
                     "method": "GET",
                     "path": "/v1/dryrun-mcp",
-                    "kv_overrides_b64": { "count": "not-base-64!!!" },
+                    "kv_overrides": { "count": { "base64": B64.encode(b"9") } },
                 })
                 .as_object()
                 .unwrap()
                 .clone(),
             ),
         )
-        .await;
-    assert!(bad.is_err(), "bad base64 in override is rejected");
+        .await
+        .expect("dry_run_route binary override");
+    let structured = resp.structured_content.expect("structured");
+    let body_bytes = B64
+        .decode(structured["body_b64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(String::from_utf8(body_bytes).unwrap(), "count=10");
 
     client.cancel().await.expect("cancel");
 }

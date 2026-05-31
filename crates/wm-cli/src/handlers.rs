@@ -16,7 +16,7 @@ use anyhow::Context;
 use wm_core::{
     Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateUserBody,
     DryRunBody, ListGroupsParams, ListJournalParams, ListRoutesParams, ListUnmatchedParams,
-    PatchGroupBody, PatchRouteBody, PatchUserBody,
+    PatchGroupBody, PatchRouteBody, PatchUserBody, StateSnapshotResponse, StateValue,
 };
 
 use crate::cli::{
@@ -214,17 +214,41 @@ async fn handle_groups(
             let g = client.refresh_group(&name).await?;
             format::render_group(&g, format);
         }
-        GroupsCommand::State { name, clear } => {
-            if !clear {
-                return Err(ClientError::Validation(
-                    "state listing isn't shipped yet — pass --clear to wipe state, or use \
-                     `wm journal list` to see what handlers did"
-                        .into(),
-                ));
-            }
-            client.clear_group_state(&name).await?;
-            if matches!(format, Format::Human) {
-                println!("cleared state for {name}");
+        GroupsCommand::State {
+            name,
+            clear,
+            set,
+            snapshot,
+            reset_from,
+        } => {
+            if let Some(file) = reset_from {
+                let snap = read_snapshot_file(&file)?;
+                client.clear_group_state(&name).await?;
+                client.set_group_state(&name, snap.entries).await?;
+                if matches!(format, Format::Human) {
+                    println!("reset shared state for {name} from {file}");
+                }
+            } else if !set.is_empty() {
+                let entries = parse_override_pairs(&set, "--set")?;
+                let n = entries.len();
+                client.set_group_state(&name, entries).await?;
+                if matches!(format, Format::Human) {
+                    println!("wrote {n} key(s) to {name}");
+                }
+            } else if clear {
+                client.clear_group_state(&name).await?;
+                if matches!(format, Format::Human) {
+                    println!("cleared state for {name}");
+                }
+            } else {
+                // Default + `--snapshot` both read the shared store; the
+                // flag only switches Human listing -> raw JSON.
+                let snap = client.snapshot_group_state(&name).await?;
+                if snapshot || matches!(format, Format::Json) {
+                    print_state_snapshot(&snap)?;
+                } else {
+                    print_state_human(&snap);
+                }
             }
         }
         GroupsCommand::Journal { name, clear } => {
@@ -460,12 +484,35 @@ async fn handle_routes(
             let resp = client.get_route_source(&slug).await?;
             format::render_route_source(&resp, format);
         }
-        RoutesCommand::State { slug, clear } => {
-            if clear {
+        RoutesCommand::State {
+            slug,
+            clear,
+            set,
+            snapshot,
+            reset_from,
+        } => {
+            if let Some(file) = reset_from {
+                let snap = read_snapshot_file(&file)?;
+                client.clear_route_state(&slug).await?;
+                client.set_route_state(&slug, snap.entries).await?;
+                if matches!(format, Format::Human) {
+                    println!("reset state for {slug} from {file}");
+                }
+            } else if !set.is_empty() {
+                let entries = parse_override_pairs(&set, "--set")?;
+                let n = entries.len();
+                client.set_route_state(&slug, entries).await?;
+                if matches!(format, Format::Human) {
+                    println!("wrote {n} key(s) to {slug}");
+                }
+            } else if clear {
                 client.clear_route_state(&slug).await?;
                 if matches!(format, Format::Human) {
                     println!("cleared state for {slug}");
                 }
+            } else if snapshot {
+                let snap = client.snapshot_route_state(&slug).await?;
+                print_state_snapshot(&snap)?;
             } else {
                 let list = client.list_route_state(&slug).await?;
                 format::render_route_state(&list, format);
@@ -611,10 +658,43 @@ fn build_test_route_body(args: TestRouteArgs) -> Result<(String, DryRunBody), Cl
 /// Parse `KEY=VALUE` pairs from a CLI flag (e.g. `--kv counter=4`).
 /// Trims whitespace around both key and value; rejects empty keys and
 /// pairs without `=`.
+/// Read a state snapshot file (`{"entries": {...}}`) for `--reset-from`.
+fn read_snapshot_file(path: &str) -> Result<StateSnapshotResponse, ClientError> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| ClientError::Validation(format!("read {path}: {e}")))?;
+    serde_json::from_str(&raw)
+        .map_err(|e| ClientError::Validation(format!("parse snapshot {path}: {e}")))
+}
+
+/// Print a snapshot as pretty JSON (the `--snapshot` / `--json` form;
+/// round-trips with `--reset-from`).
+fn print_state_snapshot(snap: &StateSnapshotResponse) -> Result<(), ClientError> {
+    let json = serde_json::to_string_pretty(snap)
+        .map_err(|e| ClientError::BadResponse(format!("encode snapshot: {e}")))?;
+    println!("{json}");
+    Ok(())
+}
+
+/// Human-readable `key = value` listing of a snapshot, keys sorted.
+fn print_state_human(snap: &StateSnapshotResponse) {
+    if snap.entries.is_empty() {
+        println!("(no shared group state)");
+        return;
+    }
+    let mut keys: Vec<&String> = snap.entries.keys().collect();
+    keys.sort();
+    for k in keys {
+        match &snap.entries[k] {
+            StateValue::Text(s) => println!("{k} = {s}"),
+            StateValue::Binary { base64 } => println!("{k} = (base64) {base64}"),
+        }
+    }
+}
+
 fn parse_override_pairs(
     raw: &[String],
     flag_name: &str,
-) -> Result<std::collections::HashMap<String, Vec<u8>>, ClientError> {
+) -> Result<std::collections::HashMap<String, StateValue>, ClientError> {
     let mut out = std::collections::HashMap::with_capacity(raw.len());
     for entry in raw {
         let (k, v) = entry.split_once('=').ok_or_else(|| {
@@ -626,7 +706,7 @@ fn parse_override_pairs(
                 "{flag_name} has empty key: {entry:?}"
             )));
         }
-        out.insert(key.to_string(), v.as_bytes().to_vec());
+        out.insert(key.to_string(), StateValue::Text(v.to_string()));
     }
     Ok(out)
 }
@@ -949,8 +1029,8 @@ mod tests {
     fn parse_override_pairs_happy_path() {
         let parsed = parse_override_pairs(&["counter=4".into(), "name=alice".into()], "--kv")
             .expect("parse");
-        assert_eq!(parsed.get("counter").unwrap(), b"4");
-        assert_eq!(parsed.get("name").unwrap(), b"alice");
+        assert!(matches!(parsed.get("counter"), Some(StateValue::Text(s)) if s == "4"));
+        assert!(matches!(parsed.get("name"), Some(StateValue::Text(s)) if s == "alice"));
     }
 
     #[test]
@@ -975,6 +1055,6 @@ mod tests {
     fn parse_override_pairs_allows_equals_in_value() {
         // The value side may carry equals (e.g. base64 padding).
         let parsed = parse_override_pairs(&["k=a=b=c".into()], "--kv").expect("parse");
-        assert_eq!(parsed.get("k").unwrap(), b"a=b=c");
+        assert!(matches!(parsed.get("k"), Some(StateValue::Text(s)) if s == "a=b=c"));
     }
 }

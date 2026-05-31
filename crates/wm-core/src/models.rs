@@ -142,6 +142,53 @@ pub struct PatchRouteBody {
 
 // -- Route state + dry-run ---------------------------------------------------
 
+/// A byte-valued handler-state entry on the wire (ADR-0025): a bare
+/// UTF-8 string, or `{ "base64": "<...>" }` for binary. Mirrors
+/// `wm_host::state::StateValue`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StateValue {
+    Text(String),
+    Binary { base64: String },
+}
+
+impl StateValue {
+    /// Wrap raw bytes for sending: a string when valid UTF-8, else base64.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        use base64::Engine as _;
+        match std::str::from_utf8(bytes) {
+            Ok(s) => StateValue::Text(s.to_owned()),
+            Err(_) => StateValue::Binary {
+                base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            },
+        }
+    }
+
+    /// Decode to raw bytes (e.g. when reading a snapshot back).
+    pub fn into_bytes(self) -> Result<Vec<u8>, base64::DecodeError> {
+        use base64::Engine as _;
+        match self {
+            StateValue::Text(s) => Ok(s.into_bytes()),
+            StateValue::Binary { base64 } => {
+                base64::engine::general_purpose::STANDARD.decode(base64)
+            }
+        }
+    }
+}
+
+/// Write payload for `PUT /__api/{routes,groups}/.../state`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetStateBody {
+    pub entries: std::collections::HashMap<String, StateValue>,
+}
+
+/// Round-trippable response for `GET .../state?format=snapshot` — bytes
+/// entries only, in the same shape `SetStateBody` accepts.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct StateSnapshotResponse {
+    pub entries: std::collections::HashMap<String, StateValue>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RouteStateEntry {
     pub key: String,
@@ -184,14 +231,14 @@ pub struct DryRunBody {
     pub query: Vec<(String, String)>,
     /// Pre-populate the route's private `kv:` snapshot with these
     /// entries before the handler runs. Lets agents exercise state-
-    /// dependent branches without driving real traffic first. Real
-    /// state is never touched — overrides land in the disposable
-    /// dry-run namespace.
+    /// dependent branches without driving real traffic first. Values
+    /// use the ADR-0025 [`StateValue`] encoding. Real state is never
+    /// touched — overrides land in the disposable dry-run namespace.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub kv_overrides: std::collections::HashMap<String, Vec<u8>>,
+    pub kv_overrides: std::collections::HashMap<String, StateValue>,
     /// Same as `kv_overrides`, scoped to the group's shared `gkv:`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub gkv_overrides: std::collections::HashMap<String, Vec<u8>>,
+    pub gkv_overrides: std::collections::HashMap<String, StateValue>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
