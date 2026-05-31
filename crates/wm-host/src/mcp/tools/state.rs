@@ -4,8 +4,6 @@
 //! mental model is "inspect / poke a route's state"; they share the
 //! same auth/owner pattern.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use rmcp::ErrorData;
 use rmcp::Json;
 use rmcp::handler::server::common::Extension;
@@ -19,7 +17,7 @@ use crate::dry_run::{DryRunRequest, dry_run};
 use crate::mcp::context::{auth_from, ensure_group_owner_or_admin, ensure_route_owner_or_admin};
 use crate::mcp::error::{map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
-use crate::state::{StateValue, decode_entries};
+use crate::wire::{WireBytes, decode_entries};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ClearGroupStateArgs {
@@ -49,9 +47,10 @@ pub struct RouteStateEntry {
     /// Storage-level kind: `"bytes"`, `"list"`, `"hash"`, `"set"`, or
     /// `"other"` for co-resident exotic types on Valkey.
     pub kind: String,
-    /// Base64-encoded value bytes, present only when `kind == "bytes"`.
-    /// Collection-typed values report cardinality via `length`.
-    pub value_b64: Option<String>,
+    /// Value bytes, present only when `kind == "bytes"`: a UTF-8 string,
+    /// or `{ "base64": "<...>" }` for binary (ADR-0026). Collection-typed
+    /// values report cardinality via `length`.
+    pub value: Option<WireBytes>,
     pub length: Option<u64>,
 }
 
@@ -62,7 +61,7 @@ pub struct SetRouteStateArgs {
     /// Entries to upsert into the route's private `kv:` store. Values
     /// are UTF-8 strings, or `{ "base64": "<...>" }` for binary. Listed
     /// keys are written; others left untouched.
-    pub entries: std::collections::HashMap<String, StateValue>,
+    pub entries: std::collections::HashMap<String, WireBytes>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -72,7 +71,7 @@ pub struct SetGroupStateArgs {
     /// Entries to upsert into the group's shared `gkv:` store (what
     /// handlers read via `group-store`). Same value form as
     /// `set_route_state`.
-    pub entries: std::collections::HashMap<String, StateValue>,
+    pub entries: std::collections::HashMap<String, WireBytes>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -106,8 +105,9 @@ pub struct DryRunRouteArgs {
     pub path: Option<String>,
     /// Request headers as `[[key, value], ...]`. Defaults to none.
     pub headers: Option<Vec<(String, String)>>,
-    /// Request body as base64-encoded bytes. Defaults to empty.
-    pub body_b64: Option<String>,
+    /// Request body: a UTF-8 string, or `{ "base64": "<...>" }` for
+    /// binary (ADR-0026). Defaults to empty.
+    pub body: Option<WireBytes>,
     /// Override the path-params list the handler sees. Defaults to
     /// none.
     pub path_params: Option<Vec<(String, String)>>,
@@ -117,18 +117,18 @@ pub struct DryRunRouteArgs {
     /// driving real traffic first. Values are UTF-8 strings, or
     /// `{ "base64": "<...>" }` for binary (`{ "counter": "4" }` seeds
     /// counter=`"4"`). Real state is never touched.
-    pub kv_overrides: Option<std::collections::HashMap<String, StateValue>>,
+    pub kv_overrides: Option<std::collections::HashMap<String, WireBytes>>,
     /// Same as `kv_overrides`, scoped to the group's shared `gkv:`
     /// namespace.
-    pub gkv_overrides: Option<std::collections::HashMap<String, StateValue>>,
+    pub gkv_overrides: Option<std::collections::HashMap<String, WireBytes>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DryRunRouteResult {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    /// Base64-encoded response body.
-    pub body_b64: String,
+    /// Response body: a UTF-8 string, or `{ "base64": "<...>" }` for binary.
+    pub body: WireBytes,
     pub handler_logs: Vec<DryRunLogEntry>,
     pub duration_ms: u64,
     pub error: Option<String>,
@@ -196,7 +196,7 @@ impl WmMcpServer {
             .map(|e| RouteStateEntry {
                 key: e.key,
                 kind: e.kind,
-                value_b64: e.value.as_ref().map(|v| B64.encode(v)),
+                value: e.value.as_deref().map(WireBytes::from_bytes),
                 length: e.length,
             })
             .collect();
@@ -291,10 +291,10 @@ impl WmMcpServer {
         if !path.starts_with('/') {
             return Err(validation("dry-run path must start with /"));
         }
-        let body = match args.body_b64.as_deref() {
-            Some(s) => B64
-                .decode(s)
-                .map_err(|e| validation(format!("body_b64 is not valid base64: {e}")))?,
+        let body = match args.body {
+            Some(b) => b
+                .into_bytes()
+                .map_err(|e| validation(format!("body: invalid base64: {e}")))?,
             None => Vec::new(),
         };
         let req = DryRunRequest {
@@ -318,7 +318,7 @@ impl WmMcpServer {
         Ok(Json(DryRunRouteResult {
             status: result.status,
             headers: result.headers,
-            body_b64: B64.encode(&result.body),
+            body: WireBytes::from_bytes(&result.body),
             handler_logs: result
                 .handler_logs
                 .into_iter()

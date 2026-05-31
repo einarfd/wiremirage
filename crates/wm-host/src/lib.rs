@@ -28,11 +28,11 @@ pub mod route_table;
 pub mod runtime;
 pub mod server;
 pub mod session;
-pub mod state;
 pub mod store;
 pub mod telemetry;
 pub mod ts_transpile;
 pub mod ui;
+pub mod wire;
 
 /// Handler bindings version this build of the host accepts. Pre-compiled
 /// wasm uploads must declare this exact value; mismatches are rejected.

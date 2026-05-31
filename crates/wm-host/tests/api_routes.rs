@@ -998,15 +998,8 @@ async fn dry_run_captures_streamed_chunks() {
     let body: serde_json::Value = resp.json().await.expect("json");
     // Status comes from the streamed head, not the (ignored) return.
     assert_eq!(body["status"], 202);
-    let bytes: Vec<u8> = body["body"]
-        .as_array()
-        .expect("body array")
-        .iter()
-        .map(|v| v.as_u64().unwrap() as u8)
-        .collect();
     assert_eq!(
-        String::from_utf8(bytes).unwrap(),
-        "data: a\n\ndata: b\n\n",
+        body["body"], "data: a\n\ndata: b\n\n",
         "dry-run captures the concatenated streamed chunks"
     );
 }
@@ -1386,9 +1379,7 @@ async fn dry_run_does_not_journal_or_mutate_state() {
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["status"], 200);
     assert!(body["snapshot_keys"].as_u64().unwrap() >= 1);
-    let dry_body = body["body"].as_array().expect("body array");
-    let bytes: Vec<u8> = dry_body.iter().map(|v| v.as_u64().unwrap() as u8).collect();
-    assert_eq!(String::from_utf8(bytes).unwrap(), "count=2");
+    assert_eq!(body["body"], "count=2");
 
     // Real state untouched: state listing still says 1, and a real
     // call returns count=2 (not count=3 as it would if the dry-run
@@ -1443,9 +1434,7 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
         .expect("post dry-run");
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.expect("json");
-    let dry_body = body["body"].as_array().expect("body array");
-    let bytes: Vec<u8> = dry_body.iter().map(|v| v.as_u64().unwrap() as u8).collect();
-    assert_eq!(String::from_utf8(bytes).unwrap(), "count=6");
+    assert_eq!(body["body"], "count=6");
 
     // Second seeded run from a different starting point. Snapshot is
     // disposable, so each run starts fresh.
@@ -1461,9 +1450,7 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
         .await
         .expect("post dry-run 2");
     let body: serde_json::Value = resp.json().await.expect("json");
-    let dry_body = body["body"].as_array().expect("body array");
-    let bytes: Vec<u8> = dry_body.iter().map(|v| v.as_u64().unwrap() as u8).collect();
-    assert_eq!(String::from_utf8(bytes).unwrap(), "count=2");
+    assert_eq!(body["body"], "count=2");
 
     // Real `count` was never written — a real GET starts at 1.
     let real = h
@@ -2321,13 +2308,7 @@ async fn dispatched_request_produces_journal_entry() {
     assert_eq!(entry["number"], 1);
     // Echo handler returns "echo: METHOD PATH" — verify the response
     // body was journaled too.
-    let body_bytes = entry["response"]["body"]
-        .as_array()
-        .expect("body")
-        .iter()
-        .map(|n| n.as_u64().unwrap() as u8)
-        .collect::<Vec<u8>>();
-    assert_eq!(body_bytes, b"echo: POST /v1/charges");
+    assert_eq!(entry["response"]["body"], "echo: POST /v1/charges");
 }
 
 #[tokio::test]

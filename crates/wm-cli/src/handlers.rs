@@ -16,7 +16,7 @@ use anyhow::Context;
 use wm_core::{
     Client, ClientError, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateUserBody,
     DryRunBody, ListGroupsParams, ListJournalParams, ListRoutesParams, ListUnmatchedParams,
-    PatchGroupBody, PatchRouteBody, PatchUserBody, StateSnapshotResponse, StateValue,
+    PatchGroupBody, PatchRouteBody, PatchUserBody, StateSnapshotResponse, WireBytes,
 };
 
 use crate::cli::{
@@ -685,8 +685,8 @@ fn print_state_human(snap: &StateSnapshotResponse) {
     keys.sort();
     for k in keys {
         match &snap.entries[k] {
-            StateValue::Text(s) => println!("{k} = {s}"),
-            StateValue::Binary { base64 } => println!("{k} = (base64) {base64}"),
+            WireBytes::Text(s) => println!("{k} = {s}"),
+            WireBytes::Binary { base64 } => println!("{k} = (base64) {base64}"),
         }
     }
 }
@@ -694,7 +694,7 @@ fn print_state_human(snap: &StateSnapshotResponse) {
 fn parse_override_pairs(
     raw: &[String],
     flag_name: &str,
-) -> Result<std::collections::HashMap<String, StateValue>, ClientError> {
+) -> Result<std::collections::HashMap<String, WireBytes>, ClientError> {
     let mut out = std::collections::HashMap::with_capacity(raw.len());
     for entry in raw {
         let (k, v) = entry.split_once('=').ok_or_else(|| {
@@ -706,7 +706,7 @@ fn parse_override_pairs(
                 "{flag_name} has empty key: {entry:?}"
             )));
         }
-        out.insert(key.to_string(), StateValue::Text(v.to_string()));
+        out.insert(key.to_string(), WireBytes::Text(v.to_string()));
     }
     Ok(out)
 }
@@ -1029,8 +1029,8 @@ mod tests {
     fn parse_override_pairs_happy_path() {
         let parsed = parse_override_pairs(&["counter=4".into(), "name=alice".into()], "--kv")
             .expect("parse");
-        assert!(matches!(parsed.get("counter"), Some(StateValue::Text(s)) if s == "4"));
-        assert!(matches!(parsed.get("name"), Some(StateValue::Text(s)) if s == "alice"));
+        assert!(matches!(parsed.get("counter"), Some(WireBytes::Text(s)) if s == "4"));
+        assert!(matches!(parsed.get("name"), Some(WireBytes::Text(s)) if s == "alice"));
     }
 
     #[test]
@@ -1055,6 +1055,6 @@ mod tests {
     fn parse_override_pairs_allows_equals_in_value() {
         // The value side may carry equals (e.g. base64 padding).
         let parsed = parse_override_pairs(&["k=a=b=c".into()], "--kv").expect("parse");
-        assert!(matches!(parsed.get("k"), Some(StateValue::Text(s)) if s == "a=b=c"));
+        assert!(matches!(parsed.get("k"), Some(WireBytes::Text(s)) if s == "a=b=c"));
     }
 }

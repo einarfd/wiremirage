@@ -20,7 +20,7 @@ use crate::models::{
     ListGroupsResponse, ListJournalParams, ListJournalResponse, ListRouteStateResponse,
     ListRoutesParams, ListRoutesResponse, ListTokensResponse, ListUnmatchedParams,
     ListUnmatchedResponse, PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
-    RouteSourceResponse, SetStateBody, StateSnapshotResponse, StateValue, UnmatchedRecord,
+    RouteSourceResponse, SetStateBody, StateSnapshotResponse, UnmatchedRecord, WireBytes,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -218,7 +218,7 @@ impl Client {
     pub async fn set_group_state(
         &self,
         group: &str,
-        entries: std::collections::HashMap<String, StateValue>,
+        entries: std::collections::HashMap<String, WireBytes>,
     ) -> Result<(), ClientError> {
         self.send_body_no_response(
             Method::PUT,
@@ -332,7 +332,7 @@ impl Client {
     pub async fn set_route_state(
         &self,
         slug: &str,
-        entries: std::collections::HashMap<String, StateValue>,
+        entries: std::collections::HashMap<String, WireBytes>,
     ) -> Result<(), ClientError> {
         let (group, number) = split_route_slug(slug)?;
         self.send_body_no_response(
