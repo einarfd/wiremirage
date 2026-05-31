@@ -120,7 +120,10 @@ pub enum GroupsCommand {
         /// Group name or ULID.
         name: String,
     },
-    /// Manage the group's per-route and per-group kv state.
+    /// Manage the group's shared (`gkv:`) and per-route (`kv:`) state.
+    /// Default lists the shared store; `--set` upserts into it,
+    /// `--snapshot` dumps it as round-trippable JSON, `--reset-from`
+    /// resets it to a baseline, `--clear` wipes all group state.
     State {
         /// Group name or ULID.
         name: String,
@@ -128,6 +131,16 @@ pub enum GroupsCommand {
         /// themselves stay alive.
         #[arg(long)]
         clear: bool,
+        /// Upsert a key into the group's shared store (repeatable):
+        /// `--set KEY=VALUE` (UTF-8 value).
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Print a round-trippable snapshot of the shared store as JSON.
+        #[arg(long)]
+        snapshot: bool,
+        /// Clear, then seed the shared store from a snapshot JSON file.
+        #[arg(long = "reset-from", value_name = "FILE")]
+        reset_from: Option<String>,
     },
     /// Clear journal entries for the group. (`wm journal list <group>`
     /// is the read counterpart; the per-group clear lives here so
@@ -241,8 +254,10 @@ pub enum RoutesCommand {
     /// Update a route's mutable fields. Pass at least one of `--method`,
     /// `--path`, or `--source-file`. Owner-or-admin only.
     Update(UpdateRouteArgs),
-    /// List or clear the route's per-route kv state. Default lists;
-    /// `--clear` wipes (route record stays). Owner-or-admin only.
+    /// Inspect or write the route's per-route kv state. Default lists;
+    /// `--set` upserts, `--snapshot` dumps a round-trippable JSON,
+    /// `--reset-from` resets to a baseline, `--clear` wipes. Owner-or-
+    /// admin only.
     State {
         /// Route slug `{group}/{n}`.
         slug: String,
@@ -250,6 +265,18 @@ pub enum RoutesCommand {
         /// itself stays alive.
         #[arg(long)]
         clear: bool,
+        /// Upsert a key (repeatable): `--set KEY=VALUE` (UTF-8 value).
+        /// Listed keys are written; others left untouched.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Print a round-trippable snapshot (full values) as JSON
+        /// instead of the key listing.
+        #[arg(long)]
+        snapshot: bool,
+        /// Clear, then seed from a snapshot JSON file
+        /// (`{"entries":{...}}`) — a reset to a known baseline.
+        #[arg(long = "reset-from", value_name = "FILE")]
+        reset_from: Option<String>,
     },
     /// Print the original handler source the route was created from.
     /// Empty (with a note) for pre-compiled `wasm` uploads. Owner-or-

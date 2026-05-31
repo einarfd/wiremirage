@@ -69,10 +69,14 @@ wm routes add --group stripe-mock --method POST --path /v1/charges \
 # to stdout. Owner-or-admin only.
 # wm routes source stripe-mock/1
 
-# Inspect / clear the route's private kv state (useful between test
-# phases when you want a clean slate without re-creating the route).
-# wm routes state stripe-mock/1                 # list
-# wm routes state stripe-mock/1 --clear         # wipe
+# Inspect / seed / clear the route's private kv state (useful between
+# test phases, or to configure a mock without driving traffic first).
+# wm routes state stripe-mock/1                       # list
+# wm routes state stripe-mock/1 --set mode=degraded    # upsert a key (UTF-8)
+# wm routes state stripe-mock/1 --snapshot             # round-trippable JSON
+# wm routes state stripe-mock/1 --reset-from base.json # clear + reseed baseline
+# wm routes state stripe-mock/1 --clear                # wipe
+# (the same flags work on `wm groups state GROUP` for the shared store)
 
 # Dry-run the handler against a synthetic request: see what it
 # returns without involving the SUT, with state reads/writes
@@ -125,7 +129,7 @@ Two binding quirks worth knowing up front, both inherited from the WIT-to-JS con
 - **Field names are camelCase**, not snake_case. The WIT contract uses kebab-case (`path-params`, `matched-pattern`); the JS binding produces `pathParams`, `matchedPattern`. Get this wrong and you get a runtime trap that's hard to read.
 - **`incr` returns a `bigint`**, not a Number — the WIT type is `s64`. So `routeStore.incr("count", 1n)` and `n % 3n === 0n`. Convert with `Number(n)` before JSON-serializing if you want a plain number in the response.
 
-Persistent state survives between requests until the group expires or you call `wm groups state GROUP --clear`. Use it for counters, last-seen-payload assertions, multi-step flows ("third call returns 503"), or anything else that needs to remember.
+Persistent state survives between requests until the group expires or you reset it. From outside a handler you can seed it (`wm routes state SLUG --set k=v`, `wm groups state GROUP --set k=v`), snapshot it (`--snapshot` → JSON), reset to a baseline (`--reset-from FILE`), or wipe it (`--clear`). Use state for counters, last-seen-payload assertions, multi-step flows ("third call returns 503"), config a handler reads (seed it once instead of driving traffic), or anything else that needs to remember.
 
 The handler also imports a `log` interface (see `wit/wiremirage.wit`) — log lines emitted from a handler attach to the corresponding journal entry and show up in `wm journal show`.
 
@@ -151,7 +155,7 @@ For host-wide observation, the MCP server exposes two streaming tools — `wait_
 
 - **Group TTL.** Default 24h, sliding on every request match. Tests that span more than a day, or non-sliding groups that pause for hours, can have routes vanish from under them. Bump TTL via `wm groups update` or `wm groups refresh`.
 - **Route conflicts.** Two routes with overlapping path patterns in the same group cause a conflict at create time. Across groups it's a host-wide conflict — only one mock can claim a given path/method. The error message names the conflicting route.
-- **No state reset from inside handlers.** Handlers can read/write their state but can't bulk-clear it. Use `wm groups state --clear` from outside.
+- **No bulk state ops from inside handlers.** Handlers read/write individual keys but can't bulk-clear or bulk-seed. That's an *external* operation: `wm {routes,groups} state --set / --snapshot / --reset-from / --clear`. Values seeded externally are UTF-8 strings (or base64 for binary), capped at 1 MiB per key.
 - **Ownership.** Routes carry an `owner_id`; non-admin callers can read shared state but only modify their own routes. Admins bypass.
 - **Implicit groups.** If you `wm routes add` without `--group`, the host creates a single-route group named `_route_<ulid>`. Useful for one-offs but they don't show up in `wm groups list` unless you ask.
 - **Mock traffic is unauthenticated by design.** SUTs don't carry tokens; only the `/__api/*` surface and `/__ui/*` (when present) are gated. Don't put secrets in mock route paths.

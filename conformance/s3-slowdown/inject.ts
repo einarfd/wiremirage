@@ -7,9 +7,8 @@
 // API (e.g. a Vertex `(model, region)` selective slowdown) you keep the core
 // and the rule format, and swap just those two functions + the rules.
 //
-// Rules live in GROUP state under "inject:rules", seeded at runtime via the
-// companion config route (config.ts) — WireMirage has no public state-write
-// API, so a mock route is how a reusable mock gets parameterized. Each rule:
+// Rules live in GROUP state under "inject:rules", seeded via the writable-state
+// API (ADR-0025: `PUT /__api/groups/{group}/state`). Each rule:
 //
 //   { "match": { "path_prefix"?, "method"?, "query"?: {k:v}, "header"?: {k:v} },
 //     "delay_ms"?: number, "throttle_first"?: number }

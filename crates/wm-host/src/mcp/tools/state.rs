@@ -19,6 +19,7 @@ use crate::dry_run::{DryRunRequest, dry_run};
 use crate::mcp::context::{auth_from, ensure_group_owner_or_admin, ensure_route_owner_or_admin};
 use crate::mcp::error::{map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
+use crate::state::{StateValue, decode_entries};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ClearGroupStateArgs {
@@ -55,6 +56,32 @@ pub struct RouteStateEntry {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SetRouteStateArgs {
+    /// Route slug `{group}/{number}`.
+    pub route: String,
+    /// Entries to upsert into the route's private `kv:` store. Values
+    /// are UTF-8 strings, or `{ "base64": "<...>" }` for binary. Listed
+    /// keys are written; others left untouched.
+    pub entries: std::collections::HashMap<String, StateValue>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SetGroupStateArgs {
+    /// Group name or ULID.
+    pub group: String,
+    /// Entries to upsert into the group's shared `gkv:` store (what
+    /// handlers read via `group-store`). Same value form as
+    /// `set_route_state`.
+    pub entries: std::collections::HashMap<String, StateValue>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SetStateResult {
+    /// Number of keys written.
+    pub written: u64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ClearRouteStateArgs {
     /// Route slug `{group}/{number}`.
     pub route: String,
@@ -87,13 +114,13 @@ pub struct DryRunRouteArgs {
     /// Seed entries written into the route's private `kv:` namespace
     /// *after* the real-state deep-copy and *before* the handler
     /// runs — lets you exercise state-dependent branches without
-    /// driving real traffic first. Map values are base64-encoded
-    /// bytes (`{ "counter": "NA==" }` to seed counter=`"4"`). Real
-    /// state is never touched.
-    pub kv_overrides_b64: Option<std::collections::HashMap<String, String>>,
-    /// Same as `kv_overrides_b64`, scoped to the group's shared
-    /// `gkv:` namespace.
-    pub gkv_overrides_b64: Option<std::collections::HashMap<String, String>>,
+    /// driving real traffic first. Values are UTF-8 strings, or
+    /// `{ "base64": "<...>" }` for binary (`{ "counter": "4" }` seeds
+    /// counter=`"4"`). Real state is never touched.
+    pub kv_overrides: Option<std::collections::HashMap<String, StateValue>>,
+    /// Same as `kv_overrides`, scoped to the group's shared `gkv:`
+    /// namespace.
+    pub gkv_overrides: Option<std::collections::HashMap<String, StateValue>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -113,26 +140,6 @@ pub struct DryRunLogEntry {
     pub level: String,
     pub message: String,
     pub timestamp: String,
-}
-
-/// Decode an `Option<HashMap<String, base64_string>>` into the
-/// `HashMap<String, Vec<u8>>` shape the dry-run pipeline expects.
-/// Surfaces the offending key in the error message on bad input.
-fn decode_overrides_b64(
-    raw: Option<&std::collections::HashMap<String, String>>,
-    field: &str,
-) -> Result<std::collections::HashMap<String, Vec<u8>>, ErrorData> {
-    let Some(raw) = raw else {
-        return Ok(std::collections::HashMap::new());
-    };
-    let mut out = std::collections::HashMap::with_capacity(raw.len());
-    for (k, v) in raw {
-        let bytes = B64
-            .decode(v.as_bytes())
-            .map_err(|e| validation(format!("{field}[{k:?}] is not valid base64: {e}")))?;
-        out.insert(k.clone(), bytes);
-    }
-    Ok(out)
 }
 
 fn parse_route_slug(slug: &str) -> Result<(String, u32), ErrorData> {
@@ -199,6 +206,49 @@ impl WmMcpServer {
     }
 
     #[tool(
+        name = "set_route_state",
+        description = "Upsert kv entries into a route's private store (e.g. seed config or a baseline before a test). Values are UTF-8 strings, or { \"base64\": \"...\" } for binary. Listed keys are written; others untouched. Owner-or-admin."
+    )]
+    pub async fn set_route_state(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<SetRouteStateArgs>,
+    ) -> Result<Json<SetStateResult>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let (group_ref, number) = parse_route_slug(&args.route)?;
+        let _route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        let entries = decode_entries(args.entries).map_err(validation)?;
+        let written = entries.len() as u64;
+        self.state
+            .routes()
+            .registry()
+            .set_route_state(&group_ref, number, entries)
+            .map_err(map_registry_error)?;
+        Ok(Json(SetStateResult { written }))
+    }
+
+    #[tool(
+        name = "set_group_state",
+        description = "Upsert kv entries into a group's shared store (what handlers read via group-store) — e.g. seed a reusable mock's config. Same value form as set_route_state. Owner-or-admin."
+    )]
+    pub async fn set_group_state(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<SetGroupStateArgs>,
+    ) -> Result<Json<SetStateResult>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let entries = decode_entries(args.entries).map_err(validation)?;
+        let written = entries.len() as u64;
+        self.state
+            .routes()
+            .registry()
+            .set_group_state(&group.id, entries)
+            .map_err(map_registry_error)?;
+        Ok(Json(SetStateResult { written }))
+    }
+
+    #[tool(
         name = "clear_route_state",
         description = "Wipe a single route's private kv namespace. The route record stays alive; only its state is cleared. `confirm` must be `true`. Owner-or-admin."
     )]
@@ -247,10 +297,6 @@ impl WmMcpServer {
                 .map_err(|e| validation(format!("body_b64 is not valid base64: {e}")))?,
             None => Vec::new(),
         };
-        let kv_overrides =
-            decode_overrides_b64(args.kv_overrides_b64.as_ref(), "kv_overrides_b64")?;
-        let gkv_overrides =
-            decode_overrides_b64(args.gkv_overrides_b64.as_ref(), "gkv_overrides_b64")?;
         let req = DryRunRequest {
             method: args.method,
             path,
@@ -258,8 +304,8 @@ impl WmMcpServer {
             body,
             path_params: args.path_params,
             query: Vec::new(),
-            kv_overrides,
-            gkv_overrides,
+            kv_overrides: args.kv_overrides.unwrap_or_default(),
+            gkv_overrides: args.gkv_overrides.unwrap_or_default(),
         };
         let result = dry_run(
             self.state.runtime().clone(),

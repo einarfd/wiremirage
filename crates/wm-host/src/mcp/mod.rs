@@ -149,6 +149,9 @@ mod tests {
             "clear_route_state",
             "dry_run_route",
             "show_route_state",
+            // ADR-0025
+            "set_group_state",
+            "set_route_state",
             // Slice 36
             "show_route_source",
             // Slice 43

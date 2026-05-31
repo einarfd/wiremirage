@@ -28,6 +28,7 @@ use crate::log::LogRecord;
 use crate::registry::Route;
 use crate::route_table::RouteTable;
 use crate::runtime::Runtime;
+use crate::state::StateValue;
 use crate::store::{Storage, StoreError};
 
 /// Synthetic request shape posted to the dry-run endpoint. Mirrors
@@ -53,16 +54,17 @@ pub struct DryRunRequest {
     /// *after* the real-state deep-copy and *before* the handler
     /// runs. Lets a caller test state-dependent branches like
     /// `if counter > 3` without first hitting the route N times.
-    /// Bytes-only (no list/set/hash seeding yet); collection-typed
+    /// Single-value-only (no list/set/hash seeding yet); collection-typed
     /// branches need the seed-via-real-traffic workaround for now.
-    /// Real `kv:` state is never touched — overrides land in the
-    /// disposable snapshot.
+    /// Values use the ADR-0025 [`StateValue`] encoding (UTF-8 string,
+    /// or `{base64}` for binary). Real `kv:` state is never touched —
+    /// overrides land in the disposable snapshot.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub kv_overrides: HashMap<String, Vec<u8>>,
+    pub kv_overrides: HashMap<String, StateValue>,
     /// Same as `kv_overrides`, scoped to the group's shared `gkv:`
     /// namespace.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub gkv_overrides: HashMap<String, Vec<u8>>,
+    pub gkv_overrides: HashMap<String, StateValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,10 +232,14 @@ async fn run_in_snapshot(
     };
     // Apply seed-state overrides on top of the real-state deep-copy.
     // Order matters: overrides win, so a caller can flip `counter=4`
-    // without resetting the rest of the route's state. Bytes-only;
-    // list/set/hash overrides land in a follow-up.
-    for (k, v) in &req.kv_overrides {
-        if let Err(e) = route_bucket.set(k, v.clone()) {
+    // without resetting the rest of the route's state. Single-value
+    // only; list/set/hash overrides land in a follow-up.
+    for (k, v) in req.kv_overrides {
+        let bytes = match v.into_bytes() {
+            Ok(b) => b,
+            Err(e) => return Err(override_decode_fail("kv", &k, e, snapshot_keys)),
+        };
+        if let Err(e) = route_bucket.set(&k, bytes) {
             return Err(RunFail {
                 message: format!("apply kv override {k:?}: {e}"),
                 logs: Vec::new(),
@@ -241,8 +247,12 @@ async fn run_in_snapshot(
             });
         }
     }
-    for (k, v) in &req.gkv_overrides {
-        if let Err(e) = group_bucket.set(k, v.clone()) {
+    for (k, v) in req.gkv_overrides {
+        let bytes = match v.into_bytes() {
+            Ok(b) => b,
+            Err(e) => return Err(override_decode_fail("gkv", &k, e, snapshot_keys)),
+        };
+        if let Err(e) = group_bucket.set(&k, bytes) {
             return Err(RunFail {
                 message: format!("apply gkv override {k:?}: {e}"),
                 logs: Vec::new(),
@@ -420,6 +430,19 @@ async fn run_engine_in_snapshot(
             logs,
             snapshot_keys,
         }),
+    }
+}
+
+fn override_decode_fail(
+    ns: &str,
+    key: &str,
+    e: base64::DecodeError,
+    snapshot_keys: u64,
+) -> RunFail {
+    RunFail {
+        message: format!("decode {ns} override {key:?}: {e}"),
+        logs: Vec::new(),
+        snapshot_keys,
     }
 }
 

@@ -510,6 +510,25 @@ inside cargo's `OUT_DIR`, stamps the path into
 `WM_JS_ENGINE_WASM_OVERRIDE=/abs/path` skips docker for
 release-image builds or no-Docker contributors. Nothing is checked
 in under `crates/wm-host/vendored/` (the directory is gitignored).
+ADR-0025 added a **writable handler-state API**, completing the
+external-state CRUD (was read + clear): `PUT
+/__api/routes/{group}/{n}/state` and `PUT /__api/groups/{group}/state`
+upsert keys (listed keys written, others untouched); `GET
+.../state?format=snapshot` returns a round-trippable dump; reset is
+`clear + write`. State values cross the JSON boundary as a **UTF-8
+string by default, or `{ "base64": "..." }` for binary — never
+array-of-ints** (token-efficient + readable on the agent/MCP surface);
+this same `StateValue` encoding (`crate::state`) is shared by dry-run's
+`kv_overrides`/`gkv_overrides`, which were migrated to it (a clean
+breaking change — the old REST array-of-ints / MCP `kv_overrides_b64`
+fields are gone). Per-key cap 1 MiB; owner-or-admin. Surfaces: REST,
+MCP (`set_route_state` / `set_group_state`, 25 tools now), CLI (`wm
+routes state --set KEY=VALUE / --snapshot / --reset-from FILE`, same on
+`wm groups state`). A reusable runtime-configurable mock now seeds its
+config straight through this API (the `conformance/s3-slowdown` lane's
+`config.ts` seeding route was retired in favor of `PUT group state`).
+The reusable-mock *bundle* format (routes + initial state + knob
+manifest) is deferred.
 
 ## Where the design lives
 

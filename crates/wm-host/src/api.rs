@@ -34,6 +34,7 @@ use crate::registry::{
     Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, RouteStateEntry, render_slug,
 };
 use crate::server::is_reserved_path;
+use crate::state::StateValue;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
 /// Maximum size of a `/__api/*` JSON body. axum's default is 2 MiB;
@@ -52,7 +53,9 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/__api/routes/{group}/{number}/state",
-            get(get_route_state).delete(delete_route_state),
+            get(get_route_state)
+                .put(set_route_state)
+                .delete(delete_route_state),
         )
         .route(
             "/__api/routes/{group}/{number}/source",
@@ -102,7 +105,9 @@ pub fn router() -> Router<AppState> {
         .route("/__api/groups/{group}/refresh", post(refresh_group))
         .route(
             "/__api/groups/{group}/state",
-            axum::routing::delete(delete_group_state),
+            get(get_group_state)
+                .put(set_group_state)
+                .delete(delete_group_state),
         )
         .route(
             "/__api/groups/{group}/journal",
@@ -981,11 +986,56 @@ struct ListRouteStateResponse {
     entries: Vec<RouteStateEntry>,
 }
 
+/// Round-trippable state snapshot (ADR-0025): bytes entries only, as the
+/// same `string | {base64}` values `PUT .../state` accepts. Collection
+/// entries (list/hash/set) are omitted — they can't round-trip through
+/// the bytes-only write surface.
+#[derive(Debug, Serialize)]
+struct StateSnapshotResponse {
+    entries: std::collections::HashMap<String, StateValue>,
+}
+
+/// Write payload for `PUT .../state` (ADR-0025).
+#[derive(Debug, Deserialize)]
+struct SetStateBody {
+    entries: std::collections::HashMap<String, StateValue>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StateQuery {
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// Decode `string | {base64}` entries to bytes, enforcing the per-key
+/// size cap (shared with the MCP write path via `crate::state`).
+fn decode_state_entries(
+    entries: std::collections::HashMap<String, StateValue>,
+) -> Result<std::collections::HashMap<String, Vec<u8>>, ApiError> {
+    crate::state::decode_entries(entries).map_err(ApiError::validation)
+}
+
+/// Render a state listing as the preview shape (default) or, for
+/// `?format=snapshot`, the round-trippable bytes-only snapshot.
+fn render_state(entries: Vec<RouteStateEntry>, q: &StateQuery) -> Response {
+    if q.format.as_deref() == Some("snapshot") {
+        let entries = entries
+            .into_iter()
+            .filter(|e| e.kind == "bytes")
+            .filter_map(|e| e.value.map(|v| (e.key, StateValue::from_bytes(&v))))
+            .collect();
+        Json(StateSnapshotResponse { entries }).into_response()
+    } else {
+        Json(ListRouteStateResponse { entries }).into_response()
+    }
+}
+
 async fn get_route_state(
     State(state): State<AppState>,
     auth: AuthContext,
     Path((group, number)): Path<(String, u32)>,
-) -> Result<Json<ListRouteStateResponse>, ApiError> {
+    Query(q): Query<StateQuery>,
+) -> Result<Response, ApiError> {
     let route = state
         .routes()
         .registry()
@@ -996,7 +1046,30 @@ async fn get_route_state(
         ));
     }
     let entries = state.routes().registry().list_route_state(&group, number)?;
-    Ok(Json(ListRouteStateResponse { entries }))
+    Ok(render_state(entries, &q))
+}
+
+async fn set_route_state(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+    Json(body): Json<SetStateBody>,
+) -> Result<StatusCode, ApiError> {
+    let route = state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group, number)?;
+    if route.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may write its state",
+        ));
+    }
+    let entries = decode_state_entries(body.entries)?;
+    state
+        .routes()
+        .registry()
+        .set_route_state(&group, number, entries)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_route_state(
@@ -1957,6 +2030,32 @@ async fn refresh_group(
     let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
     let refreshed = state.routes().registry().refresh_group(&group.id)?;
     Ok(Json(GroupResponse::from(&refreshed)))
+}
+
+async fn get_group_state(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    Query(q): Query<StateQuery>,
+) -> Result<Response, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    let entries = state.routes().registry().list_group_state(&group.id)?;
+    Ok(render_state(entries, &q))
+}
+
+async fn set_group_state(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    Json(body): Json<SetStateBody>,
+) -> Result<StatusCode, ApiError> {
+    let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
+    let entries = decode_state_entries(body.entries)?;
+    state
+        .routes()
+        .registry()
+        .set_group_state(&group.id, entries)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_group_state(
