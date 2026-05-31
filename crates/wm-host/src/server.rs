@@ -113,19 +113,23 @@ pub struct AppState {
     /// isn't held open by an idle EventSource on a browser tab.
     /// `None` in tests that don't bother wiring it up.
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
-    /// When true, append `Secure` to session + CSRF cookies. Set via
-    /// `WM_SECURE_COOKIES=1` in deployments behind an HTTPS edge
-    /// (Caddy, an ALB, etc.). Default off so dev workflows over
-    /// plain HTTP keep working — browsers drop `Secure` cookies on
-    /// non-TLS connections, which would break login.
+    /// When true, append `Secure` to session + CSRF cookies. Enabled by
+    /// `WM_TRUSTED_PROXY` (ADR-0027) — i.e. when the host is behind an
+    /// HTTPS-terminating edge. Default off so dev workflows over plain
+    /// HTTP keep working (browsers drop `Secure` cookies on non-TLS
+    /// connections, which would break login).
     secure_cookies: bool,
     /// When true, honor `X-Forwarded-For` for the login throttle's
-    /// per-IP key. Default off — the placeholder IP is used in that
-    /// case, which collapses everyone into one throttle bucket but
-    /// makes IP spoofing impossible. Set via
-    /// `WM_TRUST_FORWARDED_HEADERS=1` only when the host is fronted
-    /// by a reverse proxy that populates the header reliably.
+    /// per-IP key and `X-Forwarded-Proto`/`-Host` for OAuth redirect-URI
+    /// derivation. Enabled by `WM_TRUSTED_PROXY` (ADR-0027). Default off
+    /// — the placeholder IP is used otherwise, which collapses everyone
+    /// into one throttle bucket but makes IP spoofing impossible.
     trust_forwarded_headers: bool,
+    /// Public hostname(s) the trusted edge serves, added to rmcp's MCP
+    /// `Host`-header allowlist on top of the localhost defaults (ADR-0027,
+    /// DNS-rebinding protection). Empty = MCP accepts localhost only. Set
+    /// from `WM_TRUSTED_PROXY`.
+    mcp_allowed_hosts: Vec<String>,
     /// GitHub OAuth config, populated when both `WM_GITHUB_CLIENT_ID`
     /// and `WM_GITHUB_CLIENT_SECRET` are set. `None` means the login
     /// page hides the "Continue with GitHub" button and the
@@ -153,6 +157,7 @@ impl AppState {
             shutdown: None,
             secure_cookies: false,
             trust_forwarded_headers: false,
+            mcp_allowed_hosts: Vec::new(),
             github_oauth: None,
         }
     }
@@ -167,12 +172,23 @@ impl AppState {
         self
     }
 
+    /// Public hostname(s) added to the MCP `Host`-header allowlist
+    /// (ADR-0027). Set from `WM_TRUSTED_PROXY`.
+    pub fn with_mcp_allowed_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.mcp_allowed_hosts = hosts;
+        self
+    }
+
     pub fn secure_cookies(&self) -> bool {
         self.secure_cookies
     }
 
     pub fn trust_forwarded_headers(&self) -> bool {
         self.trust_forwarded_headers
+    }
+
+    pub fn mcp_allowed_hosts(&self) -> &[String] {
+        &self.mcp_allowed_hosts
     }
 
     pub fn with_shutdown(mut self, rx: tokio::sync::watch::Receiver<bool>) -> Self {

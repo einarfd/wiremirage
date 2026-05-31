@@ -81,18 +81,22 @@ async fn main() -> anyhow::Result<()> {
     // GitHub OAuth all at once.
     ensure_login_method_available(&state)?;
 
-    // Slice 44: opt-in hardening flags for deployments behind a TLS
-    // edge + reverse proxy. Defaults stay safe for plain-HTTP dev
-    // workflows (no `Secure` cookies, no `X-Forwarded-For` trust).
-    if parse_env_bool("WM_SECURE_COOKIES") {
-        tracing::info!("WM_SECURE_COOKIES=1; emitting `Secure` on session + CSRF cookies");
-        state = state.with_secure_cookies(true);
-    }
-    if parse_env_bool("WM_TRUST_FORWARDED_HEADERS") {
+    // ADR-0027: one switch for "behind a trusted TLS-terminating proxy".
+    // `WM_TRUSTED_PROXY=<host[,host...]>` turns on the whole behind-a-proxy
+    // posture together — `Secure` cookies, trusting `X-Forwarded-*` (throttle
+    // IP + OAuth proto/host), and allowlisting the public hostname(s) for the
+    // MCP `Host`-header check. Unset = direct-exposure defaults. One setting
+    // so it can't be half-configured.
+    if let Some(hosts) = trusted_proxy_hosts() {
         tracing::info!(
-            "WM_TRUST_FORWARDED_HEADERS=1; honoring X-Forwarded-For for the login throttle key"
+            hosts = ?hosts,
+            "WM_TRUSTED_PROXY set; behind-a-proxy mode: Secure cookies, trusting \
+             X-Forwarded-*, and allowlisting these hosts for MCP"
         );
-        state = state.with_trust_forwarded_headers(true);
+        state = state
+            .with_secure_cookies(true)
+            .with_trust_forwarded_headers(true)
+            .with_mcp_allowed_hosts(hosts);
     }
 
     // Shutdown signal that long-lived handlers (the SSE journal tail,
@@ -164,19 +168,19 @@ async fn shutdown_signal() {
     }
 }
 
-/// Parse an env var as a boolean flag. Accepts `1`, `true`, `yes`,
-/// `on` (case-insensitive) as true; any other value (including
-/// `0`, `false`, empty, unset) is false. Lets operators write
-/// `WM_SECURE_COOKIES=true` or `=1` interchangeably without
-/// surprising the next reader.
-fn parse_env_bool(name: &str) -> bool {
-    match env::var(name) {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
+/// Parse `WM_TRUSTED_PROXY` (ADR-0027): a comma-separated list of the
+/// public hostname(s) the trusted TLS edge serves. Returns `Some(hosts)`
+/// when at least one non-empty hostname is present, else `None` (unset /
+/// empty → direct-exposure defaults). Presence is the switch; the
+/// hostnames feed the MCP `Host`-header allowlist.
+fn trusted_proxy_hosts() -> Option<Vec<String>> {
+    let raw = env::var("WM_TRUSTED_PROXY").ok()?;
+    let hosts: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!hosts.is_empty()).then_some(hosts)
 }
 
 /// Parse `WM_LOCAL_AUTH` + `SESSION_SECRET` and attach the resulting

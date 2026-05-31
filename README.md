@@ -176,7 +176,7 @@ design — SUTs don't have credentials.
 - `WM_LISTEN_ADDR` — default `127.0.0.1:8080`. The release Docker image overrides
   this to `0.0.0.0:8080` so the container is reachable when published with
   `-p 8080:8080`. Production deployments behind a reverse proxy should bind to
-  `127.0.0.1` (combined with `WM_TRUST_FORWARDED_HEADERS=1` — see *Production
+  `127.0.0.1` (combined with `WM_TRUSTED_PROXY` — see *Production
   hardening* below).
 
 ### API tokens — bootstrap (optional when a browser-login path is configured)
@@ -400,22 +400,19 @@ The `/__health` and `/__ready` probes are deliberately **not** recorded
 (`/__api/mcp`) isn't HTTP-instrumented yet — per-tool MCP metrics are a
 separate slice.
 
-### MCP transport (optional, required for production)
+### MCP transport (DNS-rebinding allowlist)
 
-- `WM_MCP_ALLOWED_HOSTS` — comma-separated hostnames (or `host:port`)
-  that the streamable-HTTP MCP transport will accept in the `Host`
-  header. **Required for any non-localhost deployment.** rmcp defaults
-  to `localhost`, `127.0.0.1`, `::1` only as DNS-rebinding protection;
-  a request reaching the host with `Host: wm.example.com` is otherwise
-  rejected before the auth middleware runs, and a native MCP client
-  reports it as an opaque "authorization failed" error. The defaults
-  stay enabled — set this to the public hostname(s), not as a
-  replacement.
+The streamable-HTTP MCP transport allowlists the `Host` header as
+DNS-rebinding protection (rmcp defaults to `localhost`, `127.0.0.1`, `::1`).
+Behind a reverse proxy, a request arriving with `Host: wm.example.com` is
+otherwise rejected **before the auth middleware runs**, which a native MCP
+client reports as an opaque "authorization failed."
 
-  Example for a deployment at `wm.example.com`:
-  ```
-  WM_MCP_ALLOWED_HOSTS=wm.example.com
-  ```
+This is handled by **`WM_TRUSTED_PROXY`** (see *Production hardening* below) —
+the public hostname(s) you set there are added to the allowlist on top of the
+localhost defaults. There's no separate MCP variable. If a remote MCP client
+fails to connect with a valid token, the first thing to check is that
+`WM_TRUSTED_PROXY` includes the hostname.
 
 ## Using the CLI
 
@@ -543,19 +540,23 @@ Multi-host pub/sub for the bus lands in a follow-up slice.
 
 The defaults are tuned for plain-HTTP dev workflows. Before exposing the host
 even on a trusted network behind a TLS edge (Caddy, an ALB, nginx with TLS, …),
-flip these two flags so the cookie + throttle behavior matches the deployment
-shape:
+set the one behind-a-proxy switch:
 
-- `WM_SECURE_COOKIES=1` — appends `Secure` to the `wm_session` and `wm_csrf`
-  cookies. Browsers will then refuse to send them on plain HTTP, which is what
-  you want when every legitimate request reaches you over HTTPS. Leave unset
-  for `just run-web-fast` / local-HTTP development.
-- `WM_TRUST_FORWARDED_HEADERS=1` — honors `X-Forwarded-For` for the
-  per-IP login throttle. Default is off because the header is set by any
-  caller and trusting it from a directly-reachable host lets an attacker
-  spoof the throttle bucket. Only enable this when a reverse proxy you control
-  is the **only** thing that can reach the host (e.g. the host binds to
-  `127.0.0.1` and Caddy proxies via `localhost:<port>`).
+- `WM_TRUSTED_PROXY=<hostname>` (comma-separated for several) — declares that
+  wm-host sits behind a trusted, HTTPS-terminating reverse proxy serving that
+  hostname, and turns on the whole posture together (ADR-0027):
+  - appends `Secure` to the `wm_session` / `wm_csrf` cookies (browsers then
+    only send them over HTTPS);
+  - trusts `X-Forwarded-For` (per-IP login throttle) and `X-Forwarded-Proto` /
+    `-Host` (OAuth redirect-URI derivation);
+  - adds the hostname(s) to the MCP `Host`-header allowlist (on top of the
+    localhost defaults).
+
+  Leave it unset for `just run-web-fast` / local-HTTP development (direct
+  exposure: no `Secure`, no forwarded-header trust, MCP localhost-only). It's
+  one setting so you can't half-configure the proxy posture. Pair it with
+  binding the host to `127.0.0.1` so the proxy is the only ingress — otherwise
+  a directly-reachable host could be hit with a spoofed `X-Forwarded-For`.
 
 In addition, the first-deploy checklist:
 
@@ -571,9 +572,9 @@ In addition, the first-deploy checklist:
   `X-Content-Type-Options: nosniff`, and consider a strict CSP — the UI only
   loads same-origin scripts (Ace is vendored under `/__ui/static/ace/`).
 - **Bind the host to `127.0.0.1`** in the deployment compose / systemd unit so
-  the only ingress is through the reverse proxy. Combined with
-  `WM_TRUST_FORWARDED_HEADERS=1`, the throttle keys to the proxy-reported
-  client IP correctly and is not spoofable.
+  the only ingress is through the reverse proxy. Combined with `WM_TRUSTED_PROXY`
+  (which turns on forwarded-header trust), the throttle keys to the
+  proxy-reported client IP correctly and is not spoofable.
 
 ## License
 

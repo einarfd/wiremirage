@@ -12,7 +12,6 @@
 //! plus the resolved `AuthContext` into the request extensions where
 //! per-tool handlers can pull them out.
 
-use std::env;
 use std::sync::Arc;
 
 use axum::Router;
@@ -37,12 +36,13 @@ pub use server::WmMcpServer;
 /// main router. Each request is authenticated by the same
 /// `/__api/*` middleware before reaching the rmcp tower service.
 pub fn router(state: AppState) -> Router {
+    let config = mcp_server_config(state.mcp_allowed_hosts());
     let state = Arc::new(state);
     let factory_state = state.clone();
     let service = StreamableHttpService::new(
         move || Ok(WmMcpServer::new(factory_state.clone())),
         Arc::new(LocalSessionManager::default()),
-        mcp_server_config(),
+        config,
     );
 
     // Apply our auth layer before rmcp gets the request.
@@ -54,7 +54,8 @@ pub fn router(state: AppState) -> Router {
         ))
 }
 
-/// Build the rmcp transport config, honoring `WM_MCP_ALLOWED_HOSTS`.
+/// Build the rmcp transport config, allowlisting the trusted-proxy
+/// hostname(s) (`WM_TRUSTED_PROXY`, threaded through `AppState`; ADR-0027).
 ///
 /// rmcp's streamable-HTTP server defaults its `allowed_hosts` to
 /// `["localhost", "127.0.0.1", "::1"]` as DNS-rebinding protection.
@@ -63,29 +64,16 @@ pub fn router(state: AppState) -> Router {
 /// `wm.example.com`), which would otherwise be rejected with
 /// `"disallowed Host header (possible DNS rebinding attempt)"` —
 /// before our own auth middleware sees the request, surfacing to the
-/// client as an opaque auth failure.
-///
-/// `WM_MCP_ALLOWED_HOSTS` is a comma-separated list of additional
-/// hostnames (or `host:port` strings) the MCP transport will accept.
-/// The defaults (`localhost`, `127.0.0.1`, `::1`) remain — operators
-/// supply the public hostname on top.
-fn mcp_server_config() -> StreamableHttpServerConfig {
+/// client as an opaque auth failure. `extra_hosts` (the
+/// `WM_TRUSTED_PROXY` value) are added on top of the localhost defaults,
+/// which remain so the dev path keeps working.
+fn mcp_server_config(extra_hosts: &[String]) -> StreamableHttpServerConfig {
     let cfg = StreamableHttpServerConfig::default();
-    let Ok(raw) = env::var("WM_MCP_ALLOWED_HOSTS") else {
-        return cfg;
-    };
-    let extras: Vec<String> = raw
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if extras.is_empty() {
+    if extra_hosts.is_empty() {
         return cfg;
     }
-    // Start from the defaults so the dev path (localhost / 127.0.0.1)
-    // still works alongside the operator-supplied public hostnames.
     let mut hosts = cfg.allowed_hosts.clone();
-    hosts.extend(extras);
+    hosts.extend(extra_hosts.iter().cloned());
     cfg.with_allowed_hosts(hosts)
 }
 
@@ -220,5 +208,26 @@ mod tests {
                 "delete_group missing field `{f}`: {dprops:?}",
             );
         }
+    }
+
+    /// ADR-0027: `WM_TRUSTED_PROXY` hosts are *added* to the rmcp
+    /// Host-header allowlist, not a replacement — the localhost defaults
+    /// stay so the dev path keeps working.
+    #[test]
+    fn mcp_config_allowlists_trusted_hosts_on_top_of_defaults() {
+        let defaults = mcp_server_config(&[]);
+        let with_host = mcp_server_config(&["wm.example.com".to_string()]);
+        assert!(
+            with_host
+                .allowed_hosts
+                .iter()
+                .any(|h| h == "wm.example.com"),
+            "configured host should be allowlisted"
+        );
+        assert_eq!(
+            with_host.allowed_hosts.len(),
+            defaults.allowed_hosts.len() + 1,
+            "added on top of the localhost defaults, not replacing them"
+        );
     }
 }
