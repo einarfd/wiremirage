@@ -28,8 +28,8 @@ use crate::log::LogRecord;
 use crate::registry::Route;
 use crate::route_table::RouteTable;
 use crate::runtime::Runtime;
-use crate::state::StateValue;
 use crate::store::{Storage, StoreError};
+use crate::wire::WireBytes;
 
 /// Synthetic request shape posted to the dry-run endpoint. Mirrors
 /// the WIT request type, with sensible defaults for fields most
@@ -40,7 +40,7 @@ pub struct DryRunRequest {
     pub path: String,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
-    #[serde(default, with = "serde_bytes_field")]
+    #[serde(default, with = "crate::wire::bytes_field")]
     pub body: Vec<u8>,
     /// Override the path-params list the handler observes. When
     /// omitted, the handler sees an empty list (the dry-run path
@@ -56,22 +56,22 @@ pub struct DryRunRequest {
     /// `if counter > 3` without first hitting the route N times.
     /// Single-value-only (no list/set/hash seeding yet); collection-typed
     /// branches need the seed-via-real-traffic workaround for now.
-    /// Values use the ADR-0025 [`StateValue`] encoding (UTF-8 string,
+    /// Values use the ADR-0025 [`WireBytes`] encoding (UTF-8 string,
     /// or `{base64}` for binary). Real `kv:` state is never touched —
     /// overrides land in the disposable snapshot.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub kv_overrides: HashMap<String, StateValue>,
+    pub kv_overrides: HashMap<String, WireBytes>,
     /// Same as `kv_overrides`, scoped to the group's shared `gkv:`
     /// namespace.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub gkv_overrides: HashMap<String, StateValue>,
+    pub gkv_overrides: HashMap<String, WireBytes>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DryRunResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    #[serde(with = "serde_bytes_field")]
+    #[serde(with = "crate::wire::bytes_field")]
     pub body: Vec<u8>,
     pub handler_logs: Vec<DryRunLog>,
     pub duration_ms: u64,
@@ -456,17 +456,5 @@ fn into_dry_log(r: LogRecord) -> DryRunLog {
         level: r.level.as_str().to_string(),
         message: r.message,
         timestamp: r.timestamp,
-    }
-}
-
-mod serde_bytes_field {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_bytes(bytes)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        Vec::<u8>::deserialize(d)
     }
 }

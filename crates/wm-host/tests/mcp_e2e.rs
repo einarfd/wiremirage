@@ -1252,9 +1252,9 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
         .await
         .expect("dry_run_route");
     let structured = resp.structured_content.expect("structured");
-    let body_b64 = structured["body_b64"].as_str().expect("body_b64");
-    let body_bytes = B64.decode(body_b64).expect("decode body");
-    assert_eq!(String::from_utf8(body_bytes).unwrap(), "count=10");
+    // ADR-0026: body is string-first, so a text response comes back as a
+    // plain JSON string.
+    assert_eq!(structured["body"], "count=10");
 
     // The `{base64}` escape hatch seeds the same bytes.
     let resp = client
@@ -1274,10 +1274,7 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
         .await
         .expect("dry_run_route binary override");
     let structured = resp.structured_content.expect("structured");
-    let body_bytes = B64
-        .decode(structured["body_b64"].as_str().unwrap())
-        .unwrap();
-    assert_eq!(String::from_utf8(body_bytes).unwrap(), "count=10");
+    assert_eq!(structured["body"], "count=10");
 
     client.cancel().await.expect("cancel");
 }

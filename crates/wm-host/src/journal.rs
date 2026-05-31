@@ -98,6 +98,10 @@ pub struct RequestEnvelope {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    // ADR-0026: bodies cross JSON string-first (UTF-8 string, or
+    // {base64} for binary) — not array-of-ints. Field stays Vec<u8>.
+    #[serde(with = "crate::wire::bytes_field")]
+    #[schemars(with = "crate::wire::WireBytes")]
     pub body: Vec<u8>,
     pub body_truncated: bool,
     pub original_body_size: usize,
@@ -107,6 +111,8 @@ pub struct RequestEnvelope {
 pub struct ResponseEnvelope {
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    #[serde(with = "crate::wire::bytes_field")]
+    #[schemars(with = "crate::wire::WireBytes")]
     pub body: Vec<u8>,
     pub body_truncated: bool,
     pub original_body_size: usize,

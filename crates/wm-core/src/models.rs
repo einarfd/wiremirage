@@ -142,23 +142,23 @@ pub struct PatchRouteBody {
 
 // -- Route state + dry-run ---------------------------------------------------
 
-/// A byte-valued handler-state entry on the wire (ADR-0025): a bare
-/// UTF-8 string, or `{ "base64": "<...>" }` for binary. Mirrors
-/// `wm_host::state::StateValue`.
+/// A byte value on the wire (ADR-0025 / ADR-0026): a bare UTF-8 string,
+/// or `{ "base64": "<...>" }` for binary. Mirrors `wm_host::wire::WireBytes`.
+/// Used for state entries and (via [`bytes_field`]) request/response bodies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum StateValue {
+pub enum WireBytes {
     Text(String),
     Binary { base64: String },
 }
 
-impl StateValue {
+impl WireBytes {
     /// Wrap raw bytes for sending: a string when valid UTF-8, else base64.
     pub fn from_bytes(bytes: &[u8]) -> Self {
         use base64::Engine as _;
         match std::str::from_utf8(bytes) {
-            Ok(s) => StateValue::Text(s.to_owned()),
-            Err(_) => StateValue::Binary {
+            Ok(s) => WireBytes::Text(s.to_owned()),
+            Err(_) => WireBytes::Binary {
                 base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             },
         }
@@ -168,25 +168,43 @@ impl StateValue {
     pub fn into_bytes(self) -> Result<Vec<u8>, base64::DecodeError> {
         use base64::Engine as _;
         match self {
-            StateValue::Text(s) => Ok(s.into_bytes()),
-            StateValue::Binary { base64 } => {
+            WireBytes::Text(s) => Ok(s.into_bytes()),
+            WireBytes::Binary { base64 } => {
                 base64::engine::general_purpose::STANDARD.decode(base64)
             }
         }
     }
 }
 
+/// `#[serde(with = "crate::models::bytes_field")]` for a `Vec<u8>` field
+/// whose JSON form is [`WireBytes`] (string-first) — request/response
+/// bodies. Field stays `Vec<u8>`; only the wire encoding changes.
+pub mod bytes_field {
+    use super::WireBytes;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        WireBytes::from_bytes(bytes).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        WireBytes::deserialize(d)?
+            .into_bytes()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Write payload for `PUT /__api/{routes,groups}/.../state`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetStateBody {
-    pub entries: std::collections::HashMap<String, StateValue>,
+    pub entries: std::collections::HashMap<String, WireBytes>,
 }
 
 /// Round-trippable response for `GET .../state?format=snapshot` — bytes
 /// entries only, in the same shape `SetStateBody` accepts.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct StateSnapshotResponse {
-    pub entries: std::collections::HashMap<String, StateValue>,
+    pub entries: std::collections::HashMap<String, WireBytes>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -223,7 +241,11 @@ pub struct DryRunBody {
     pub path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        with = "crate::models::bytes_field"
+    )]
     pub body: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_params: Option<Vec<(String, String)>>,
@@ -232,19 +254,20 @@ pub struct DryRunBody {
     /// Pre-populate the route's private `kv:` snapshot with these
     /// entries before the handler runs. Lets agents exercise state-
     /// dependent branches without driving real traffic first. Values
-    /// use the ADR-0025 [`StateValue`] encoding. Real state is never
+    /// use the ADR-0025 [`WireBytes`] encoding. Real state is never
     /// touched — overrides land in the disposable dry-run namespace.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub kv_overrides: std::collections::HashMap<String, StateValue>,
+    pub kv_overrides: std::collections::HashMap<String, WireBytes>,
     /// Same as `kv_overrides`, scoped to the group's shared `gkv:`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub gkv_overrides: std::collections::HashMap<String, StateValue>,
+    pub gkv_overrides: std::collections::HashMap<String, WireBytes>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DryRunResult {
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    #[serde(with = "crate::models::bytes_field")]
     pub body: Vec<u8>,
     pub handler_logs: Vec<DryRunLog>,
     pub duration_ms: u64,
@@ -288,6 +311,7 @@ pub struct RequestEnvelope {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    #[serde(with = "crate::models::bytes_field")]
     pub body: Vec<u8>,
     pub body_truncated: bool,
     pub original_body_size: usize,
@@ -297,6 +321,7 @@ pub struct RequestEnvelope {
 pub struct ResponseEnvelope {
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    #[serde(with = "crate::models::bytes_field")]
     pub body: Vec<u8>,
     pub body_truncated: bool,
     pub original_body_size: usize,

@@ -34,7 +34,7 @@ use crate::registry::{
     Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, RouteStateEntry, render_slug,
 };
 use crate::server::is_reserved_path;
-use crate::state::StateValue;
+use crate::wire::WireBytes;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
 /// Maximum size of a `/__api/*` JSON body. axum's default is 2 MiB;
@@ -992,13 +992,13 @@ struct ListRouteStateResponse {
 /// the bytes-only write surface.
 #[derive(Debug, Serialize)]
 struct StateSnapshotResponse {
-    entries: std::collections::HashMap<String, StateValue>,
+    entries: std::collections::HashMap<String, WireBytes>,
 }
 
 /// Write payload for `PUT .../state` (ADR-0025).
 #[derive(Debug, Deserialize)]
 struct SetStateBody {
-    entries: std::collections::HashMap<String, StateValue>,
+    entries: std::collections::HashMap<String, WireBytes>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1010,9 +1010,9 @@ struct StateQuery {
 /// Decode `string | {base64}` entries to bytes, enforcing the per-key
 /// size cap (shared with the MCP write path via `crate::state`).
 fn decode_state_entries(
-    entries: std::collections::HashMap<String, StateValue>,
+    entries: std::collections::HashMap<String, WireBytes>,
 ) -> Result<std::collections::HashMap<String, Vec<u8>>, ApiError> {
-    crate::state::decode_entries(entries).map_err(ApiError::validation)
+    crate::wire::decode_entries(entries).map_err(ApiError::validation)
 }
 
 /// Render a state listing as the preview shape (default) or, for
@@ -1022,7 +1022,7 @@ fn render_state(entries: Vec<RouteStateEntry>, q: &StateQuery) -> Response {
         let entries = entries
             .into_iter()
             .filter(|e| e.kind == "bytes")
-            .filter_map(|e| e.value.map(|v| (e.key, StateValue::from_bytes(&v))))
+            .filter_map(|e| e.value.map(|v| (e.key, WireBytes::from_bytes(&v))))
             .collect();
         Json(StateSnapshotResponse { entries }).into_response()
     } else {

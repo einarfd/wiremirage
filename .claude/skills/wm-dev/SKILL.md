@@ -290,12 +290,22 @@ DELETE *or* Valkey TTL expiry), the children go with it.
 - **Writable state (ADR-0025).** `PUT /__api/routes/{group}/{n}/state`
   and `PUT /__api/groups/{group}/state` upsert byte values (others
   untouched); `GET .../state?format=snapshot` returns a round-trippable
-  dump; reset = clear + write. Values are `crate::state::StateValue`
-  (UTF-8 string, or `{base64}` for binary — never array-of-ints), the
-  same encoding shared with dry-run's `kv_overrides`. Registry methods
-  `set_route_state` / `set_group_state`; per-key cap 1 MiB enforced at
-  the handler. MCP `set_route_state` / `set_group_state`; CLI `wm
-  {routes,groups} state --set/--snapshot/--reset-from`.
+  dump; reset = clear + write. Registry methods `set_route_state` /
+  `set_group_state`; per-key cap 1 MiB enforced at the handler. MCP
+  `set_route_state` / `set_group_state`; CLI `wm {routes,groups} state
+  --set/--snapshot/--reset-from`.
+- **Wire-byte encoding (ADR-0025 + ADR-0026).** `crate::wire::WireBytes`
+  (`string | {base64}`, never array-of-ints) is *the* way bytes cross
+  JSON: state values, dry-run `kv_overrides`, **and** request/response
+  bodies. Bodies stay `Vec<u8>` in Rust and serialize via the
+  `#[serde(with = "crate::wire::bytes_field")]` adapter (pair it with
+  `#[schemars(with = "crate::wire::WireBytes")]` so the MCP schema
+  matches) — applied to journal/unmatched `RequestEnvelope` /
+  `ResponseEnvelope` bodies and dry-run req/resp bodies. wm-core mirrors
+  the type + adapter (`crate::models::{WireBytes, bytes_field}`). No
+  `*_b64` fields remain on the public surface. Journal records are
+  stored as JSON, so the body encoding change is a clean break on the
+  *stored* format too (≤1h TTL window, then self-heals).
 - **Deferred for slice 8:** rename, group export (route definitions),
   keyspace notifications. Workaround for rename: create new group +
   recreate routes + delete old; user can also use ULID as a stable
@@ -1044,21 +1054,16 @@ driving real traffic first.
   state is never touched — overrides land in the
   disposable `dryrun:{run_id}:` namespace and are wiped
   on completion with the rest of the snapshot.
-- **REST / wm-core** (`models.rs::DryRunBody`): same
-  field shape as the host, `HashMap<String, Vec<u8>>`.
-  Serializes as `{"counter": [52, 53]}` in JSON (matches
-  the existing `body: Vec<u8>` array-of-ints
-  convention). Verbose but consistent.
-- **MCP** (`tools/state.rs::DryRunRouteArgs`): uses
-  `kv_overrides_b64: Option<HashMap<String, String>>`
-  and `gkv_overrides_b64` with explicit base64 string
-  values, matching the existing `body_b64` convention.
-  `decode_overrides_b64` helper base64-decodes each
-  value and surfaces the offending key in the error
-  message on bad input.
-- **CLI** (`wm routes test`): two new repeatable flags:
+- **REST / wm-core + MCP** (`models.rs::DryRunBody`,
+  `tools/state.rs::DryRunRouteArgs`): since ADR-0025/0026,
+  `kv_overrides`/`gkv_overrides` *and* the req/resp `body`
+  are `WireBytes` — a JSON `string`, or `{"base64": "..."}`
+  for binary — over both REST and MCP. `{"counter": "4"}`
+  seeds counter=`"4"`. The old array-of-ints and `*_b64`
+  forms (and the `decode_overrides_b64` helper) are gone.
+- **CLI** (`wm routes test`): two repeatable flags:
   `--kv KEY=VALUE` and `--gkv KEY=VALUE`. UTF-8 only;
-  for binary, the REST/MCP base64 path is the answer.
+  for binary, send the `{"base64": ...}` form via REST/MCP.
   `parse_override_pairs` trims whitespace around keys,
   rejects missing-`=` and empty keys, and allows `=` in
   the value side (so base64 padding round-trips).

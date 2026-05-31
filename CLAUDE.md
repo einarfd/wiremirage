@@ -320,13 +320,12 @@ seed state across all surfaces: `DryRunRequest` gains
 machinery applies *after* the real-state deep-copy and
 *before* the handler runs, letting agents test
 state-dependent branches (`if counter > 3`) without
-driving real traffic first. REST takes Vec<u8> values
-(array-of-ints JSON, matches `body` field); MCP
-`dry_run_route` takes `kv_overrides_b64` /
-`gkv_overrides_b64` as base64-encoded string values
-(matches the `body_b64` convention); CLI `wm routes test`
-gains `--kv KEY=VALUE` / `--gkv KEY=VALUE` repeatable
-flags (UTF-8 bytes); the UI dry-run page adds two
+driving real traffic first. (Encoding since ADR-0025/0026:
+`kv_overrides`/`gkv_overrides` and the req/resp `body` are
+all `WireBytes` — `string | {base64}` — over both REST and
+MCP; the original array-of-ints / `*_b64` forms are gone.)
+CLI `wm routes test` gains `--kv KEY=VALUE` / `--gkv
+KEY=VALUE` repeatable flags (UTF-8 bytes); the UI dry-run page adds two
 textareas under a "Seed state" card with `key=value` per
 line. Real state is never touched — overrides land in the
 disposable `dryrun:{run_id}:` namespace. Bytes-only:
@@ -518,7 +517,7 @@ upsert keys (listed keys written, others untouched); `GET
 `clear + write`. State values cross the JSON boundary as a **UTF-8
 string by default, or `{ "base64": "..." }` for binary — never
 array-of-ints** (token-efficient + readable on the agent/MCP surface);
-this same `StateValue` encoding (`crate::state`) is shared by dry-run's
+this same `WireBytes` encoding (`crate::wire`) is shared by dry-run's
 `kv_overrides`/`gkv_overrides`, which were migrated to it (a clean
 breaking change — the old REST array-of-ints / MCP `kv_overrides_b64`
 fields are gone). Per-key cap 1 MiB; owner-or-admin. Surfaces: REST,
@@ -529,6 +528,20 @@ config straight through this API (the `conformance/s3-slowdown` lane's
 `config.ts` seeding route was retired in favor of `PUT group state`).
 The reusable-mock *bundle* format (routes + initial state + knob
 manifest) is deferred.
+ADR-0026 extended that string-first `WireBytes` encoding to **request /
+response bodies** — journal `RequestEnvelope`/`ResponseEnvelope` bodies
+(read over REST + MCP `tail_journal`/`wait_for_request` + CLI + UI),
+unmatched bodies, and dry-run req/resp bodies. Body fields stay `Vec<u8>`
+in Rust but serialize via `crate::wire::bytes_field` (a `serde(with)`
+adapter; `#[schemars(with = "WireBytes")]` keeps the MCP schema honest).
+The MCP `body_b64` fields (dry-run req/resp) and `value_b64`
+(`show_route_state`) are gone — replaced by the same `string | {base64}`
+shape. The `StateValue` type from ADR-0025 was **renamed `WireBytes`**
+since it now spans state *and* bodies. Clean break incl. the *stored*
+journal JSON — pre-deploy records become unreadable for the rest of
+their ≤1h TTL, then self-heal. So bytes never cross JSON as array-of-ints
+anywhere on the public surface now. `Route.compiled_wasm` stays bytes
+(internal, genuinely binary, not a body).
 
 ## Where the design lives
 
