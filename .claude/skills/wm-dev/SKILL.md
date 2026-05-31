@@ -262,7 +262,7 @@ DELETE *or* Valkey TTL expiry), the children go with it.
 - **Endpoints:** `POST/GET /__api/groups`,
   `GET/PATCH/DELETE /__api/groups/{group}`,
   `POST /__api/groups/{group}/refresh`,
-  `DELETE /__api/groups/{group}/state`,
+  `GET/PUT/DELETE /__api/groups/{group}/state`,
   `DELETE /__api/groups/{group}/journal`. Owner-or-admin for per-group
   actions; non-admin list filters to owned groups.
 - **TTL.** Default 24h, max 30d, configured per-group. `sliding_ttl`
@@ -287,7 +287,16 @@ DELETE *or* Valkey TTL expiry), the children go with it.
   serve stale routes from their caches until they restart or run
   their own sweep on the same group. Proper fix is Valkey keyspace
   notifications (deferred).
-- **Deferred for slice 8:** rename, group export, `GET /state`,
+- **Writable state (ADR-0025).** `PUT /__api/routes/{group}/{n}/state`
+  and `PUT /__api/groups/{group}/state` upsert byte values (others
+  untouched); `GET .../state?format=snapshot` returns a round-trippable
+  dump; reset = clear + write. Values are `crate::state::StateValue`
+  (UTF-8 string, or `{base64}` for binary — never array-of-ints), the
+  same encoding shared with dry-run's `kv_overrides`. Registry methods
+  `set_route_state` / `set_group_state`; per-key cap 1 MiB enforced at
+  the handler. MCP `set_route_state` / `set_group_state`; CLI `wm
+  {routes,groups} state --set/--snapshot/--reset-from`.
+- **Deferred for slice 8:** rename, group export (route definitions),
   keyspace notifications. Workaround for rename: create new group +
   recreate routes + delete old; user can also use ULID as a stable
   cross-rename handle.

@@ -33,6 +33,7 @@ use crate::auth::AuthContext;
 use crate::journal::UnmatchedCursor;
 use crate::journal_filter::JournalFilter;
 use crate::registry::{Group, Route};
+use crate::state::StateValue;
 
 pub mod auth_redirect;
 pub mod csrf;
@@ -1891,7 +1892,7 @@ async fn route_dry_run_submit(
     let kv_overrides = match parse_kv_lines(&form.kv_overrides, '=') {
         Ok(pairs) => pairs
             .into_iter()
-            .map(|(k, v)| (k, v.into_bytes()))
+            .map(|(k, v)| (k, StateValue::Text(v)))
             .collect(),
         Err(msg) => {
             return render_dry_run(
@@ -1907,7 +1908,7 @@ async fn route_dry_run_submit(
     let gkv_overrides = match parse_kv_lines(&form.gkv_overrides, '=') {
         Ok(pairs) => pairs
             .into_iter()
-            .map(|(k, v)| (k, v.into_bytes()))
+            .map(|(k, v)| (k, StateValue::Text(v)))
             .collect(),
         Err(msg) => {
             return render_dry_run(

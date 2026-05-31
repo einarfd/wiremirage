@@ -39,15 +39,16 @@ the Vertex case is just `{ "match": { "path_prefix": "/v1/models/gemini-pro",
 engine to another API you keep the core and swap the two API-specific functions
 at the bottom of `inject.ts` (`successResponse` / `throttleResponse`).
 
-## How config gets in (a finding)
+## How config gets in
 
-WireMirage has **no public API to write arbitrary kv/gkv state** — only
-GET/DELETE. So a runtime-configurable mock seeds its config **through a mock
-route**: `config.ts` (`POST /_inject_rules`) writes the request body into group
-state. `setup.sh` POSTs `rules.json` there after registration. This works
-cleanly via the public surface, but it's worth noting: a first-class
-"set state" API (or a "mock config" concept) would make reusable, parameterized
-mocks more ergonomic. Relevant input for that direction.
+The rules are seeded into the group's shared state via the writable-state API
+(ADR-0025): `setup.sh` does `PUT /__api/groups/s3-slowdown/state` with
+`rules.json` as the value of the `inject:rules` key, which `inject.ts` reads.
+
+This used to be the lane's headline *finding* — WireMirage had no public
+kv/gkv-write API, so the mock seeded its config through a dedicated `config.ts`
+mock route. ADR-0025 closed that gap, the route is gone, and this lane now
+doubles as a live check of the new API.
 
 ## Other findings
 
@@ -68,9 +69,8 @@ mocks more ergonomic. Relevant input for that direction.
 ## Files
 
 - `inject.ts` — the reusable injection engine + S3 response shapes (`GET /{bucket}/{key}`)
-- `config.ts` — seeds `inject:rules` into group state (`POST /_inject_rules`)
-- `routes.json` — both routes, in the shared `s3-slowdown` group
-- `rules.json` — the rule set, POSTed by `setup.sh`
+- `routes.json` — the route, in the `s3-slowdown` group
+- `rules.json` — the rule set, seeded into group state by `setup.sh`
 - `main.go`, `go.mod`, `go.sum` — the Go SDK client + pinned deps
 - `Dockerfile` — `golang:1.24`, builds + runs the client
 

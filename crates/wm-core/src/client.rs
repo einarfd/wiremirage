@@ -20,7 +20,7 @@ use crate::models::{
     ListGroupsResponse, ListJournalParams, ListJournalResponse, ListRouteStateResponse,
     ListRoutesParams, ListRoutesResponse, ListTokensResponse, ListUnmatchedParams,
     ListUnmatchedResponse, PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
-    RouteSourceResponse, UnmatchedRecord,
+    RouteSourceResponse, SetStateBody, StateSnapshotResponse, StateValue, UnmatchedRecord,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -215,6 +215,31 @@ impl Client {
         .await
     }
 
+    pub async fn set_group_state(
+        &self,
+        group: &str,
+        entries: std::collections::HashMap<String, StateValue>,
+    ) -> Result<(), ClientError> {
+        self.send_body_no_response(
+            Method::PUT,
+            &format!("/__api/groups/{}/state", urlencode(group)),
+            &SetStateBody { entries },
+        )
+        .await
+    }
+
+    pub async fn snapshot_group_state(
+        &self,
+        group: &str,
+    ) -> Result<StateSnapshotResponse, ClientError> {
+        self.send(
+            Method::GET,
+            &format!("/__api/groups/{}/state?format=snapshot", urlencode(group)),
+            None::<&()>,
+        )
+        .await
+    }
+
     pub async fn clear_group_journal(&self, group: &str) -> Result<(), ClientError> {
         self.send_no_body(
             Method::DELETE,
@@ -300,6 +325,36 @@ impl Client {
         self.send_no_body(
             Method::DELETE,
             &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+        )
+        .await
+    }
+
+    pub async fn set_route_state(
+        &self,
+        slug: &str,
+        entries: std::collections::HashMap<String, StateValue>,
+    ) -> Result<(), ClientError> {
+        let (group, number) = split_route_slug(slug)?;
+        self.send_body_no_response(
+            Method::PUT,
+            &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+            &SetStateBody { entries },
+        )
+        .await
+    }
+
+    pub async fn snapshot_route_state(
+        &self,
+        slug: &str,
+    ) -> Result<StateSnapshotResponse, ClientError> {
+        let (group, number) = split_route_slug(slug)?;
+        self.send(
+            Method::GET,
+            &format!(
+                "/__api/routes/{}/{number}/state?format=snapshot",
+                urlencode(group)
+            ),
+            None::<&()>,
         )
         .await
     }
@@ -534,6 +589,33 @@ impl Client {
             return serde_json::from_slice(&bytes)
                 .map_err(|e| ClientError::BadResponse(format!("decode body: {e}")));
         }
+        Err(translate_error(status, &bytes))
+    }
+
+    /// Like `send` but for requests that carry a body and return an
+    /// empty success (e.g. `PUT .../state` → 204).
+    async fn send_body_no_response<B: Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        body: &B,
+    ) -> Result<(), ClientError> {
+        let url = self.url(path);
+        let response = self
+            .http
+            .request(method, &url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| ClientError::Network(e.to_string()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ClientError::Network(format!("read body: {e}")))?;
         Err(translate_error(status, &bytes))
     }
 
