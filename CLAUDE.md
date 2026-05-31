@@ -415,13 +415,17 @@ group editing with a new `update_group` MCP tool — agents can
 now flip `ttl_seconds` and `sliding_ttl` on a group they
 own without dropping to the CLI. Owner-or-admin only, same as
 the REST PATCH; rename and owner-transfer remain out of scope.
-Slice 44 wired two pre-deploy hardening flags. `WM_SECURE_COOKIES=1`
-appends `Secure` to the `wm_session` + `wm_csrf` cookies for
-deployments behind a TLS edge; default off keeps plain-HTTP dev
-workflows working. `WM_TRUST_FORWARDED_HEADERS=1` honors
-`X-Forwarded-For` for the per-IP login throttle; default off
-(loopback placeholder) so a directly-reachable host can't be
-IP-spoofed. The CSRF middleware now takes `AppState` via
+Slice 44 wired pre-deploy hardening for deployments behind a TLS edge
+(`Secure` cookies + trusting `X-Forwarded-*`); **ADR-0027 later
+collapsed those two flags AND the MCP `Host`-allowlist into a single
+`WM_TRUSTED_PROXY=<host[,host...]>` switch** — set it to the public
+hostname(s) and the whole behind-a-proxy posture turns on together
+(Secure cookies, trust `X-Forwarded-*` for the login throttle + OAuth
+redirect-URI derivation, and allowlist those hosts for MCP). Unset =
+direct-exposure defaults. One setting so it can't be half-configured;
+read once in `main.rs::trusted_proxy_hosts` and threaded onto
+`AppState` (`secure_cookies` / `trust_forwarded_headers` /
+`mcp_allowed_hosts`). The CSRF middleware now takes `AppState` via
 `from_fn_with_state`. README gets a "Production hardening" section
 covering the two flags plus bootstrap-token rotation, strong
 `SESSION_SECRET`, edge HSTS/CSP, and binding the host to localhost.
@@ -674,14 +678,15 @@ Env vars (no silent fallbacks; missing required → fail-fast):
 - `WM_BOOTSTRAP_TOKEN` (required on first startup, optional on
   restarts once at least one user exists) — plaintext for the admin
   user named `bootstrap`. Treat like a credential.
-- `WM_SECURE_COOKIES` (optional, slice 44) — `1`/`true`/`yes`/`on`
-  to append `Secure` to the `wm_session` + `wm_csrf` cookies. Off by
-  default so dev workflows over plain HTTP keep working; required
-  for deployments behind a TLS edge.
-- `WM_TRUST_FORWARDED_HEADERS` (optional, slice 44) — `1` to honor
-  `X-Forwarded-For` for the per-IP login throttle. Off by default
-  so a directly-reachable host can't be spoofed; required for
-  deployments behind a reverse proxy that populates XFF.
+- `WM_TRUSTED_PROXY` (optional, ADR-0027) — the public hostname(s)
+  the trusted TLS-terminating reverse proxy serves (comma-separated).
+  When set, turns on the whole behind-a-proxy posture: `Secure` on the
+  `wm_session` + `wm_csrf` cookies, trusting `X-Forwarded-*` (login
+  throttle IP + OAuth redirect-URI derivation), and adding those
+  hostnames to the MCP `Host`-header allowlist (on top of the localhost
+  defaults). Off/unset = direct-exposure defaults (plain-HTTP dev).
+  Replaces the slice-44 `WM_SECURE_COOKIES` / `WM_TRUST_FORWARDED_HEADERS`
+  flags and the `WM_MCP_ALLOWED_HOSTS` list.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (optional) — URL of an OTLP/gRPC
   collector (e.g. `http://localhost:4317`). When unset, the host logs
   to stderr only; when set, spans are exported in addition.

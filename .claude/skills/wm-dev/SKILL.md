@@ -575,22 +575,21 @@ Closes audit findings F-3, F-4, and F-5 from the
 boolean env flags + a production-hardening section in the
 README.
 
-- **`WM_SECURE_COOKIES`** — appends `Secure` to the
-  `wm_session` and `wm_csrf` cookies. Default off so
-  dev workflows over plain HTTP keep minting usable
-  cookies (browsers drop `Secure` cookies on non-TLS).
-  Deployments behind a TLS edge MUST set it.
-- **`WM_TRUST_FORWARDED_HEADERS`** — honors
-  `X-Forwarded-For` for the per-IP login throttle. Default
-  off: when the header isn't trusted, the loopback
-  placeholder is used (the current behavior pre-slice-44
-  for missing-header callers, just now applied
-  uniformly). Only enable when a reverse proxy you
-  control is the only thing that can reach the host —
-  otherwise an attacker can spoof the throttle bucket
-  via header injection.
+- **`WM_TRUSTED_PROXY`** (ADR-0027) — the public hostname(s)
+  the trusted TLS edge serves (comma-separated). One switch
+  for the whole behind-a-proxy posture: `Secure` on
+  `wm_session`/`wm_csrf`, trusting `X-Forwarded-*` (login
+  throttle IP + OAuth redirect-URI), and allowlisting those
+  hosts for the MCP `Host` check (on top of localhost
+  defaults). Default off = direct-exposure dev. Read once in
+  `main.rs::trusted_proxy_hosts`, threaded onto `AppState`
+  (`secure_cookies` / `trust_forwarded_headers` /
+  `mcp_allowed_hosts`). Replaces the slice-44
+  `WM_SECURE_COOKIES` / `WM_TRUST_FORWARDED_HEADERS` flags +
+  the `WM_MCP_ALLOWED_HOSTS` list — one setting can't be
+  half-configured (the old footgun).
 - **F-5 doc** — README gains a "Production hardening"
-  section listing both flags, bootstrap-token rotation
+  section, bootstrap-token rotation
   (`openssl rand -hex 32` → log in, mint operator
   token, delete bootstrap user), strong
   `SESSION_SECRET` generation, edge-side headers
