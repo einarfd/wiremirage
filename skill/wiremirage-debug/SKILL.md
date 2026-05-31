@@ -90,12 +90,14 @@ The handler has two stores: the per-route store (scoped to the route alone) and 
 
 ```sh
 # `wm groups state` lists what's actually persisted in either store.
-wm groups state <group>          # list keys + value kinds
-wm groups state <group> --clear  # nuke everything in both stores
+wm groups state <group>             # list keys + value kinds
+wm groups state <group> --snapshot  # full values (the listing truncates)
+wm groups state <group> --clear     # nuke everything in both stores
 
 # `wm routes state` is the per-route counterpart.
-wm routes state <group>/<n>          # list this route's private kv
-wm routes state <group>/<n> --clear  # wipe this route only
+wm routes state <group>/<n>             # list this route's private kv
+wm routes state <group>/<n> --snapshot  # full values for this route
+wm routes state <group>/<n> --clear     # wipe this route only
 
 # If state still seems wrong after inspection, write a probe handler
 # that does `routeStore.set("probe", ...)` then `routeStore.get("probe")`

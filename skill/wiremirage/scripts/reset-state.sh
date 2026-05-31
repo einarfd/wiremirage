@@ -4,6 +4,10 @@
 # for a group, without deleting the routes themselves. Call between
 # test phases when you want a clean slate but the same routes.
 #
+# For a reset to a *known baseline* (rather than empty), snapshot once
+# (`wm groups state GROUP --snapshot > base.json`) and restore later
+# with `wm groups state GROUP --reset-from base.json`.
+#
 # Usage:
 #   WM_HOST=...  WM_TOKEN=...  ./reset-state.sh GROUP
 #
