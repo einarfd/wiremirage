@@ -542,23 +542,32 @@ fn consume_oauth_state(state: &AppState, nonce: &str) -> Result<String, StateErr
 /// MUST match what's registered on the GitHub OAuth app's settings
 /// page (within the loopback-port wildcard described in RFC 8252,
 /// which GitHub honors for `http://localhost:<port>` URLs).
-fn derive_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
+/// The host's public base URL (`{scheme}://{host}`), derived from the
+/// request. `Host` is taken verbatim (a reverse proxy like Caddy
+/// preserves it); the scheme comes from `X-Forwarded-Proto` when the
+/// proxy is trusted (`WM_TRUSTED_PROXY`), else `http` for the loopback
+/// dev case. Shared by the OAuth redirect-URI and the "Connect an agent"
+/// page so both report the same public origin.
+pub(crate) fn public_base_url(headers: &HeaderMap, trust_forwarded: bool) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:8080");
-    // Default to http for the loopback dev case. When the host runs
-    // behind a TLS edge, `WM_TRUST_FORWARDED_HEADERS=1` lets us read
-    // `X-Forwarded-Proto`; the GitHub OAuth app's registered
-    // callback URL must use the same scheme.
     let scheme = if trust_forwarded
         && let Some(v) = headers.get("x-forwarded-proto")
         && let Ok(s) = v.to_str()
         && !s.is_empty()
     {
-        s.to_string()
+        s
     } else {
-        "http".to_string()
+        "http"
     };
-    format!("{scheme}://{host}/__auth/callback")
+    format!("{scheme}://{host}")
+}
+
+fn derive_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
+    format!(
+        "{}/__auth/callback",
+        public_base_url(headers, trust_forwarded)
+    )
 }
