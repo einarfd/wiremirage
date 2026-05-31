@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -61,6 +61,7 @@ impl UiTemplates {
         tmpl!("base.html", "templates/base.html");
         tmpl!("login.html", "templates/login.html");
         tmpl!("home.html", "templates/home.html");
+        tmpl!("connect.html", "templates/connect.html");
         tmpl!("groups_list.html", "templates/groups_list.html");
         tmpl!("group_detail.html", "templates/group_detail.html");
         tmpl!("routes_list.html", "templates/routes_list.html");
@@ -100,6 +101,7 @@ impl Default for UiTemplates {
 pub fn router(state: AppState) -> Router {
     let authed: Router<AppState> = Router::new()
         .route("/__ui/", get(home))
+        .route("/__ui/connect", get(connect))
         .route("/__ui/groups", get(groups_list_page))
         .route("/__ui/groups/{group}", get(group_detail_page))
         .route(
@@ -177,6 +179,25 @@ pub fn router(state: AppState) -> Router {
 }
 
 // -- Handlers ---------------------------------------------------------------
+
+/// "Connect an agent" — MCP onboarding. Shows the live MCP endpoint
+/// (derived from the request's forwarded headers, so it matches the
+/// public origin) and paste-ready client configs. No forms; the token
+/// is a placeholder with a link to the tokens page.
+async fn connect(State(state): State<AppState>, auth: AuthContext, headers: HeaderMap) -> Response {
+    let base = crate::auth_api::public_base_url(&headers, state.trust_forwarded_headers());
+    let mcp_url = format!("{base}/__api/mcp");
+    render(
+        &state,
+        "connect.html",
+        context! {
+            page_title => "Connect an agent",
+            user => UserBadge::from(&auth),
+            base_url => base,
+            mcp_url => mcp_url,
+        },
+    )
+}
 
 async fn home(State(state): State<AppState>, auth: AuthContext) -> Response {
     // List groups visible to the caller. Admin sees all; non-admin

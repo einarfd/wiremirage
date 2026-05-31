@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-header">
+  <h1>Connect an agent</h1>
+  <p class="text-muted">
+    WireMirage speaks <a class="link" href="https://modelcontextprotocol.io">MCP</a>
+    over streamable HTTP, so an MCP-capable agent (Claude Code, Claude
+    Desktop, Cursor, …) can drive it with no install — just this endpoint
+    and a token.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>1. The endpoint</h2>
+  </header>
+  <pre class="code-block">{{ mcp_url }}</pre>
+  <ul class="action-list">
+    <li>Transport: <strong>streamable HTTP</strong>.</li>
+    <li>Auth: <strong>bearer token</strong> in the <code>Authorization</code> header.</li>
+    <li>Mock traffic from your system-under-test hits your routes directly and needs <strong>no</strong> token — only this control endpoint does.</li>
+  </ul>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>2. Get a token</h2>
+  </header>
+  <p>
+    Mint a dedicated token for the agent on the
+    <a class="link" href="/__ui/me/tokens">API tokens</a> page — it's shown
+    once, so copy it then. A non-admin token confines the agent to routes it
+    owns; an admin token can see everything.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>3. Add it to your agent</h2>
+  </header>
+
+  <h3>Claude Code</h3>
+  <pre class="code-block">claude mcp add --transport http wiremirage {{ mcp_url }} \
+  --header "Authorization: Bearer YOUR_TOKEN"</pre>
+
+  <h3>Config-file clients (Cursor, VS Code, …)</h3>
+  <p class="text-muted">Add to the client's MCP config (e.g. <code>mcp.json</code>):</p>
+  <pre class="code-block">{
+  "mcpServers": {
+    "wiremirage": {
+      "type": "http",
+      "url": "{{ mcp_url }}",
+      "headers": { "Authorization": "Bearer YOUR_TOKEN" }
+    }
+  }
+}</pre>
+
+  <h3>Claude Desktop</h3>
+  <p>
+    Settings → Connectors → <strong>Add custom connector</strong>, then paste
+    the endpoint above. Provide the bearer token when prompted.
+  </p>
+
+  <p class="text-muted">
+    Once connected, the agent can discover the surface itself with the
+    <code>summarize_workspace</code> and <code>get_capabilities</code> tools —
+    it doesn't need to be told the handler API up front.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Troubleshooting</h2>
+  </header>
+  <ul class="action-list">
+    <li>An opaque <em>"authorization failed"</em> on connect (with a valid token) usually means the host's <code>Host</code> allowlist doesn't include this domain — an operator sets <code>WM_TRUSTED_PROXY</code> to the public hostname.</li>
+    <li>Tools returning 403 mean the token's user isn't owner-or-admin for that route or group.</li>
+  </ul>
+</section>
+{% endblock %}

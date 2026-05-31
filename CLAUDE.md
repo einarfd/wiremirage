@@ -546,6 +546,15 @@ journal JSON — pre-deploy records become unreadable for the rest of
 their ≤1h TTL, then self-heal. So bytes never cross JSON as array-of-ints
 anywhere on the public surface now. `Route.compiled_wasm` stays bytes
 (internal, genuinely binary, not a body).
+Agent onboarding: a `/__ui/connect` page ("Connect" in the nav + a home
+quick-action) gives a logged-in user MCP setup — the live MCP endpoint
+(`{base}/__api/mcp`, derived from the request via
+`auth_api::public_base_url`, honoring the forwarded headers so it shows
+the real public origin) plus paste-ready client configs (Claude Code
+`claude mcp add`, a `mcpServers` JSON block, Claude Desktop's custom-
+connector flow) and a pointer to mint a token. MCP-first by design — no
+install needed; the CLI/binaries path is deferred. The Host-derived URL
+is autoescaped (not marked `safe`), so it's XSS-safe.
 
 ## Where the design lives
 

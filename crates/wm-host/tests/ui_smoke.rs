@@ -422,3 +422,29 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
         after.status()
     );
 }
+
+#[tokio::test]
+async fn connect_page_shows_mcp_endpoint_and_configs() {
+    let h = start_with_users("admin:devpassword:admin").await;
+    let client = no_redirect_client();
+    let cookie = login_and_get_cookie(&h, &client).await;
+
+    let resp = client
+        .get(url(&h, "/__ui/connect"))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .expect("get connect");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    // The live MCP endpoint (derived from the request) + paste-ready configs.
+    // minijinja HTML-escapes the URL's `/` to `&#x2f;` (correct — the
+    // Host-derived value must not be marked `safe`), so assert on the
+    // escaping-stable path component, not the literal `/__api/mcp`.
+    assert!(body.contains("__api"), "shows the MCP endpoint: {body}");
+    assert!(
+        body.contains("claude mcp add"),
+        "shows the Claude Code command"
+    );
+    assert!(body.contains("mcpServers"), "shows the config-file JSON");
+}
