@@ -546,6 +546,22 @@ impl Registry {
         Ok(())
     }
 
+    /// Upsert byte values into the group's shared `gkv:` namespace
+    /// (ADR-0025) — the store handlers read via `group-store`. Listed
+    /// keys are written; others left untouched. Used by
+    /// `PUT /__api/groups/{group}/state`.
+    pub fn set_group_state(
+        &self,
+        group_id: &str,
+        entries: std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<(), RegistryError> {
+        let mut bucket = self.storage.group_bucket(group_id)?;
+        for (key, value) in entries {
+            bucket.set(&key, value)?;
+        }
+        Ok(())
+    }
+
     /// Clear all journal entries for the group; routes and state are
     /// untouched.
     pub fn clear_group_journal(&self, group_id: &str) -> Result<(), RegistryError> {
@@ -853,6 +869,24 @@ impl Registry {
         let mut bucket = self.bucket()?;
         let count = bucket.delete_with_prefix(&format!("kv:{}:{}:", route.group_id, route.id))?;
         Ok(count)
+    }
+
+    /// Upsert byte values into the route's private `kv:` namespace
+    /// (ADR-0025). Listed keys are written at the same physical
+    /// location the handler's `store` reads; other keys are left
+    /// untouched. Used by `PUT /__api/routes/{group}/{n}/state`.
+    pub fn set_route_state(
+        &self,
+        group_ref: &str,
+        number: u32,
+        entries: std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<(), RegistryError> {
+        let route = self.get_route_by_slug(group_ref, number)?;
+        let mut bucket = self.storage.route_bucket(&route.group_id, &route.id)?;
+        for (key, value) in entries {
+            bucket.set(&key, value)?;
+        }
+        Ok(())
     }
 
     /// Replace a subset of mutable fields on an existing route. Path /

@@ -1,4 +1,3 @@
 [
-  { "group": "s3-slowdown", "methods": ["POST"], "path": "/_inject_rules", "source": "config.ts" },
   { "group": "s3-slowdown", "methods": ["GET"], "path": "/{bucket}/{key}", "source": "inject.ts" }
 ]
