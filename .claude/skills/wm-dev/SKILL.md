@@ -847,7 +847,7 @@ returns the full `UnmatchedRecord`. This is the actual gap behind the
 first user's "#5 catch-all / echo route" ask: the unmatched journal
 *already* captures the request envelope (incl. body, `WireBytes` since
 ADR-0026); the only missing piece was reading all of it over MCP. A
-catch-all *route* was deferred (Arkiv ADR-0028, Proposed) — it's a blunt
+catch-all *route* was deferred (Arkiv ADR-0028, Deferred) — it's a blunt
 instrument for a discovery need the unmatched journal already serves,
 and a global one would relax the unambiguous-route-set invariant and
 empty the unmatched journal. Test:
