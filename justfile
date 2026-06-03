@@ -97,10 +97,15 @@ run-web-fast:
 run-web-docker:
     #!/usr/bin/env bash
     set -e
-    WM_BOOTSTRAP_TOKEN=wmt_dev_local \
-      WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
-      SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
-      docker compose --profile full up -d --build
+    # The container reads config from `.env` via compose's `env_file`
+    # (not shell passthrough), so write the dev creds there. `.env` is
+    # gitignored; these are dev-only values, never for production.
+    printf '%s\n' \
+      'WM_BOOTSTRAP_TOKEN=wmt_dev_local' \
+      'WM_LOCAL_AUTH=admin:devpassword:admin,user:devpassword' \
+      'SESSION_SECRET=dev-only-session-secret-do-not-use-in-prod-32b' \
+      > .env
+    docker compose --profile full up -d --build
     echo "Waiting for wm-host to respond on http://localhost:8080/__health ..."
     until curl -fsS http://localhost:8080/__health >/dev/null 2>&1; do
       sleep 0.5

@@ -38,32 +38,25 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
-    # List-form environment so optional vars are passed through only
-    # when set in the host env (`.env` file or shell). With map-form
-    # `${VAR:-}`, missing vars get set to empty strings in the container,
-    # which the host then has to special-case (and using `:?` for the
-    # bootstrap token broke prod after we dropped it from `.env.tmpl`
-    # post-retirement). The list-form `- KEY` syntax passes KEY through
-    # iff it's set; otherwise it's not present in the container env
-    # at all, which is what the host actually expects for "unset."
+    # Container config comes from the curated `.env`, forwarded wholesale
+    # via `env_file` — so there is NO second passthrough list to keep in
+    # sync. Adding a config var to `.env` is enough; you can't forget to
+    # also name it here. (This replaces a hand-maintained `- KEY` list that
+    # silently dropped `WM_TRUSTED_PROXY` after ADR-0027 — see the commit.)
+    # `.env` holds only vars meant for the container, and a var absent from
+    # the file is absent in the container (no empty-string surprises, the
+    # property the old list-form protected). For prod the deploy renders
+    # `.env`; for dev `just run-web-docker` writes one. `required: false`
+    # keeps `docker compose` usable when no `.env` is present.
+    env_file:
+      - path: .env
+        required: false
     environment:
-      # Literals — set unconditionally regardless of host env.
+      # Literals — fixed by the compose topology, override anything in
+      # `.env` (storage points at the valkey service; bind all interfaces
+      # so the published port works).
       - WM_STORAGE=redis://valkey:6379
       - WM_LISTEN_ADDR=0.0.0.0:8080
-      # Passthroughs — present in the container only if the host env
-      # supplies them. See README → Configuration for what each does.
-      - WM_BOOTSTRAP_TOKEN
-      - WM_LOCAL_AUTH
-      - SESSION_SECRET
-      - WM_GITHUB_CLIENT_ID
-      - WM_GITHUB_CLIENT_SECRET
-      - WM_GITHUB_ALLOW_USERS
-      - WM_GITHUB_ALLOW_ORGS
-      - WM_GITHUB_ADMIN_USERS
-      - WM_TRUSTED_PROXY
-      - OTEL_EXPORTER_OTLP_ENDPOINT
-      - OTEL_SERVICE_NAME
-      - OTEL_RESOURCE_ATTRIBUTES
     depends_on:
       - valkey
     restart: unless-stopped
