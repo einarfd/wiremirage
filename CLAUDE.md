@@ -579,7 +579,7 @@ headers/body the SUT sent to an unknown path without dropping to REST
 full `UnmatchedRecord`. This was the *actual* gap behind the first user's
 "#5 catch-all" ask — the unmatched journal already captures the request,
 MCP just couldn't read all of it; a catch-all route was deferred
-(ADR-0028 in Arkiv, Proposed) as too blunt a tool for what was a
+(ADR-0028 in Arkiv, Deferred) as too blunt a tool for what was a
 discovery gap. 28 tools total.
 Docs-only companion: a `get_capabilities` `gotchas` entry on simulating
 an upstream hang past the ~30s buffered budget via a streaming handler
