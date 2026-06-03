@@ -163,6 +163,9 @@ async fn list_tools_returns_all_expected_tools() {
         // ADR-0025
         "set_group_state",
         "set_route_state",
+        // MCP parity batch (first-user feedback)
+        "list_journal",
+        "show_group_state",
         // Slice 43
         "update_group",
         // Capabilities (post-ADR-0021 follow-up)
@@ -1496,6 +1499,212 @@ async fn update_route_swaps_to_javascript_source() {
             .unwrap_or("")
             .contains("status: 201"),
         "updated JS source visible"
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+// ---------------------------------------------------------------------
+// MCP parity batch (first-user feedback): base_url discovery,
+// show_group_state read-back, and the list_journal history query.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn who_am_i_surfaces_base_url() {
+    // First-user friction #4: the serving base URL was undiscoverable
+    // from the API. `who_am_i` now returns it.
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("who_am_i"))
+        .await
+        .expect("who_am_i");
+    let structured = result.structured_content.expect("structured content set");
+    let base = structured
+        .get("base_url")
+        .and_then(|v| v.as_str())
+        .expect("base_url present");
+    // Direct exposure (no WM_TRUSTED_PROXY) → derived from the Host
+    // header the rmcp client sent, which is the loopback addr we bound.
+    assert!(base.starts_with("http://"), "base_url was {base}");
+    assert!(base.contains("127.0.0.1"), "base_url was {base}");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn summarize_workspace_surfaces_base_url() {
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("summarize_workspace"))
+        .await
+        .expect("summarize_workspace");
+    let structured = result.structured_content.expect("structured");
+    let base = structured
+        .get("host")
+        .and_then(|v| v.get("base_url"))
+        .and_then(|v| v.as_str())
+        .expect("host.base_url present");
+    assert!(base.starts_with("http://"), "base_url was {base}");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn set_then_show_group_state_round_trip() {
+    // First-user friction #2: clear_group_state existed but there was
+    // no read-back. set_group_state → show_group_state now round-trips.
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "vertex-mock".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    client
+        .call_tool(
+            CallToolRequestParams::new("set_group_state").with_arguments(
+                json!({ "group": "vertex-mock", "entries": { "scenario": "slowdown" } })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("set_group_state");
+
+    let shown = client
+        .call_tool(
+            CallToolRequestParams::new("show_group_state").with_arguments(
+                json!({ "group": "vertex-mock" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("show_group_state");
+    let structured = shown.structured_content.expect("structured");
+    let entries = structured
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .expect("entries array");
+    let scenario = entries
+        .iter()
+        .find(|e| e.get("key").and_then(|v| v.as_str()) == Some("scenario"))
+        .expect("scenario key present");
+    assert_eq!(scenario.get("kind").and_then(|v| v.as_str()), Some("bytes"));
+    // WireBytes: a clean UTF-8 value serializes as a plain string.
+    assert_eq!(
+        scenario.get("value").and_then(|v| v.as_str()),
+        Some("slowdown")
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn list_journal_returns_stored_entries_with_filter() {
+    // First-user friction #3: journal access was live-only. list_journal
+    // pulls completed entries after the fact, with the same filter
+    // surface as REST.
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "stripe-mock".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("stripe-mock")
+        .unwrap();
+
+    // Seed three handled entries: two 200s and one 503.
+    for status in [200u16, 200, 503] {
+        h.state
+            .journal()
+            .record_handled(sample_handled(&group.id, "stripe-mock", status))
+            .unwrap();
+    }
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Unfiltered: all three come back.
+    let all = client
+        .call_tool(
+            CallToolRequestParams::new("list_journal").with_arguments(
+                json!({ "group": "stripe-mock" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("list_journal");
+    let all_entries = all
+        .structured_content
+        .expect("structured")
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .expect("entries");
+    assert_eq!(all_entries.len(), 3);
+
+    // Status-filtered: only the 503.
+    let errs = client
+        .call_tool(
+            CallToolRequestParams::new("list_journal").with_arguments(
+                json!({ "group": "stripe-mock", "status": "5xx" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("list_journal status");
+    let err_entries = errs
+        .structured_content
+        .expect("structured")
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .expect("entries");
+    assert_eq!(err_entries.len(), 1);
+    assert_eq!(
+        err_entries[0]
+            .get("response")
+            .and_then(|r| r.get("status"))
+            .and_then(|v| v.as_u64()),
+        Some(503)
     );
 
     client.cancel().await.expect("cancel");

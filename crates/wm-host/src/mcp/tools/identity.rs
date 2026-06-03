@@ -14,6 +14,13 @@ use crate::mcp::server::WmMcpServer;
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct WhoAmIResult {
     pub user: WhoAmIUser,
+    /// The public base URL this host is reached at (e.g.
+    /// `https://wm.example.com`) — derived from the request, honoring
+    /// `X-Forwarded-*` when behind a trusted proxy (ADR-0027). Mock
+    /// routes are served directly under it: a route at `/v1/charges`
+    /// answers at `{base_url}/v1/charges`. The `/__api/mcp` endpoint
+    /// you're talking to right now is `{base_url}/__api/mcp`.
+    pub base_url: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -34,12 +41,15 @@ impl WmMcpServer {
         Extension(parts): Extension<http::request::Parts>,
     ) -> Result<Json<WhoAmIResult>, ErrorData> {
         let auth = auth_from(&parts)?;
+        let base_url =
+            crate::auth_api::public_base_url(&parts.headers, self.state.trust_forwarded_headers());
         Ok(Json(WhoAmIResult {
             user: WhoAmIUser {
                 id: auth.user_id,
                 name: auth.user_name,
                 is_admin: auth.is_admin,
             },
+            base_url,
         }))
     }
 }
