@@ -836,6 +836,23 @@ see the "Did you mean…?" candidates.
   - `tests/mcp_e2e.rs::list_recent_unmatched_includes_near_misses_projection` — seed an unmatched record with one method-mismatch near-miss via `record_unmatched`, assert the MCP response carries `near_misses[0].route` + `reason.kind == "method_mismatch"`.
   - `tests/mcp_e2e.rs::list_recent_unmatched_emits_empty_near_misses_when_none` — seed without neighbours, assert `near_misses` is present as `[]`.
 
+## MCP `show_unmatched` — full unmatched envelope (parity batch)
+
+`list_recent_unmatched` returns only a summary (number / method /
+path / near-misses), so an MCP-only agent could see *that* an
+unknown path was hit but not the **headers/body** the SUT sent —
+it had to drop to REST `GET /__api/unmatched/{n}`. `show_unmatched`
+(`mcp/tools/discovery.rs`, admin-only, wraps `Journal::get_unmatched`)
+returns the full `UnmatchedRecord`. This is the actual gap behind the
+first user's "#5 catch-all / echo route" ask: the unmatched journal
+*already* captures the request envelope (incl. body, `WireBytes` since
+ADR-0026); the only missing piece was reading all of it over MCP. A
+catch-all *route* was deferred (Arkiv ADR-0028, Proposed) — it's a blunt
+instrument for a discovery need the unmatched journal already serves,
+and a global one would relax the unambiguous-route-set invariant and
+empty the unmatched journal. Test:
+`tests/mcp_e2e.rs::show_unmatched_returns_full_request_envelope`.
+
 ## Source viewer on route detail UI (slice 37)
 
 `/__ui/routes/{group}/{n}` now renders a "Handler source" card

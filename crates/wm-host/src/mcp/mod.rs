@@ -143,6 +143,7 @@ mod tests {
             // MCP parity batch (first-user feedback)
             "list_journal",
             "show_group_state",
+            "show_unmatched",
             // Slice 36
             "show_route_source",
             // Slice 43
