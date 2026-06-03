@@ -105,8 +105,8 @@ async fn password_login(
     headers: HeaderMap,
     Form(form): Form<PasswordLoginForm>,
 ) -> Response {
-    // Resolve the caller's IP. Slice 44: only honor `X-Forwarded-For`
-    // when `WM_TRUST_FORWARDED_HEADERS=1`. The default (off) ignores
+    // Resolve the caller's IP. Only honor `X-Forwarded-For` when the
+    // proxy is trusted (`WM_TRUSTED_PROXY`, ADR-0027). The default (off) ignores
     // the header and uses a loopback placeholder, collapsing every
     // caller into one throttle bucket — fine for trusted-network
     // deployments where the operator owns every consumer, and
@@ -269,9 +269,9 @@ fn client_ip(headers: &HeaderMap, trust_forwarded: bool) -> IpAddr {
 fn format_set_cookie(value: &str, max_age: u64, secure: bool) -> String {
     // `Secure` is conditional: a plain-HTTP dev deployment would
     // never get the cookie back if we set it, so we lean on an
-    // operator flag (`WM_SECURE_COOKIES`) rather than emitting it
-    // unconditionally. Deployments behind a TLS edge MUST set the
-    // flag — see the production-hardening section in README.
+    // operator switch (`WM_TRUSTED_PROXY`) rather than emitting it
+    // unconditionally. Deployments behind a TLS edge MUST set it
+    // — see the production-hardening section in README.
     let suffix = if secure { "; Secure" } else { "" };
     format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{suffix}")
 }

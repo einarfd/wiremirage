@@ -60,12 +60,10 @@ services:
       - WM_GITHUB_ALLOW_USERS
       - WM_GITHUB_ALLOW_ORGS
       - WM_GITHUB_ADMIN_USERS
-      - WM_SECURE_COOKIES
-      - WM_TRUST_FORWARDED_HEADERS
+      - WM_TRUSTED_PROXY
       - OTEL_EXPORTER_OTLP_ENDPOINT
       - OTEL_SERVICE_NAME
       - OTEL_RESOURCE_ATTRIBUTES
-      - WM_MCP_ALLOWED_HOSTS
     depends_on:
       - valkey
     restart: unless-stopped

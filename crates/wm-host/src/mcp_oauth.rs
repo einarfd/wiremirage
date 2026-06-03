@@ -414,7 +414,7 @@ async fn authorization_server_metadata(
 /// Build the base URL (`scheme://host`) for advertising discovery
 /// values. Mirrors the redirect-URI logic in `auth_api.rs`: derive
 /// from the `Host` header (always present on HTTP/1.1), and honor
-/// `X-Forwarded-Proto` only when `WM_TRUST_FORWARDED_HEADERS=1` so
+/// `X-Forwarded-Proto` only when the proxy is trusted (`WM_TRUSTED_PROXY`) so
 /// a directly-reachable host can't be tricked into advertising
 /// HTTPS URLs it can't actually serve.
 fn derive_public_base(headers: &HeaderMap, trust_forwarded: bool) -> String {

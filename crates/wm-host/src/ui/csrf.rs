@@ -102,7 +102,7 @@ fn build_set_cookie(value: &str, secure: bool) -> String {
     // so no JS needs to read the cookie. SameSite=Strict is the real
     // defense; with it, the cookie isn't carried on any cross-site
     // request, so forged POSTs fail the cookie-presence check. The
-    // `Secure` flag is gated on `WM_SECURE_COOKIES` (slice 44) so
+    // `Secure` flag is gated on `WM_TRUSTED_PROXY` (ADR-0027) so
     // dev workflows over plain HTTP don't lose the cookie.
     let suffix = if secure { "; Secure" } else { "" };
     format!("{CSRF_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400{suffix}")

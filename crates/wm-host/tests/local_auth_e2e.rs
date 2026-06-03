@@ -464,7 +464,7 @@ async fn cookies_carry_secure_flag_when_enabled() {
     let csrf_cookies = set_cookie_blob(&get);
     assert!(
         csrf_cookies.contains("wm_csrf=") && csrf_cookies.contains("Secure"),
-        "CSRF cookie has Secure when WM_SECURE_COOKIES=1: {csrf_cookies}",
+        "CSRF cookie has Secure when behind a trusted proxy: {csrf_cookies}",
     );
 
     // Then complete the login and check the session cookie too.
@@ -473,7 +473,7 @@ async fn cookies_carry_secure_flag_when_enabled() {
     let session_cookies = set_cookie_blob(&resp);
     assert!(
         session_cookies.contains("wm_session=") && session_cookies.contains("Secure"),
-        "session cookie has Secure when WM_SECURE_COOKIES=1: {session_cookies}",
+        "session cookie has Secure when behind a trusted proxy: {session_cookies}",
     );
 }
 
