@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::api_filters::{glob_match, parse_since, validate_method};
-use crate::journal::{JournalRecord, ListCursor, UnmatchedCursor, UnmatchedNearMiss};
+use crate::journal::{
+    JournalRecord, ListCursor, UnmatchedCursor, UnmatchedNearMiss, UnmatchedRecord,
+};
 use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::mcp::context::auth_from;
 use crate::mcp::error::{
@@ -99,6 +101,12 @@ pub struct UnmatchedSummary {
     /// field being present.
     #[serde(default)]
     pub near_misses: Vec<UnmatchedNearMiss>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ShowUnmatchedArgs {
+    /// The unmatched entry's `number` (from `list_recent_unmatched`).
+    pub number: u64,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -336,6 +344,27 @@ impl WmMcpServer {
             entries,
             next_before,
         }))
+    }
+
+    #[tool(
+        name = "show_unmatched",
+        description = "Fetch one unmatched-request entry in full by its `number` — the complete captured request the SUT sent to a path no route matched: method, path, all headers, and the body (UTF-8 string, or { \"base64\": \"...\" } for binary). `list_recent_unmatched` returns only a summary (method + path + near-misses); reach for this to see exactly what an SDK posted so you can build the matching mock. The unmatched journal is the discovery surface: a request hits an undefined path, lands here with its full envelope, and you register the real route from what you see. Admin-only."
+    )]
+    pub async fn show_unmatched(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ShowUnmatchedArgs>,
+    ) -> Result<Json<UnmatchedRecord>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        if !auth.is_admin {
+            return Err(forbidden("admin-only"));
+        }
+        let record = self
+            .state
+            .journal()
+            .get_unmatched(args.number)
+            .map_err(map_journal_error)?;
+        Ok(Json(record))
     }
 
     #[tool(

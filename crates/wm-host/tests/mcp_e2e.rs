@@ -16,7 +16,8 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use serde_json::json;
 use wm_host::auth::Auth;
 use wm_host::journal::{
-    HandlerLogEntry, Journal, NewJournalEntry, RequestEnvelope, ResourceUsage, ResponseEnvelope,
+    HandlerLogEntry, Journal, NewJournalEntry, NewUnmatchedEntry, RequestEnvelope, ResourceUsage,
+    ResponseEnvelope,
 };
 use wm_host::registry::{NewGroup, Registry};
 use wm_host::route_table::RouteTable;
@@ -166,6 +167,7 @@ async fn list_tools_returns_all_expected_tools() {
         // MCP parity batch (first-user feedback)
         "list_journal",
         "show_group_state",
+        "show_unmatched",
         // Slice 43
         "update_group",
         // Capabilities (post-ADR-0021 follow-up)
@@ -1618,6 +1620,68 @@ async fn set_then_show_group_state_round_trip() {
         scenario.get("value").and_then(|v| v.as_str()),
         Some("slowdown")
     );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn show_unmatched_returns_full_request_envelope() {
+    // First-user friction #5, reframed: the unmatched journal already
+    // captures the full request the SUT sent to an unknown path; MCP
+    // just couldn't read the headers/body (only a summary). show_unmatched
+    // closes that — no catch-all route needed.
+    let h = start().await;
+    let rec = h
+        .state
+        .journal()
+        .record_unmatched(NewUnmatchedEntry {
+            trace_id: None,
+            request: RequestEnvelope {
+                method: "POST".into(),
+                path: "/v1/unknown-endpoint".into(),
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: br#"{"probe":true}"#.to_vec(),
+                original_body_size: 14,
+                body_truncated: false,
+            },
+            near_misses: vec![],
+        })
+        .expect("record unmatched");
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let shown = client
+        .call_tool(
+            CallToolRequestParams::new("show_unmatched")
+                .with_arguments(json!({ "number": rec.number }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("show_unmatched");
+    let structured = shown.structured_content.expect("structured");
+    let request = structured.get("request").expect("request envelope");
+    assert_eq!(request.get("method").and_then(|v| v.as_str()), Some("POST"));
+    assert_eq!(
+        request.get("path").and_then(|v| v.as_str()),
+        Some("/v1/unknown-endpoint")
+    );
+    // The whole point: the body the SUT sent is now retrievable over MCP.
+    // A clean UTF-8 body serializes as a plain string (WireBytes).
+    assert_eq!(
+        request.get("body").and_then(|v| v.as_str()),
+        Some(r#"{"probe":true}"#)
+    );
+
+    // Unknown number → not found.
+    let missing = client
+        .call_tool(
+            CallToolRequestParams::new("show_unmatched")
+                .with_arguments(json!({ "number": 99999 }).as_object().unwrap().clone()),
+        )
+        .await;
+    assert!(missing.is_err(), "unknown unmatched number should error");
 
     client.cancel().await.expect("cancel");
 }

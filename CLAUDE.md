@@ -525,7 +525,7 @@ this same `WireBytes` encoding (`crate::wire`) is shared by dry-run's
 `kv_overrides`/`gkv_overrides`, which were migrated to it (a clean
 breaking change — the old REST array-of-ints / MCP `kv_overrides_b64`
 fields are gone). Per-key cap 1 MiB; owner-or-admin. Surfaces: REST,
-MCP (`set_route_state` / `set_group_state`, 27 tools now), CLI (`wm
+MCP (`set_route_state` / `set_group_state`, 28 tools now), CLI (`wm
 routes state --set KEY=VALUE / --snapshot / --reset-from FILE`, same on
 `wm groups state`). A reusable runtime-configurable mock now seeds its
 config straight through this API (the `conformance/s3-slowdown` lane's
@@ -571,7 +571,16 @@ the group (admin, or owns a route in it). Fills the gap that
 `who_am_i` + `summarize_workspace` now return `base_url` —
 `auth_api::public_base_url(headers, trust_forwarded_headers)`, the same
 derivation the Connect page uses — so the serving origin is discoverable
-from the API instead of inferred from the MCP config. 27 tools total.
+from the API instead of inferred from the MCP config. A follow-up (4)
+added `show_unmatched` — `list_recent_unmatched` returns only a summary
+(method/path/near-misses), so an MCP agent couldn't read the full
+headers/body the SUT sent to an unknown path without dropping to REST
+`GET /__api/unmatched/{n}`; `show_unmatched` (admin-only) returns the
+full `UnmatchedRecord`. This was the *actual* gap behind the first user's
+"#5 catch-all" ask — the unmatched journal already captures the request,
+MCP just couldn't read all of it; a catch-all route was deferred
+(ADR-0028 in Arkiv, Proposed) as too blunt a tool for what was a
+discovery gap. 28 tools total.
 Docs-only companion: a `get_capabilities` `gotchas` entry on simulating
 an upstream hang past the ~30s buffered budget via a streaming handler
 (`responseStream` head + `sleep`, ~5 min budget). The CLI already had
