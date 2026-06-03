@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::api_filters::{glob_match, parse_since, validate_method};
-use crate::journal::{UnmatchedCursor, UnmatchedNearMiss};
+use crate::journal::{JournalRecord, ListCursor, UnmatchedCursor, UnmatchedNearMiss};
+use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::mcp::context::auth_from;
 use crate::mcp::error::{
-    forbidden, map_filter_error, map_journal_error, map_registry_error, validation,
+    forbidden, map_filter_error, map_journal_error, map_registry_error, not_found, validation,
 };
 use crate::mcp::server::WmMcpServer;
 use crate::mcp::tools::routes::RouteRecord;
@@ -35,6 +36,11 @@ pub struct SummarizeWorkspaceResult {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HostInfo {
     pub version: String,
+    /// Public base URL this host is reached at (e.g.
+    /// `https://wm.example.com`), derived from the request and honoring
+    /// `X-Forwarded-*` behind a trusted proxy (ADR-0027). Mock routes
+    /// answer directly under it (`{base_url}{route.path}`).
+    pub base_url: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -138,6 +144,42 @@ pub enum FindRouteNearMissReason {
     PrefixMatch,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListJournalArgs {
+    /// Group name or ULID. Required — the journal is per-group, and the
+    /// gate is owner-or-admin of *this* group.
+    pub group: String,
+    /// Restrict to one route by `{group}/{n}` slug.
+    pub route: Option<String>,
+    /// HTTP method filter (uppercase, e.g. `POST`).
+    pub method: Option<String>,
+    /// Exact match against the route's matched_pattern (e.g.
+    /// `/v1/charges/{id}`).
+    pub path_pattern: Option<String>,
+    /// Status filter: `2xx` / `3xx` / `4xx` / `5xx` or a specific
+    /// code like `503`.
+    pub status: Option<String>,
+    /// Lower bound on `created_at`. Duration suffix (`5m`, `1h`, `2d`,
+    /// `30s`) or RFC 3339 timestamp.
+    pub since: Option<String>,
+    /// Upper bound on `created_at`.
+    pub until: Option<String>,
+    /// Cursor for the next page: return entries with `number < before`.
+    /// Omit to start at the newest.
+    pub before: Option<u32>,
+    /// Max entries to return. Defaults to 50, capped at 200.
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListJournalResult {
+    pub entries: Vec<JournalRecord>,
+    /// Cursor for the next page; absent when the returned page reached
+    /// the oldest entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<u32>,
+}
+
 #[tool_router(router = discovery_router, vis = "pub(crate)")]
 impl WmMcpServer {
     #[tool(
@@ -186,9 +228,12 @@ impl WmMcpServer {
                 }
             })
             .collect();
+        let base_url =
+            crate::auth_api::public_base_url(&parts.headers, self.state.trust_forwarded_headers());
         Ok(Json(SummarizeWorkspaceResult {
             host: HostInfo {
                 version: HOST_VERSION.into(),
+                base_url,
             },
             user: UserInfo {
                 name: auth.user_name,
@@ -288,6 +333,114 @@ impl WmMcpServer {
             })
             .collect();
         Ok(Json(ListRecentUnmatchedResult {
+            entries,
+            next_before,
+        }))
+    }
+
+    #[tool(
+        name = "list_journal",
+        description = "List a group's recent handled requests — the matched-traffic counterpart to list_recent_unmatched, and the way to pull a completed request's journal entry (status, timing, the [stream] summary) after the fact rather than waiting live with wait_for_request / tail_journal. Cursor-paginated (`before` / `limit`, newest first). Optional filters: `route` slug, `method`, `path_pattern`, `status`, `since` / `until`. Owner-or-admin of the group."
+    )]
+    pub async fn list_journal(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ListJournalArgs>,
+    ) -> Result<Json<ListJournalResult>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        // Resolve the group ref (name or ULID); 404 so callers can't
+        // probe for groups they can't see.
+        let group = self
+            .state
+            .routes()
+            .registry()
+            .read_group_by_ref(&args.group)
+            .map_err(|_| not_found("group not found"))?;
+        // Owner-or-admin gate, matching the REST `/__api/journal/{group}`
+        // endpoint: admin, or owns at least one route in the group.
+        if !auth.is_admin {
+            let owned = self
+                .state
+                .routes()
+                .registry()
+                .list_routes_by_owner(&auth.user_id)
+                .map_err(map_registry_error)?;
+            if !owned.iter().any(|r| r.group_id == group.id) {
+                return Err(forbidden(
+                    "must be admin or own a route in this group to read its journal",
+                ));
+            }
+        }
+
+        let now = chrono::Utc::now();
+        let route = args
+            .route
+            .as_deref()
+            .map(RouteSlug::parse)
+            .transpose()
+            .map_err(|e| validation(format!("invalid `route`: {e}")))?;
+        let status = args
+            .status
+            .as_deref()
+            .map(StatusFilter::parse)
+            .transpose()
+            .map_err(|e| validation(format!("invalid `status`: {e}")))?;
+        let method = args
+            .method
+            .as_deref()
+            .map(validate_method)
+            .transpose()
+            .map_err(map_filter_error)?;
+        let since = args
+            .since
+            .as_deref()
+            .map(|s| parse_since(s, now))
+            .transpose()
+            .map_err(map_filter_error)?;
+        let until = args
+            .until
+            .as_deref()
+            .map(|s| parse_since(s, now))
+            .transpose()
+            .map_err(map_filter_error)?;
+        // Group filter tracks the resolved group name, not a free param.
+        let filter = JournalFilter {
+            group: Some(group.name.clone()),
+            route,
+            method,
+            path_pattern: args.path_pattern.clone(),
+            status,
+            since,
+            until,
+        };
+        let any_filter = filter.route.is_some()
+            || filter.method.is_some()
+            || filter.path_pattern.is_some()
+            || filter.status.is_some()
+            || filter.since.is_some()
+            || filter.until.is_some();
+
+        let cursor = ListCursor {
+            before: args.before,
+            limit: args.limit.unwrap_or(50).clamp(1, 200) as usize,
+        };
+        let entries = self
+            .state
+            .journal()
+            .list_for_group(&group.id, cursor)
+            .map_err(map_journal_error)?;
+        // Cursor walks the unfiltered stream so the caller can keep
+        // paging even when filters reject a whole page (mirrors REST).
+        let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+        let entries = if any_filter {
+            entries
+                .into_iter()
+                .filter(|r| filter.matches_handled(r))
+                .collect()
+        } else {
+            entries
+        };
+        Ok(Json(ListJournalResult {
             entries,
             next_before,
         }))

@@ -149,7 +149,7 @@ The list commands (`wm routes list`, `wm groups list`, `wm journal list`, `wm un
 
 `wm unmatched list` (admin-only) is the host-wide view of requests that arrived but didn't match any route — reach for it when debugging "my mock isn't firing". Same filter vocabulary minus `route` and `status`.
 
-For host-wide observation, the MCP server exposes two streaming tools — `wait_for_request` (block until N matching entries arrive, with timeout) and `tail_journal` (stream entries until idle or max-entries). Reach for these when a Bash-friendly polling loop would be awkward; agents with MCP access tend to find them more ergonomic than `while true; do wm journal list ...` patterns.
+For host-wide observation, the MCP server exposes two *live* streaming tools — `wait_for_request` (block until N matching entries arrive, with timeout) and `tail_journal` (stream entries until idle or max-entries). Reach for these when a Bash-friendly polling loop would be awkward; agents with MCP access tend to find them more ergonomic than `while true; do wm journal list ...` patterns. For pulling a request *after* it completed (rather than waiting live), MCP has `list_journal` — the equivalent of `wm journal list <group>`, same filters, so an agent doesn't need to have been tailing when the call landed. And `show_group_state` reads a group's shared store (the MCP counterpart to `wm groups state <group>`).
 
 ## Gotchas
 
@@ -159,6 +159,7 @@ For host-wide observation, the MCP server exposes two streaming tools — `wait_
 - **Ownership.** Routes carry an `owner_id`; non-admin callers can read shared state but only modify their own routes. Admins bypass.
 - **Implicit groups.** If you `wm routes add` without `--group`, the host creates a single-route group named `_route_<ulid>`. Useful for one-offs but they don't show up in `wm groups list` unless you ask.
 - **Mock traffic is unauthenticated by design.** SUTs don't carry tokens; only the `/__api/*` surface and `/__ui/*` (when present) are gated. Don't put secrets in mock route paths.
+- **Simulating a long upstream hang (past ~30s).** A buffered handler is capped at the ~30s wall-clock budget and traps if it sleeps longer, so it can't hold a connection open for a minute to test client timeout behavior. Use a *streaming* handler instead: commit the head with `host.responseStream({status, headers})` then `host.sleep(...)` without writing — that budget is ~5 minutes.
 
 ## When you need to debug
 

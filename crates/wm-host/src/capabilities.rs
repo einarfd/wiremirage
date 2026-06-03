@@ -489,6 +489,18 @@ leaves only ~2 seconds for the rest of the handler to run. For
 latency-simulation that wants delays close to the limit, do the sleep
 LAST in the handler so the budget isn't exhausted before you return.
 
+## Simulating an upstream that hangs (past 30s)
+
+To test how a client/SDK behaves against a connection that's accepted
+and then never answers — a true upstream hang beyond ~30s — use a
+**streaming** handler, not a buffered one. A buffered handler is capped
+at the ~30s epoch and traps if it sleeps longer, so it *can't* hold a
+connection open for a minute. A streaming handler raises the budget to
+~5 minutes: commit the head with `host.responseStream({status: 200,
+headers: []})` and then `host.sleep(120000)` without ever calling
+`.write` / `.close` to keep the socket open and silent far past the
+buffered limit. See the `streaming` topic.
+
 ## Fresh instance per request — no JS module-scope persistence
 
 Anything in JS top-level scope (variables declared outside `handle`,

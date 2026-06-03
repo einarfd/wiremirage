@@ -140,6 +140,9 @@ mod tests {
             // ADR-0025
             "set_group_state",
             "set_route_state",
+            // MCP parity batch (first-user feedback)
+            "list_journal",
+            "show_group_state",
             // Slice 36
             "show_route_source",
             // Slice 43

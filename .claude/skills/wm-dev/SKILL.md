@@ -2094,10 +2094,14 @@ the CLI.
   request path to the route's own path (one extra GET to fetch the
   route record) so `wm routes test slug` works without extra
   typing.
-- **MCP:** `show_route_state`, `clear_route_state`, `dry_run_route`
-  — all in `mcp/tools/state.rs` (renamed from "State tools" to
-  "State + dry-run tools"). Bytes values are base64-encoded on
-  the wire to keep the schema clean for JSON consumers.
+- **MCP:** `show_route_state`, `show_group_state`,
+  `clear_route_state`, `dry_run_route` — all in
+  `mcp/tools/state.rs` (renamed from "State tools" to "State +
+  dry-run tools"). `show_group_state` (MCP parity batch) is the
+  read-back counterpart to `set_group_state`/`clear_group_state`,
+  mirroring `show_route_state` over `registry.list_group_state`.
+  Bytes values follow the `WireBytes` encoding (UTF-8 string, or
+  `{base64}`) to keep the schema clean for JSON consumers.
 
 ## Route update (slice 15)
 
@@ -2212,7 +2216,12 @@ succeeds; consumers subscribe via `Journal::subscribe()`.
   since the MCP server runs inside the host. Single
   `CallToolResult` with the accumulated entries (request/response
   shape, not progressive notifications) — matches what rmcp does
-  cleanly.
+  cleanly. The **live** pair is complemented by `list_journal`
+  (MCP parity batch), the after-the-fact query that reads the
+  *stored* journal (`Journal::list_for_group`) so a completed
+  request can be pulled without having waited live — same filter
+  surface as REST `GET /__api/journal/{group}`, owner-or-admin of
+  the group.
 - **Multi-host gap.** The bus is in-process. Sibling hosts in a
   multi-host deployment won't see each other's events. Documented
   in the implementation-status blocks; revisit when multi-host is

@@ -42,6 +42,17 @@ pub struct ShowRouteStateResult {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ShowGroupStateArgs {
+    /// Group name or ULID.
+    pub group: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ShowGroupStateResult {
+    pub entries: Vec<RouteStateEntry>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RouteStateEntry {
     pub key: String,
     /// Storage-level kind: `"bytes"`, `"list"`, `"hash"`, `"set"`, or
@@ -171,6 +182,37 @@ impl WmMcpServer {
             .clear_group_state(&group.id)
             .map_err(map_registry_error)?;
         Ok(Json(ClearGroupStateResult { cleared: true }))
+    }
+
+    #[tool(
+        name = "show_group_state",
+        description = "List the kv entries in a group's shared store (the `gkv:` namespace handlers read via group-store). The read-back counterpart to set_group_state / clear_group_state. Bytes-typed values inline their bytes (base64); list / hash / set values report cardinality only. Owner-or-admin."
+    )]
+    pub async fn show_group_state(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ShowGroupStateArgs>,
+    ) -> Result<Json<ShowGroupStateResult>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let entries = self
+            .state
+            .routes()
+            .registry()
+            .list_group_state(&group.id)
+            .map_err(map_registry_error)?;
+        let mcp_entries = entries
+            .into_iter()
+            .map(|e| RouteStateEntry {
+                key: e.key,
+                kind: e.kind,
+                value: e.value.as_deref().map(WireBytes::from_bytes),
+                length: e.length,
+            })
+            .collect();
+        Ok(Json(ShowGroupStateResult {
+            entries: mcp_entries,
+        }))
     }
 
     #[tool(

@@ -53,15 +53,17 @@ wraps the REST surface end-to-end: groups, routes (including `wm
 routes update`, `wm routes state`, `wm routes test`), journal,
 tokens, and the public probes — see "Using the CLI" below. The MCP
 server is part of the host and mounts at `/__api/mcp` over the
-streamable-HTTP transport; 25 tools cover identity, discovery,
-group/route CRUD (now including `update_route`), per-route state
-(`show_route_state`, `set_route_state`, `set_group_state`,
-`clear_route_state`), dry-run (`dry_run_route`),
+streamable-HTTP transport; 27 tools cover identity, discovery,
+group/route CRUD (now including `update_route`), route + group state
+(`show_route_state`, `show_group_state`, `set_route_state`,
+`set_group_state`, `clear_route_state`), dry-run (`dry_run_route`),
 the live-tail streaming pair (`wait_for_request`, `tail_journal`),
-and the match probe (`find_route`, mirrored by `wm match` and `GET
-/__api/match`). All behind the same bearer-token auth. Live tail
-also exposes `GET /__api/journal/tail` as an SSE endpoint for non-MCP
-consumers.
+the after-the-fact journal-history query (`list_journal`), and the
+match probe (`find_route`, mirrored by `wm match` and `GET
+/__api/match`). `who_am_i` / `summarize_workspace` also surface the
+public `base_url` the host serves mock routes at. All behind the same
+bearer-token auth. Live tail also exposes `GET /__api/journal/tail`
+as an SSE endpoint for non-MCP consumers.
 
 ## Layout
 
@@ -515,15 +517,21 @@ claude mcp add --transport http wiremirage \
   --header "Authorization: Bearer wmt_..."
 ```
 
-The current surface is 25 tools — identity (`who_am_i`), discovery
-(`summarize_workspace`, `list_recent_unmatched`, `find_route`),
-group CRUD (`list_groups`, `show_group`, `create_group`,
+The current surface is 27 tools — identity (`who_am_i`), discovery
+(`summarize_workspace`, `list_recent_unmatched`, `list_journal`,
+`find_route`), group CRUD (`list_groups`, `show_group`, `create_group`,
 `update_group`, `delete_group`, `refresh_group_ttl`), route CRUD
 (`list_routes`, `show_route`, `show_route_source`, `create_route`,
 `update_route`, `delete_route`), state + dry-run (`clear_group_state`,
-`set_group_state`, `show_route_state`, `set_route_state`,
-`clear_route_state`, `dry_run_route`), and the
-slice-11 streaming pair (`wait_for_request`, `tail_journal`). The streaming tools
+`set_group_state`, `show_group_state`, `show_route_state`,
+`set_route_state`, `clear_route_state`, `dry_run_route`), and the
+slice-11 streaming pair (`wait_for_request`, `tail_journal`).
+`list_journal` is the after-the-fact counterpart to the live streaming
+pair — it pages a group's stored journal (same filters as `GET
+/__api/journal/{group}`) so a completed request can be pulled without
+having waited live. `who_am_i` and `summarize_workspace` also report
+the public `base_url` the host serves mock routes at, derived from the
+request (honoring `X-Forwarded-*` behind a trusted proxy). The streaming tools
 subscribe to a single-host broadcast bus inside the host and return
 accumulated entries when their stop condition fires (count + timeout
 for `wait_for_request`; max_entries + idle timeout for

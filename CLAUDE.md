@@ -525,7 +525,7 @@ this same `WireBytes` encoding (`crate::wire`) is shared by dry-run's
 `kv_overrides`/`gkv_overrides`, which were migrated to it (a clean
 breaking change — the old REST array-of-ints / MCP `kv_overrides_b64`
 fields are gone). Per-key cap 1 MiB; owner-or-admin. Surfaces: REST,
-MCP (`set_route_state` / `set_group_state`, 25 tools now), CLI (`wm
+MCP (`set_route_state` / `set_group_state`, 27 tools now), CLI (`wm
 routes state --set KEY=VALUE / --snapshot / --reset-from FILE`, same on
 `wm groups state`). A reusable runtime-configurable mock now seeds its
 config straight through this API (the `conformance/s3-slowdown` lane's
@@ -555,6 +555,28 @@ the real public origin) plus paste-ready client configs (Claude Code
 connector flow) and a pointer to mint a token. MCP-first by design — no
 install needed; the CLI/binaries path is deferred. The Host-derived URL
 is autoescaped (not marked `safe`), so it's XSS-safe.
+
+MCP parity batch (first-user feedback): three MCP-only gaps closed where
+the data/endpoint already existed on REST/CLI/UI but MCP didn't expose
+it. (1) `show_group_state` — the read-back counterpart to the existing
+`set_group_state`/`clear_group_state` (mirrors `show_route_state`;
+owner-or-admin via `ensure_group_owner_or_admin`, same gate as REST `GET
+/__api/groups/{group}/state`). (2) `list_journal` — the after-the-fact
+matched-traffic query (counterpart to `list_recent_unmatched`), a thin
+wrapper over `Journal::list_for_group` with the same filter surface as
+REST `GET /__api/journal/{group}` (`route`/`method`/`path_pattern`/
+`status`/`since`/`until`, cursor `before`/`limit`); owner-or-admin of
+the group (admin, or owns a route in it). Fills the gap that
+`wait_for_request`/`tail_journal` only catch *live* entries. (3)
+`who_am_i` + `summarize_workspace` now return `base_url` —
+`auth_api::public_base_url(headers, trust_forwarded_headers)`, the same
+derivation the Connect page uses — so the serving origin is discoverable
+from the API instead of inferred from the MCP config. 27 tools total.
+Docs-only companion: a `get_capabilities` `gotchas` entry on simulating
+an upstream hang past the ~30s buffered budget via a streaming handler
+(`responseStream` head + `sleep`, ~5 min budget). The CLI already had
+all three (`wm groups state` lists by default, `wm journal list`, and
+`--host` makes the base URL caller-supplied), so this was MCP-only.
 
 ## Where the design lives
 
