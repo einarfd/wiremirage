@@ -784,18 +784,25 @@ async fn rejects_invalid_path_pattern() {
 #[tokio::test]
 async fn rejects_pattern_shape_conflict() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["GET"],
-        "path": "/users/{id}",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
-    // /users/me has the same shape as /users/{id} — must conflict.
+    let first: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/users/{id}",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = first["group"]["name"].as_str().unwrap();
+    // /users/me has the same shape as /users/{id} in the SAME group — must
+    // conflict (per-group namespace, ADR-0030).
     let resp = h
         .create_route_body(json!({
             "methods": ["GET"],
             "path": "/users/me",
+            "group": group,
             "language": "javascript",
             "source": echo_source(),
         }))
@@ -814,18 +821,24 @@ async fn source_create_conflict_is_detected_before_transpile() {
     // bad TS — if the precheck were missing, swc would surface a
     // 400 compile_failed instead of the 409 we assert on.
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["POST"],
-        "path": "/v1/charges",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
+    let first: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = first["group"]["name"].as_str().unwrap();
 
     let resp = h
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/charges",
+            "group": group,
             "language": "typescript",
             // Intentionally broken — would 400 compile_failed if the
             // precheck didn't fire first.
@@ -1202,18 +1215,12 @@ async fn patch_route_replaces_source() {
 #[tokio::test]
 async fn patch_route_rejects_path_conflict() {
     let h = Harness::start().await;
-    // Two routes; try to move the second onto the first's path.
-    h.create_route_body(json!({
-        "methods": ["GET"],
-        "path": "/v1/a",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
-    let second: serde_json::Value = h
+    // Two routes in the SAME group; try to move the second onto the
+    // first's path (per-group conflict, ADR-0030).
+    let first: serde_json::Value = h
         .create_route_body(json!({
             "methods": ["GET"],
-            "path": "/v1/b",
+            "path": "/v1/a",
             "language": "javascript",
             "source": echo_source(),
         }))
@@ -1221,7 +1228,19 @@ async fn patch_route_rejects_path_conflict() {
         .json()
         .await
         .expect("json");
-    let group = second["group"]["name"].as_str().unwrap();
+    let group = first["group"]["name"].as_str().unwrap().to_string();
+    let second: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/b",
+            "group": group,
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
     let number = second["number"].as_u64().unwrap();
 
     let resp = h

@@ -4,7 +4,6 @@
 //!   route:{ulid}                                hash with full route record
 //!   route:in-group:{group_ulid}                 set of route ulids
 //!   route:by-number:{group_ulid}:{n}            string -> route ulid
-//!   route:by-method-path:{METHOD}:{path}        string -> route ulid (exact-match index)
 //!   route:all                                   set of all route ulids
 //!
 //!   group:{ulid}                                hash with group record
@@ -15,9 +14,11 @@
 //! `Bucket`), so the same code path runs against in-memory and Valkey
 //! backends.
 //!
-//! Slice 3 scope: implicit single-route groups, no TTL, no auth, no
-//! cascade. Conflict detection beyond the by-method-path exact-match index
-//! lands in a follow-up task in this slice.
+//! Conflict detection is **per-group** (ADR-0030): a new/edited route may
+//! not collide with another route *in the same group* (overlapping methods +
+//! a segment-compatible pattern); different groups are independent path
+//! namespaces (each is its own subdomain). The scan walks
+//! `route:in-group:{group_ulid}`.
 
 use std::collections::HashMap;
 
@@ -649,8 +650,8 @@ impl Registry {
             None => self.create_implicit_group(&mut bucket, &params.owner_id)?,
         };
 
-        // Pattern-shape conflict detection per route-model.md.
-        self.scan_pattern_conflict(&mut bucket, &new_methods, &new_pattern)?;
+        // Pattern-shape conflict detection, scoped to this group (ADR-0030).
+        self.scan_pattern_conflict(&mut bucket, &group.id, &new_methods, &new_pattern, None)?;
 
         // Allocate the route's per-group sequence number.
         let n = bucket.hash_incr(
@@ -686,12 +687,6 @@ impl Registry {
         bucket.set_add(&format!("route:in-group:{}", group.id), &route_id)?;
         bucket.set_add("route:all", &route_id)?;
         bucket.set_add(&format!("route:by-owner:{}", route.owner_id), &route_id)?;
-        for method in &route.methods {
-            bucket.set(
-                &format!("route:by-method-path:{method}:{}", route.path),
-                route_id.as_bytes().to_vec(),
-            )?;
-        }
 
         Ok(route)
     }
@@ -735,17 +730,39 @@ impl Registry {
         Ok(out)
     }
 
-    /// Walk existing routes and reject if any has overlapping methods
-    /// and a segment-compatible pattern. The by-method-path exact-
-    /// match index isn't sufficient — `GET /users/{id}` vs
-    /// `GET /users/me` need this loop to catch them.
+    /// Routes belonging to one group, via the `route:in-group:{group_id}`
+    /// set. Conflict detection scopes to this (ADR-0030: each group is its
+    /// own path namespace / subdomain).
+    fn list_routes_in_group(
+        &self,
+        bucket: &mut Bucket,
+        group_id: &str,
+    ) -> Result<Vec<Route>, RegistryError> {
+        let ids = bucket.set_members(&format!("route:in-group:{group_id}"))?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.push(self.read_route(bucket, &id)?);
+        }
+        Ok(out)
+    }
+
+    /// Reject a `(methods, pattern)` that conflicts with an existing route
+    /// **in the same group** — overlapping methods and a segment-compatible
+    /// pattern. Per-group, not host-wide (ADR-0030): two groups may hold the
+    /// same `(method, path)`. `exclude_id` skips the route being edited so it
+    /// can't conflict with itself.
     fn scan_pattern_conflict(
         &self,
         bucket: &mut Bucket,
+        group_id: &str,
         new_methods: &Methods,
         new_pattern: &Pattern,
+        exclude_id: Option<&str>,
     ) -> Result<(), RegistryError> {
-        for existing in self.list_routes_internal(bucket)? {
+        for existing in self.list_routes_in_group(bucket, group_id)? {
+            if exclude_id == Some(existing.id.as_str()) {
+                continue;
+            }
             let existing_pattern = Pattern::parse(&existing.path)?;
             let existing_methods = Methods(existing.methods.clone());
             if pattern::routes_conflict(
@@ -771,13 +788,26 @@ impl Registry {
     /// only to discover the slot is taken.
     pub fn precheck_create_conflict(
         &self,
+        group_ref: Option<&str>,
         methods: &[String],
         path: &str,
     ) -> Result<(), RegistryError> {
         let new_pattern = Pattern::parse(path)?;
         let new_methods = validate_methods(methods)?;
         let mut bucket = self.bucket()?;
-        self.scan_pattern_conflict(&mut bucket, &new_methods, &new_pattern)
+        // Conflict is per-group (ADR-0030). With no group named, or a group
+        // that doesn't exist yet, the route lands in a fresh namespace with
+        // nothing to collide with — so there's nothing to precheck.
+        let group_id = match group_ref {
+            Some(reference) => self.resolve_group(&mut bucket, reference)?,
+            None => None,
+        };
+        match group_id {
+            Some(gid) => {
+                self.scan_pattern_conflict(&mut bucket, &gid, &new_methods, &new_pattern, None)
+            }
+            None => Ok(()),
+        }
     }
 
     #[tracing::instrument(
@@ -917,12 +947,11 @@ impl Registry {
     }
 
     /// Replace a subset of mutable fields on an existing route. Path /
-    /// methods changes re-validate pattern conflicts (excluding the
-    /// route being edited from the scan) and swap the
-    /// `route:by-method-path:` indexes. Compiled-wasm changes drop
-    /// the component-cache entry at the API layer via
-    /// `RouteTable::refresh_after_update`. `owner_id` and `number`
-    /// are immutable.
+    /// methods changes re-validate pattern conflicts within the route's
+    /// group (excluding the route being edited from the scan; ADR-0030).
+    /// Compiled-wasm changes drop the component-cache entry at the API
+    /// layer via `RouteTable::refresh_after_update`. `owner_id` and
+    /// `number` are immutable.
     #[tracing::instrument(
         name = "registry.update_route",
         skip_all,
@@ -964,38 +993,18 @@ impl Registry {
         let path_changing = patch.path.is_some();
 
         // Conflict detection — only when method or path is changing.
-        // Exclude the route being edited so it doesn't conflict with
-        // itself. Same pattern as `create_route`.
+        // Scoped to this route's group and excluding the route itself
+        // (ADR-0030). Same check `create_route` runs.
         if methods_changing || path_changing {
             let new_pattern = Pattern::parse(&new_path)?;
             let new_methods_obj = Methods(new_methods.clone());
-            for existing in self.list_routes_internal(&mut bucket)? {
-                if existing.id == route.id {
-                    continue;
-                }
-                let existing_pattern = Pattern::parse(&existing.path)?;
-                let existing_methods = Methods(existing.methods.clone());
-                if pattern::routes_conflict(
-                    &new_methods_obj,
-                    &new_pattern,
-                    &existing_methods,
-                    &existing_pattern,
-                ) {
-                    return Err(RegistryError::Conflict(format!(
-                        "conflicts with {}/{} ({:?} {})",
-                        existing.group_name, existing.number, existing.methods, existing.path
-                    )));
-                }
-            }
-        }
-
-        // Strip the old by-method-path index entries before we update
-        // the record so a partially-applied edit can't leave dangling
-        // mappings.
-        if methods_changing || path_changing {
-            for method in &route.methods {
-                bucket.delete(&format!("route:by-method-path:{method}:{}", route.path))?;
-            }
+            self.scan_pattern_conflict(
+                &mut bucket,
+                &route.group_id,
+                &new_methods_obj,
+                &new_pattern,
+                Some(&route.id),
+            )?;
         }
 
         // Apply mutations to the record. Each field handled
@@ -1034,16 +1043,6 @@ impl Registry {
             match src_opt {
                 Some(src) => bucket.hash_set(&key, "source", src.into_bytes())?,
                 None => bucket.hash_delete(&key, "source")?,
-            }
-        }
-
-        // Re-add by-method-path entries for the new (method, path) set.
-        if methods_changing || path_changing {
-            for method in &route.methods {
-                bucket.set(
-                    &format!("route:by-method-path:{method}:{}", route.path),
-                    route_id.as_bytes().to_vec(),
-                )?;
             }
         }
 
@@ -1092,9 +1091,6 @@ fn write_group(bucket: &mut Bucket, group: &Group) -> Result<(), RegistryError> 
 /// `delete_route` and `cascade_delete_group` so the index-cleanup
 /// rules live in one place.
 fn strip_route_indexes(bucket: &mut Bucket, route: &Route) -> Result<(), RegistryError> {
-    for method in &route.methods {
-        bucket.delete(&format!("route:by-method-path:{method}:{}", route.path))?;
-    }
     bucket.delete(&format!(
         "route:by-number:{}:{}",
         route.group_id, route.number
@@ -1393,15 +1389,47 @@ mod tests {
     }
 
     #[test]
-    fn exact_method_path_conflict_rejected() {
+    fn same_path_conflicts_within_one_group() {
         let registry = fresh_registry();
         registry
-            .create_route(sample_new_route(None, "/v1/foo"))
+            .create_group(NewGroup {
+                name: "g1".into(),
+                owner_id: "o".into(),
+                ttl_seconds: None,
+                sliding_ttl: None,
+            })
+            .unwrap();
+        registry
+            .create_route(sample_new_route(Some("g1"), "/v1/foo"))
             .unwrap();
         let err = registry
-            .create_route(sample_new_route(None, "/v1/foo"))
+            .create_route(sample_new_route(Some("g1"), "/v1/foo"))
             .unwrap_err();
         assert!(matches!(err, RegistryError::Conflict(_)));
+    }
+
+    #[test]
+    fn same_path_allowed_across_groups() {
+        // ADR-0030: groups are independent path namespaces, so the same
+        // (method, path) in two different groups must NOT conflict.
+        let registry = fresh_registry();
+        for name in ["g1", "g2"] {
+            registry
+                .create_group(NewGroup {
+                    name: name.into(),
+                    owner_id: "o".into(),
+                    ttl_seconds: None,
+                    sliding_ttl: None,
+                })
+                .unwrap();
+        }
+        registry
+            .create_route(sample_new_route(Some("g1"), "/v1/foo"))
+            .unwrap();
+        registry
+            .create_route(sample_new_route(Some("g2"), "/v1/foo"))
+            .unwrap();
+        assert_eq!(registry.list_routes().unwrap().len(), 2);
     }
 
     #[test]
@@ -1461,9 +1489,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.methods, vec!["GET", "POST"]);
         assert_eq!(updated.path, "/v1/bar");
-        // The route is still readable by its slug, and the old path's
-        // by-method-path index entry is gone (so the same path is
-        // free to claim again).
+        // The route is still readable by its slug after the path change.
         let read = registry.get_route_by_slug(&r.group_name, r.number).unwrap();
         assert_eq!(read.path, "/v1/bar");
     }
@@ -1492,14 +1518,22 @@ mod tests {
     #[test]
     fn update_route_rejects_conflict_with_another_route() {
         let registry = fresh_registry();
+        registry
+            .create_group(NewGroup {
+                name: "g".into(),
+                owner_id: "o".into(),
+                ttl_seconds: None,
+                sliding_ttl: None,
+            })
+            .unwrap();
         let _other = registry
-            .create_route(sample_new_route(None, "/v1/charges"))
+            .create_route(sample_new_route(Some("g"), "/v1/charges"))
             .unwrap();
         let r = registry
-            .create_route(sample_new_route(None, "/v1/refunds"))
+            .create_route(sample_new_route(Some("g"), "/v1/refunds"))
             .unwrap();
-        // Moving /v1/refunds onto /v1/charges (same method) must
-        // conflict; the original /v1/refunds is unchanged.
+        // Moving /v1/refunds onto /v1/charges (same method, same group)
+        // must conflict; the original /v1/refunds is unchanged.
         let err = registry
             .update_route(
                 &r.group_name,
