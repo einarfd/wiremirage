@@ -534,10 +534,11 @@ pub(crate) async fn create_route_core(
     // `registry.create_route()` after we have an artifact, but
     // surfacing it here means a re-seed of an existing slug fails
     // before we do the parser work.
-    state
-        .routes()
-        .registry()
-        .precheck_create_conflict(&body.methods, &body.path)?;
+    state.routes().registry().precheck_create_conflict(
+        body.group.as_deref(),
+        &body.methods,
+        &body.path,
+    )?;
 
     let (compiled_wasm, language, bindings_version, source) = match body.language.as_str() {
         "wasm" => {
