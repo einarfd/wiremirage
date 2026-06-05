@@ -253,25 +253,28 @@ impl Registry {
     /// Explicit group creation. Validates name uniqueness, normalizes
     /// the TTL config, writes the record + indexes + Valkey TTL.
     pub fn create_group(&self, params: NewGroup) -> Result<Group, RegistryError> {
-        if params.name.trim().is_empty() {
-            return Err(RegistryError::Malformed(
-                "group name must not be empty".into(),
-            ));
-        }
         let mut bucket = self.bucket()?;
-        if bucket
-            .get(&format!("group:by-name:{}", params.name))?
-            .is_some()
-        {
-            return Err(RegistryError::Conflict(format!(
-                "group {:?} already exists",
-                params.name
-            )));
-        }
+        // A blank name means "assign me a friendly one" (ADR-0030): group
+        // names double as subdomains, so the generated label is DNS-safe.
+        // An explicit name is taken as-is, subject to the uniqueness check.
+        let name = if params.name.trim().is_empty() {
+            self.generate_group_name(&mut bucket)?
+        } else {
+            if bucket
+                .get(&format!("group:by-name:{}", params.name))?
+                .is_some()
+            {
+                return Err(RegistryError::Conflict(format!(
+                    "group {:?} already exists",
+                    params.name
+                )));
+            }
+            params.name
+        };
         let ttl_seconds = normalize_ttl(params.ttl_seconds.unwrap_or(DEFAULT_GROUP_TTL_SECONDS))?;
         let group = Group {
             id: Ulid::new().to_string(),
-            name: params.name,
+            name,
             implicit: false,
             created_at: Utc::now(),
             owner_id: params.owner_id,
@@ -572,15 +575,39 @@ impl Registry {
         Ok(())
     }
 
+    /// Pick an unused, friendly, DNS-safe group name (ADR-0030). Group names
+    /// double as subdomains, so this returns a valid DNS label. Tries a bare
+    /// `adjective-noun` a handful of times, then walks a numeric
+    /// disambiguator — which expands the space without a larger word list.
+    fn generate_group_name(&self, bucket: &mut Bucket) -> Result<String, RegistryError> {
+        for _ in 0..8 {
+            let candidate = crate::naming::generate();
+            if bucket.get(&format!("group:by-name:{candidate}"))?.is_none() {
+                return Ok(candidate);
+            }
+        }
+        let base = crate::naming::generate();
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("{base}-{n}");
+            if bucket.get(&format!("group:by-name:{candidate}"))?.is_none() {
+                return Ok(candidate);
+            }
+            n += 1;
+        }
+    }
+
     fn create_implicit_group(
         &self,
         bucket: &mut Bucket,
         owner_id: &str,
     ) -> Result<Group, RegistryError> {
         let id = Ulid::new().to_string();
-        // `_route_{suffix}` so it sorts after user-named groups and
-        // visually signals "implementation detail."
-        let name = format!("_route_{}", &id[id.len().saturating_sub(8)..]);
+        // Implicit groups get the same friendly, DNS-safe auto-name as any
+        // other name-less group (ADR-0030) — the old `_route_{ulid}` scheme
+        // is an illegal DNS label (leading underscore) under virtual-host
+        // routing. `implicit: true` still keeps them out of default listings.
+        let name = self.generate_group_name(bucket)?;
         let group = Group {
             id: id.clone(),
             name: name.clone(),
@@ -1265,13 +1292,46 @@ mod tests {
     }
 
     #[test]
-    fn implicit_group_named_for_route() {
+    fn implicit_group_gets_friendly_dns_safe_name() {
         let registry = fresh_registry();
         let route = registry
             .create_route(sample_new_route(None, "/v1/foo"))
             .unwrap();
-        assert!(route.group_name.starts_with("_route_"));
+        // ADR-0030: implicit groups get an auto-assigned DNS-safe name, not
+        // the old `_route_{ulid}` scheme (illegal leading underscore as a
+        // subdomain label).
+        assert!(
+            !route.group_name.starts_with("_route_"),
+            "got legacy name {:?}",
+            route.group_name
+        );
+        assert!(
+            crate::naming::is_valid_label(&route.group_name),
+            "implicit group name {:?} is not a valid DNS label",
+            route.group_name
+        );
         assert_eq!(route.number, 1);
+    }
+
+    #[test]
+    fn create_group_with_blank_name_auto_assigns_dns_safe_name() {
+        let registry = fresh_registry();
+        let group = registry
+            .create_group(NewGroup {
+                name: "".into(),
+                owner_id: "o".into(),
+                ttl_seconds: None,
+                sliding_ttl: None,
+            })
+            .unwrap();
+        assert!(
+            crate::naming::is_valid_label(&group.name),
+            "auto-assigned name {:?} is not a valid DNS label",
+            group.name
+        );
+        // Retrievable by the assigned name.
+        let by_name = registry.read_group_by_ref(&group.name).unwrap();
+        assert_eq!(by_name.id, group.id);
     }
 
     #[test]

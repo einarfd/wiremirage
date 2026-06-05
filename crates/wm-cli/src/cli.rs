@@ -335,7 +335,7 @@ pub struct TestRouteArgs {
 #[derive(Debug, clap::Args)]
 pub struct AddRouteArgs {
     /// Group to add the route to (name or ULID). Optional — omit
-    /// to land in an implicit single-route group named `_route_*`.
+    /// to land in an auto-named implicit single-route group.
     #[arg(long)]
     pub group: Option<String>,
     /// HTTP method or comma-separated list. `ANY` matches everything.
