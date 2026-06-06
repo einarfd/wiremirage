@@ -346,7 +346,7 @@ async fn patch_group_skips_none_fields() {
     let client = Client::builder(host).build().expect("build");
     let body = PatchGroupBody {
         ttl_seconds: Some(7200),
-        sliding_ttl: None,
+        ..Default::default()
     };
     client
         .patch_group("stripe-mock", &body)

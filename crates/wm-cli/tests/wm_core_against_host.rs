@@ -112,6 +112,7 @@ async fn group_full_round_trip() {
             &PatchGroupBody {
                 ttl_seconds: Some(7200),
                 sliding_ttl: Some(true),
+                ..Default::default()
             },
         )
         .await

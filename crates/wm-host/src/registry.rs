@@ -361,6 +361,56 @@ impl Registry {
         Ok(group)
     }
 
+    /// Rename a group. The name doubles as the group's subdomain (ADR-0030),
+    /// so `new_name` must be a valid DNS label and not already taken. No-op
+    /// (returns the group unchanged) when `new_name` equals the current name.
+    /// Rewrites the group record + the `group:by-name` index, and the
+    /// denormalized `group_name` on every route in the group — that field
+    /// backs both the `{group}/{n}` slug and the subdomain match key, so it
+    /// must track the rename. The caller must refresh the in-memory route
+    /// table via [`RouteTable::refresh_after_group_rename`].
+    pub fn rename_group(&self, group_ref: &str, new_name: &str) -> Result<Group, RegistryError> {
+        let mut bucket = self.bucket()?;
+        let group_id = self
+            .resolve_group(&mut bucket, group_ref)?
+            .ok_or(RegistryError::NotFound)?;
+        let mut group = self.read_group(&mut bucket, &group_id)?;
+        if group.name == new_name {
+            return Ok(group); // no-op rename
+        }
+        if !crate::naming::is_valid_label(new_name) {
+            return Err(RegistryError::InvalidName(new_name.to_string()));
+        }
+        if bucket.get(&format!("group:by-name:{new_name}"))?.is_some() {
+            return Err(RegistryError::Conflict(format!(
+                "group {new_name:?} already exists"
+            )));
+        }
+        let old_name = group.name.clone();
+        // Group record + by-name index (carry the existing TTL forward).
+        bucket.hash_set(
+            &format!("group:{group_id}"),
+            "name",
+            new_name.as_bytes().to_vec(),
+        )?;
+        bucket.delete(&format!("group:by-name:{old_name}"))?;
+        bucket.set(
+            &format!("group:by-name:{new_name}"),
+            group_id.as_bytes().to_vec(),
+        )?;
+        bucket.set_ttl(&format!("group:by-name:{new_name}"), group.ttl_seconds)?;
+        // Denormalized group_name on every route in the group.
+        for route in self.list_routes_in_group(&mut bucket, &group_id)? {
+            bucket.hash_set(
+                &format!("route:{}", route.id),
+                "group_name",
+                new_name.as_bytes().to_vec(),
+            )?;
+        }
+        group.name = new_name.to_string();
+        Ok(group)
+    }
+
     /// Best-effort sliding-TTL bump used by the dispatch path: read
     /// the group, no-op if it doesn't exist or has `sliding_ttl =
     /// false`, otherwise re-arm the Valkey TTL. Returns `Ok(true)`
@@ -1376,6 +1426,67 @@ mod tests {
                     sliding_ttl: None,
                 })
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn rename_group_moves_index_and_route_group_names() {
+        let registry = fresh_registry();
+        registry
+            .create_group(NewGroup {
+                name: "old-name".into(),
+                owner_id: "o".into(),
+                ttl_seconds: None,
+                sliding_ttl: None,
+            })
+            .unwrap();
+        let r = registry
+            .create_route(sample_new_route(Some("old-name"), "/v1/foo"))
+            .unwrap();
+        assert_eq!(r.group_name, "old-name");
+
+        let renamed = registry.rename_group("old-name", "new-name").unwrap();
+        assert_eq!(renamed.name, "new-name");
+        // The by-name index moved.
+        assert_eq!(
+            registry.read_group_by_ref("new-name").unwrap().id,
+            renamed.id
+        );
+        assert!(registry.read_group_by_ref("old-name").is_err());
+        // The route's denormalized group_name tracked the rename, and it's
+        // reachable under the new slug.
+        let route = registry.get_route_by_slug("new-name", r.number).unwrap();
+        assert_eq!(route.group_name, "new-name");
+        assert_eq!(route.path, "/v1/foo");
+    }
+
+    #[test]
+    fn rename_group_rejects_bad_label_conflict_and_is_noop_on_same_name() {
+        let registry = fresh_registry();
+        for name in ["a-group", "taken"] {
+            registry
+                .create_group(NewGroup {
+                    name: name.into(),
+                    owner_id: "o".into(),
+                    ttl_seconds: None,
+                    sliding_ttl: None,
+                })
+                .unwrap();
+        }
+        // Not a DNS label → InvalidName.
+        assert!(matches!(
+            registry.rename_group("a-group", "Bad Name").unwrap_err(),
+            RegistryError::InvalidName(_)
+        ));
+        // Already taken → Conflict.
+        assert!(matches!(
+            registry.rename_group("a-group", "taken").unwrap_err(),
+            RegistryError::Conflict(_)
+        ));
+        // Same name → no-op, Ok.
+        assert_eq!(
+            registry.rename_group("a-group", "a-group").unwrap().name,
+            "a-group"
         );
     }
 

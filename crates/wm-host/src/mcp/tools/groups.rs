@@ -122,6 +122,10 @@ pub struct RefreshGroupArgs {
 pub struct UpdateGroupArgs {
     /// Group name or ULID.
     pub group: String,
+    /// Rename the group to this name. Must be a valid DNS label (it's the
+    /// group's subdomain; ADR-0030) and changes the group's served base URL.
+    /// Omit to leave the name alone.
+    pub name: Option<String>,
     /// New TTL in seconds. Capped at the host's `MAX_GROUP_TTL_SECONDS`
     /// (30d). Omit to leave the TTL alone. Setting this re-arms the
     /// Valkey TTL on the group record.
@@ -315,17 +319,37 @@ impl WmMcpServer {
     ) -> Result<Json<GroupRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
         let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
-        if args.ttl_seconds.is_none() && args.sliding_ttl.is_none() {
+        if args.name.is_none() && args.ttl_seconds.is_none() && args.sliding_ttl.is_none() {
             return Err(validation(
-                "update_group needs at least one of `ttl_seconds` or `sliding_ttl`",
+                "update_group needs at least one of `name`, `ttl_seconds`, or `sliding_ttl`",
             ));
         }
-        let updated = self
-            .state
-            .routes()
-            .registry()
-            .patch_group(&group.id, args.ttl_seconds, args.sliding_ttl)
-            .map_err(map_registry_error)?;
+        // Rename first (rewrites the by-name index + route slugs, changes the
+        // served subdomain), then apply any ttl/sliding change.
+        if let Some(new_name) = args.name.as_deref() {
+            let renamed = self
+                .state
+                .routes()
+                .registry()
+                .rename_group(&group.id, new_name)
+                .map_err(map_registry_error)?;
+            self.state
+                .routes()
+                .refresh_after_group_rename(&group.id, &renamed.name);
+        }
+        let updated = if args.ttl_seconds.is_some() || args.sliding_ttl.is_some() {
+            self.state
+                .routes()
+                .registry()
+                .patch_group(&group.id, args.ttl_seconds, args.sliding_ttl)
+                .map_err(map_registry_error)?
+        } else {
+            self.state
+                .routes()
+                .registry()
+                .read_group_by_ref(&group.id)
+                .map_err(map_registry_error)?
+        };
         Ok(Json(GroupRecord::from(&updated)))
     }
 }

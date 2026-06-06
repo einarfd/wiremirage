@@ -792,6 +792,64 @@ async fn routing_is_scoped_per_group_subdomain() {
 }
 
 #[tokio::test]
+async fn rename_group_moves_routes_to_the_new_subdomain() {
+    // ADR-0030: a group's name is its subdomain, so renaming moves its
+    // routes to the new subdomain end-to-end (incl. the in-memory route
+    // table refresh — without it, the new subdomain wouldn't match).
+    let h = Harness::start().await;
+    let r = h
+        .client
+        .post(h.url("/__api/groups"))
+        .json(&json!({ "name": "before" }))
+        .send()
+        .await
+        .expect("create group");
+    assert_eq!(r.status().as_u16(), 201);
+    h.seed_route_in_group("before", &["GET"], "/widget", echo_wasm());
+
+    // Served on the original subdomain.
+    let pre = h
+        .mock(reqwest::Method::GET, "before", "/widget")
+        .send()
+        .await
+        .expect("call");
+    assert_eq!(pre.status().as_u16(), 200);
+
+    // Rename via PATCH; the response reflects the new name.
+    let patched: serde_json::Value = h
+        .client
+        .patch(h.url("/__api/groups/before"))
+        .json(&json!({ "name": "after" }))
+        .send()
+        .await
+        .expect("patch")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(patched["name"], "after");
+
+    // Now served on the new subdomain...
+    let on_new = h
+        .mock(reqwest::Method::GET, "after", "/widget")
+        .send()
+        .await
+        .expect("call");
+    assert_eq!(on_new.status().as_u16(), 200, "served on renamed subdomain");
+
+    // ...and the old subdomain is now an unknown group → 404.
+    let on_old = h
+        .mock(reqwest::Method::GET, "before", "/widget")
+        .send()
+        .await
+        .expect("call");
+    assert_eq!(
+        on_old.status().as_u16(),
+        404,
+        "old subdomain no longer routes"
+    );
+}
+
+#[tokio::test]
 async fn rejects_reserved_path() {
     let h = Harness::start().await;
     let resp = h
