@@ -87,7 +87,16 @@ async fn main() -> anyhow::Result<()> {
     // IP + OAuth proto/host), and allowlisting the public hostname(s) for the
     // MCP `Host`-header check. Unset = direct-exposure defaults. One setting
     // so it can't be half-configured.
-    if let Some(hosts) = trusted_proxy_hosts() {
+    let trusted = trusted_proxy_hosts();
+
+    // ADR-0030 virtual-host routing: the apex hostname. Mock traffic is
+    // served on `{group}.{apex}`; the apex is control-plane only. Derived
+    // once here so dispatch can resolve which group a request targets.
+    let apex = apex_host(trusted.as_deref());
+    tracing::info!(apex = %apex, "apex host set (mock traffic served on group subdomains; ADR-0030)");
+    state = state.with_apex_host(apex);
+
+    if let Some(hosts) = trusted {
         tracing::info!(
             hosts = ?hosts,
             "WM_TRUSTED_PROXY set; behind-a-proxy mode: Secure cookies, trusting \
@@ -181,6 +190,23 @@ fn trusted_proxy_hosts() -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .collect();
     (!hosts.is_empty()).then_some(hosts)
+}
+
+/// Resolve the apex hostname (ADR-0030 virtual-host routing). `WM_APEX_HOST`
+/// takes precedence (explicit override / dev knob); else the first
+/// `WM_TRUSTED_PROXY` host (prod names the public apex there, so no separate
+/// var is needed); else `localhost` for local dev. Lowercased.
+fn apex_host(trusted: Option<&[String]>) -> String {
+    if let Ok(raw) = env::var("WM_APEX_HOST") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_ascii_lowercase();
+        }
+    }
+    if let Some(first) = trusted.and_then(|hosts| hosts.first()) {
+        return first.to_ascii_lowercase();
+    }
+    "localhost".to_string()
 }
 
 /// Parse `WM_LOCAL_AUTH` + `SESSION_SECRET` and attach the resulting

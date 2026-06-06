@@ -16,7 +16,7 @@ use reqwest::Client;
 use reqwest::redirect::Policy;
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
-use wm_host::registry::Registry;
+use wm_host::registry::{NewGroup, Registry};
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
 
@@ -45,8 +45,20 @@ fn no_redirect_client() -> Client {
 async fn start() -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
+    let admin = auth.create_user("admin", true).expect("admin");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let registry = Arc::new(Registry::new(storage.clone()));
+    // A known group establishes the `mock.localhost` virtual host
+    // (ADR-0030); mock traffic to a non-matching path under it produces
+    // the known-group unmatched 404 (JSON + unmatched-journal write).
+    registry
+        .create_group(NewGroup {
+            name: "mock".into(),
+            owner_id: admin.id.clone(),
+            ttl_seconds: Some(3600),
+            sliding_ttl: Some(true),
+        })
+        .expect("group");
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
     let state = AppState::new(runtime, routes, auth, journal);
@@ -149,6 +161,7 @@ async fn mock_traffic_typo_keeps_json_404() {
     let client = no_redirect_client();
     let resp = client
         .post(url(&h, "/v1/no/such/route"))
+        .header(reqwest::header::HOST, "mock.localhost")
         .body("{}")
         .send()
         .await

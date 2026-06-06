@@ -116,10 +116,13 @@ async fn typescript_route_creates_and_dispatches() {
         status, 201,
         "create route status: {status} body: {create_body}"
     );
+    let created: serde_json::Value = serde_json::from_str(&create_body).expect("json");
+    let group = created["group"]["name"].as_str().expect("group name");
 
     // Now hit the route on the mock-traffic listener.
     let resp = reqwest::Client::new()
         .get(format!("http://{addr}/v1/ts-handler"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("dispatch");

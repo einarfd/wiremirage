@@ -232,6 +232,7 @@ async fn group_detail_includes_live_activity_pane_after_traffic() {
     for _ in 0..2 {
         client
             .post(url(&h, "/v1/charges"))
+            .header(reqwest::header::HOST, "stripe-mock.localhost")
             .body("{}")
             .send()
             .await
@@ -347,6 +348,7 @@ async fn route_detail_lists_recent_journal_entries_after_traffic() {
     for _ in 0..3 {
         client
             .post(url(&h, "/v1/charges"))
+            .header(reqwest::header::HOST, "stripe-mock.localhost")
             .body("{}")
             .send()
             .await
@@ -480,7 +482,14 @@ async fn route_detail_renders_stored_source_for_source_language_route() {
 async fn root_redirects_to_login_when_unauthenticated() {
     let (h, _, _) = start_seeded().await;
     let client = no_redirect_client();
-    let resp = client.get(url(&h, "/")).send().await.unwrap();
+    // The bare-`/` redirect is apex-only (ADR-0030); address the apex
+    // (`localhost`) rather than the bound loopback IP (a foreign host → 404).
+    let resp = client
+        .get(url(&h, "/"))
+        .header(reqwest::header::HOST, "localhost")
+        .send()
+        .await
+        .unwrap();
     assert!(
         (300..400).contains(&resp.status().as_u16()),
         "expected a 3xx, got {}",
@@ -495,8 +504,10 @@ async fn root_redirects_to_ui_when_authenticated() {
     let (h, _, _) = start_seeded().await;
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
+    // Apex-only redirect (ADR-0030) — address the apex host.
     let resp = client
         .get(url(&h, "/"))
+        .header(reqwest::header::HOST, "localhost")
         .header("cookie", &cookie)
         .send()
         .await
@@ -517,7 +528,7 @@ async fn root_user_route_shadows_redirect() {
     let registry = Arc::new(Registry::new(storage.clone()));
     // group=None creates an implicit single-route group; the route
     // sits at GET / and we don't care about the group's name here.
-    registry
+    let route = registry
         .create_route(NewRoute {
             group: None,
             methods: vec!["GET".into()],
@@ -529,6 +540,7 @@ async fn root_user_route_shadows_redirect() {
             owner_id: admin.id.clone(),
         })
         .expect("route");
+    let group = route.group_name.clone();
 
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
@@ -544,7 +556,12 @@ async fn root_user_route_shadows_redirect() {
     });
 
     let client = no_redirect_client();
-    let resp = client.get(format!("http://{addr}/")).send().await.unwrap();
+    let resp = client
+        .get(format!("http://{addr}/"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .unwrap();
     // The echo route should answer 200 — NOT a 3xx redirect.
     assert_eq!(
         resp.status().as_u16(),

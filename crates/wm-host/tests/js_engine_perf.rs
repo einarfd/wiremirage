@@ -54,6 +54,7 @@ async fn engine_dispatch_amortizes_jit_cost_across_requests() {
             owner_id: "test-owner".into(),
         })
         .expect("create");
+    let group = route.group_name.clone();
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
     let journal = Journal::new(storage);
@@ -75,6 +76,7 @@ async fn engine_dispatch_amortizes_jit_cost_across_requests() {
     let t0 = Instant::now();
     client
         .post(format!("http://{addr}/v1/perf"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("first")
@@ -92,6 +94,7 @@ async fn engine_dispatch_amortizes_jit_cost_across_requests() {
     for _ in 0..STEADY_N {
         let resp = client
             .post(format!("http://{addr}/v1/perf"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
             .send()
             .await
             .expect("subsequent");

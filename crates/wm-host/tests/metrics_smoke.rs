@@ -85,7 +85,7 @@ fn install_in_memory_metrics() -> (InMemoryMetricExporter, SdkMeterProvider) {
 async fn start_with_seeded_route(
     methods: Vec<&str>,
     path: &str,
-) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+) -> (std::net::SocketAddr, String, tokio::task::JoinHandle<()>) {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     auth.bootstrap_admin("bootstrap", "wmt_test")
@@ -104,6 +104,9 @@ async fn start_with_seeded_route(
             owner_id: "test-owner".into(),
         })
         .expect("create route");
+    // The route's auto-named group is the mock-traffic virtual host
+    // (ADR-0030): `{group}.localhost`.
+    let group = route.group_name.clone();
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
     let journal = Journal::new(storage);
@@ -115,7 +118,7 @@ async fn start_with_seeded_route(
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("axum::serve");
     });
-    (addr, server)
+    (addr, group, server)
 }
 
 /// One recorded data point: every (attribute-key, attribute-value)
@@ -189,13 +192,14 @@ fn collected_metrics(exporter: &InMemoryMetricExporter) -> Vec<CollectedMetric> 
 #[tokio::test]
 async fn metrics_cover_mock_and_internal_surfaces_within_cardinality_rules() {
     let (exporter, provider) = install_in_memory_metrics();
-    let (addr, _server) = start_with_seeded_route(vec!["GET"], "/bump").await;
+    let (addr, group, _server) = start_with_seeded_route(vec!["GET"], "/bump").await;
     let client = reqwest::Client::new();
 
     // --- Mock surface: two successful dispatches + one unmatched 404. ---
     for _ in 0..2 {
         let resp = client
             .get(format!("http://{addr}/bump"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
             .send()
             .await
             .expect("send");
@@ -203,6 +207,7 @@ async fn metrics_cover_mock_and_internal_surfaces_within_cardinality_rules() {
     }
     let resp = client
         .get(format!("http://{addr}/no/such/route"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("send");

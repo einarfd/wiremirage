@@ -226,6 +226,17 @@ impl Harness {
         format!("http://{}{}", self.addr, path)
     }
 
+    /// Build a mock-traffic request carrying the per-group virtual-host
+    /// `Host` header (ADR-0030). `group` is the name of the group the
+    /// target route belongs to; mock traffic is served on
+    /// `{group}.{apex}` subdomains, with the apex being `localhost` in
+    /// tests.
+    fn mock(&self, method: reqwest::Method, group: &str, path: &str) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, self.url(path))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
+    }
+
     async fn create_route_body(&self, body: serde_json::Value) -> reqwest::Response {
         self.client
             .post(self.url("/__api/routes"))
@@ -273,8 +284,7 @@ async fn create_then_call_then_delete_then_404() {
 
     // Call the route — verifies the dispatcher sees it.
     let resp = h
-        .client
-        .post(h.url("/v1/charges"))
+        .mock(reqwest::Method::POST, &group, "/v1/charges")
         .body(r#"{"x":1}"#)
         .send()
         .await
@@ -297,8 +307,7 @@ async fn create_then_call_then_delete_then_404() {
 
     // Mock traffic now 404s.
     let resp = h
-        .client
-        .post(h.url("/v1/charges"))
+        .mock(reqwest::Method::POST, &group, "/v1/charges")
         .send()
         .await
         .expect("post");
@@ -343,12 +352,11 @@ async fn list_routes_returns_created() {
 #[tokio::test]
 async fn path_params_extracted_for_user_routes() {
     let h = Harness::start().await;
-    h.seed_route(&["GET"], "/users/{id}", echo_wasm());
+    let (group, _) = h.seed_route(&["GET"], "/users/{id}", echo_wasm());
 
     for id in ["123", "me", "abc-def"] {
         let body = h
-            .client
-            .get(h.url(&format!("/users/{id}")))
+            .mock(reqwest::Method::GET, &group, &format!("/users/{id}"))
             .send()
             .await
             .expect("get")
@@ -362,11 +370,10 @@ async fn path_params_extracted_for_user_routes() {
 #[tokio::test]
 async fn counter_state_persists_across_calls_in_memory() {
     let h = Harness::start().await;
-    h.seed_route(&["GET"], "/bump", counter_wasm());
+    let (group, _) = h.seed_route(&["GET"], "/bump", counter_wasm());
     for expected in 1..=3u32 {
         let body = h
-            .client
-            .get(h.url("/bump"))
+            .mock(reqwest::Method::GET, &group, "/bump")
             .send()
             .await
             .expect("get")
@@ -403,8 +410,7 @@ async fn activity_fields_bump_on_dispatch() {
 
     // Drive three real dispatches against the route.
     for _ in 0..3 {
-        h.client
-            .get(h.url("/v1/activity"))
+        h.mock(reqwest::Method::GET, &group, "/v1/activity")
             .send()
             .await
             .expect("get");
@@ -453,12 +459,11 @@ async fn list_routes_reflects_dispatch_hits() {
     // dozens of hits rendered as 'never hit'. Fix reads from the
     // registry directly in list_routes_core.
     let h = Harness::start().await;
-    h.seed_route(&["GET"], "/v1/list-hits", echo_wasm());
+    let (group, _) = h.seed_route(&["GET"], "/v1/list-hits", echo_wasm());
 
     // Drive a handful of dispatches.
     for _ in 0..4 {
-        h.client
-            .get(h.url("/v1/list-hits"))
+        h.mock(reqwest::Method::GET, &group, "/v1/list-hits")
             .send()
             .await
             .expect("dispatch");
@@ -714,15 +719,76 @@ async fn mock_traffic_does_not_require_auth() {
     // SUTs hitting mock routes don't carry tokens. The dispatch handler
     // (everything not under a reserved prefix) stays open.
     let h = Harness::start().await;
-    h.seed_route(&["GET"], "/v1/anonymous", echo_wasm());
+    let (group, _) = h.seed_route(&["GET"], "/v1/anonymous", echo_wasm());
 
     let resp = h
         .unauthenticated_client()
         .get(h.url("/v1/anonymous"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("get");
     assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn routing_is_scoped_per_group_subdomain() {
+    // ADR-0030: mock traffic is matched within the group its Host resolves
+    // to. The same path lives independently per group, the apex serves no
+    // mock traffic, and an unknown subdomain 404s.
+    let h = Harness::start().await;
+    for name in ["alpha", "beta"] {
+        let r = h
+            .client
+            .post(h.url("/__api/groups"))
+            .json(&json!({ "name": name }))
+            .send()
+            .await
+            .expect("create group");
+        assert_eq!(r.status().as_u16(), 201, "{name} group");
+    }
+    // Only `alpha` owns /widget.
+    h.seed_route_in_group("alpha", &["GET"], "/widget", echo_wasm());
+
+    // Served on alpha's subdomain.
+    let on_alpha = h
+        .mock(reqwest::Method::GET, "alpha", "/widget")
+        .send()
+        .await
+        .expect("call");
+    assert_eq!(on_alpha.status().as_u16(), 200, "alpha serves /widget");
+
+    // beta has no such route → 404 (the path isn't shared across groups).
+    let on_beta = h
+        .mock(reqwest::Method::GET, "beta", "/widget")
+        .send()
+        .await
+        .expect("call");
+    assert_eq!(on_beta.status().as_u16(), 404, "beta has no /widget");
+
+    // The apex (Host = the test apex `localhost`) serves no mock traffic.
+    let on_apex = h
+        .client
+        .get(h.url("/widget"))
+        .header(reqwest::header::HOST, "localhost")
+        .send()
+        .await
+        .expect("call");
+    assert_eq!(
+        on_apex.status().as_u16(),
+        404,
+        "apex serves no mock traffic"
+    );
+
+    // An unknown subdomain (no such group) → 404.
+    let on_unknown = h
+        .client
+        .get(h.url("/widget"))
+        .header(reqwest::header::HOST, "nope.localhost")
+        .send()
+        .await
+        .expect("call");
+    assert_eq!(on_unknown.status().as_u16(), 404, "unknown group 404s");
 }
 
 #[tokio::test]
@@ -875,15 +941,13 @@ async fn patch_route_swaps_path_and_evicts_old_dispatch() {
 
     // The new path dispatches; the old one 404s (route table refreshed).
     let resp = h
-        .client
-        .post(h.url("/v1/refunds"))
+        .mock(reqwest::Method::POST, &group, "/v1/refunds")
         .send()
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
     let stale = h
-        .client
-        .post(h.url("/v1/charges"))
+        .mock(reqwest::Method::POST, &group, "/v1/charges")
         .send()
         .await
         .expect("post");
@@ -921,6 +985,7 @@ async fn streaming_response_journals_counts_and_disposition() {
     // Drive the stream and drain the body so the handler finishes.
     let body = reqwest::Client::new()
         .get(h.url("/v1/stream"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("get")
@@ -1069,6 +1134,7 @@ async fn streaming_handler_error_after_start_keeps_committed_response() {
 
     let resp = reqwest::Client::new()
         .get(h.url("/v1/stream-then-throw"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("get");
@@ -1123,6 +1189,7 @@ async fn streaming_handler_sees_client_disconnect() {
     {
         let resp = reqwest::Client::new()
             .get(h.url("/v1/stream-cancel"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
             .send()
             .await
             .expect("get");
@@ -1175,8 +1242,7 @@ async fn patch_route_replaces_source() {
 
     // Sanity: the original handler is the echo handler.
     let echo_body = h
-        .client
-        .get(h.url("/v1/bump"))
+        .mock(reqwest::Method::GET, group, "/v1/bump")
         .send()
         .await
         .expect("get")
@@ -1200,8 +1266,7 @@ async fn patch_route_replaces_source() {
 
     for expected in 1..=2u32 {
         let body = h
-            .client
-            .get(h.url("/v1/bump"))
+            .mock(reqwest::Method::GET, group, "/v1/bump")
             .send()
             .await
             .expect("get")
@@ -1294,8 +1359,7 @@ async fn route_state_list_and_clear_round_trip() {
 
     // Drive two real calls to populate state.
     for _ in 0..2 {
-        h.client
-            .get(h.url("/v1/bump-state"))
+        h.mock(reqwest::Method::GET, &group, "/v1/bump-state")
             .send()
             .await
             .expect("get");
@@ -1372,8 +1436,7 @@ async fn dry_run_does_not_journal_or_mutate_state() {
 
     // One real call so there's state to snapshot.
     let real = h
-        .client
-        .get(h.url("/v1/dryrun-target"))
+        .mock(reqwest::Method::GET, &group, "/v1/dryrun-target")
         .send()
         .await
         .expect("get")
@@ -1404,8 +1467,7 @@ async fn dry_run_does_not_journal_or_mutate_state() {
     // call returns count=2 (not count=3 as it would if the dry-run
     // had bumped the real counter).
     let after = h
-        .client
-        .get(h.url("/v1/dryrun-target"))
+        .mock(reqwest::Method::GET, &group, "/v1/dryrun-target")
         .send()
         .await
         .expect("get")
@@ -1473,8 +1535,7 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
 
     // Real `count` was never written — a real GET starts at 1.
     let real = h
-        .client
-        .get(h.url("/v1/dryrun-with-seed"))
+        .mock(reqwest::Method::GET, &group, "/v1/dryrun-with-seed")
         .send()
         .await
         .expect("get")
@@ -2296,6 +2357,7 @@ async fn seed_one_request(h: &Harness) -> String {
     let unauth = Client::new();
     let resp = unauth
         .post(h.url("/v1/charges"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body(r#"{"amount":1000}"#)
         .send()
         .await
@@ -2333,9 +2395,13 @@ async fn dispatched_request_produces_journal_entry() {
 #[tokio::test]
 async fn unmatched_request_produces_unmatched_record() {
     let h = Harness::start().await;
+    // An unmatched record is only written when the request targets an
+    // EXISTING group's subdomain (ADR-0030); a route establishes one.
+    let (group, _number) = h.seed_route(&["GET"], "/v1/charges", echo_wasm());
     let unauth = Client::new();
     let resp = unauth
         .get(h.url("/no-such-route"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("get");
@@ -2362,15 +2428,25 @@ async fn unmatched_record_carries_near_misses_for_method_mismatch() {
     // Register a POST /v1/charges route — the SUT hits GET /v1/charges
     // (same path, wrong method). The dispatcher should write an
     // unmatched record whose `near_misses` flags the method mismatch.
-    h.create_route_body(json!({
-        "methods": ["POST"],
-        "path": "/v1/charges",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
     let unauth = Client::new();
-    let miss = unauth.get(h.url("/v1/charges")).send().await.expect("get");
+    let miss = unauth
+        .get(h.url("/v1/charges"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .expect("get");
     assert_eq!(miss.status().as_u16(), 404);
 
     let listed: serde_json::Value = h
@@ -2398,15 +2474,25 @@ async fn unmatched_record_carries_near_misses_for_prefix_typo() {
     let h = Harness::start().await;
     // Register /v1/refunds — the SUT hits /v1/refund (one segment off
     // by a literal-prefix).
-    h.create_route_body(json!({
-        "methods": ["POST"],
-        "path": "/v1/refunds",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/refunds",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
     let unauth = Client::new();
-    let miss = unauth.post(h.url("/v1/refund")).send().await.expect("post");
+    let miss = unauth
+        .post(h.url("/v1/refund"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .expect("post");
     assert_eq!(miss.status().as_u16(), 404);
 
     let listed: serde_json::Value = h
@@ -2466,6 +2552,7 @@ async fn trace_id_is_stamped_from_inbound_traceparent() {
     let unauth = Client::new();
     let resp = unauth
         .post(h.url("/v1/things"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .header("traceparent", traceparent)
         .body("{}")
         .send()
@@ -2489,13 +2576,14 @@ async fn trace_id_is_stamped_from_inbound_traceparent() {
 #[tokio::test]
 async fn response_carries_x_trace_id_back_to_sut() {
     let h = Harness::start().await;
-    h.seed_route(&["POST"], "/v1/echo", echo_wasm());
+    let (group, _number) = h.seed_route(&["POST"], "/v1/echo", echo_wasm());
 
     let trace_id = "0123456789abcdef0123456789abcdef";
     let inbound = format!("00-{trace_id}-aaaaaaaaaaaaaaaa-01");
     let unauth = Client::new();
     let resp = unauth
         .post(h.url("/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .header("traceparent", &inbound)
         .body("{}")
         .send()
@@ -2518,11 +2606,15 @@ async fn response_carries_x_trace_id_back_to_sut() {
 #[tokio::test]
 async fn unmatched_response_carries_x_trace_id() {
     let h = Harness::start().await;
+    // Target an existing group's subdomain so this is an unmatched
+    // request within a known group (ADR-0030), not an unknown-group miss.
+    let (group, _number) = h.seed_route(&["GET"], "/v1/known", echo_wasm());
     let trace_id = "0123456789abcdef0123456789abcdef";
     let inbound = format!("00-{trace_id}-aaaaaaaaaaaaaaaa-01");
     let unauth = Client::new();
     let resp = unauth
         .get(h.url("/no-such"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .header("traceparent", &inbound)
         .send()
         .await
@@ -2540,10 +2632,11 @@ async fn unmatched_response_carries_x_trace_id() {
 #[tokio::test]
 async fn response_without_inbound_traceparent_has_no_x_trace_id() {
     let h = Harness::start().await;
-    h.seed_route(&["POST"], "/v1/no-trace", echo_wasm());
+    let (group, _number) = h.seed_route(&["POST"], "/v1/no-trace", echo_wasm());
     let unauth = Client::new();
     let resp = unauth
         .post(h.url("/v1/no-trace"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body("{}")
         .send()
         .await
@@ -2566,6 +2659,7 @@ async fn cursor_pagination_round_trips() {
     for _ in 0..4 {
         let resp = unauth
             .post(h.url("/v1/charges"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
             .send()
             .await
             .expect("post");
@@ -2883,7 +2977,12 @@ async fn delete_group_cascades_routes_and_state() {
 
     // Hit the route once so the journal has an entry.
     let unauth = Client::new();
-    let resp = unauth.post(h.url("/v1/billed")).send().await.expect("post");
+    let resp = unauth
+        .post(h.url("/v1/billed"))
+        .header(reqwest::header::HOST, "cascadable.localhost")
+        .send()
+        .await
+        .expect("post");
     assert_eq!(resp.status().as_u16(), 200);
 
     // Delete the group.
@@ -2904,7 +3003,12 @@ async fn delete_group_cascades_routes_and_state() {
         .expect("get");
     assert_eq!(resp.status().as_u16(), 404);
 
-    let resp = unauth.post(h.url("/v1/billed")).send().await.expect("post");
+    let resp = unauth
+        .post(h.url("/v1/billed"))
+        .header(reqwest::header::HOST, "cascadable.localhost")
+        .send()
+        .await
+        .expect("post");
     assert_eq!(
         resp.status().as_u16(),
         404,
@@ -3006,6 +3110,7 @@ async fn delete_group_state_clears_kv_but_leaves_routes() {
     let unauth = Client::new();
     let resp = unauth
         .get(h.url("/v1/state-test"))
+        .header(reqwest::header::HOST, "stateful.localhost")
         .send()
         .await
         .expect("get");
@@ -3025,6 +3130,7 @@ async fn delete_group_journal_clears_entries_but_leaves_routes() {
     let unauth = Client::new();
     unauth
         .get(h.url("/v1/journal-test"))
+        .header(reqwest::header::HOST, "journal-clear.localhost")
         .send()
         .await
         .expect("get");
@@ -3064,6 +3170,7 @@ async fn delete_group_journal_clears_entries_but_leaves_routes() {
     // Route still serves.
     let resp = unauth
         .get(h.url("/v1/journal-test"))
+        .header(reqwest::header::HOST, "journal-clear.localhost")
         .send()
         .await
         .expect("get");
@@ -3426,11 +3533,17 @@ async fn list_journal_filters_by_method_and_status() {
     let h = Harness::start().await;
     make_three_routes(&h).await;
 
-    // Drive some traffic: GET /v1/a, POST /v1/b, GET /v2/c.
-    for (method, path) in [("GET", "/v1/a"), ("POST", "/v1/b"), ("GET", "/v2/c")] {
-        let mut req = h.client.request(
+    // Drive some traffic: GET /v1/a, POST /v1/b (group alpha), GET /v2/c
+    // (group beta) — each on its own group subdomain (ADR-0030).
+    for (method, group, path) in [
+        ("GET", "alpha", "/v1/a"),
+        ("POST", "alpha", "/v1/b"),
+        ("GET", "beta", "/v2/c"),
+    ] {
+        let mut req = h.mock(
             reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
-            h.url(path),
+            group,
+            path,
         );
         if method == "POST" {
             req = req.body("{}");
@@ -3477,9 +3590,15 @@ async fn list_journal_filters_by_method_and_status() {
 #[tokio::test]
 async fn list_unmatched_filters_by_path_pattern() {
     let h = Harness::start().await;
-    // No routes registered → every request lands in unmatched.
+    // A route establishes a group (ADR-0030); requests to that group's
+    // subdomain that don't match its path all land in unmatched.
+    let (group, _number) = h.seed_route(&["GET"], "/established", echo_wasm());
     for path in ["/v1/a", "/v1/b", "/v2/c"] {
-        let _ = h.client.get(h.url(path)).send().await.expect("call");
+        let _ = h
+            .mock(reqwest::Method::GET, &group, path)
+            .send()
+            .await
+            .expect("call");
     }
 
     let body: serde_json::Value = h

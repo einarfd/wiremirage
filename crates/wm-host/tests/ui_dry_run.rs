@@ -239,6 +239,7 @@ async fn dry_run_does_not_persist_state_or_write_journal() {
     // numbers look like.
     client
         .post(url(&h, "/bump"))
+        .header(reqwest::header::HOST, "counter-demo.localhost")
         .body("{}")
         .send()
         .await

@@ -122,6 +122,7 @@ async fn start_with_traffic() -> Harness {
     for _ in 0..3 {
         client
             .post(url(&h, "/v1/charges"))
+            .header(reqwest::header::HOST, "stripe-mock.localhost")
             .body(r#"{"amount":100}"#)
             .send()
             .await

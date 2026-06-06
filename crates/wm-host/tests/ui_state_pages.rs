@@ -171,6 +171,7 @@ async fn route_state_lists_entries_after_dispatch() {
     for _ in 0..3 {
         client
             .post(url(&h, "/bump"))
+            .header(reqwest::header::HOST, "counter-demo.localhost")
             .body("{}")
             .send()
             .await
@@ -205,6 +206,7 @@ async fn route_state_clear_wipes_entries() {
     for _ in 0..2 {
         client
             .post(url(&h, "/bump"))
+            .header(reqwest::header::HOST, "counter-demo.localhost")
             .body("{}")
             .send()
             .await
@@ -290,6 +292,7 @@ async fn group_state_clear_wipes_per_route_state_too() {
     for _ in 0..2 {
         client
             .post(url(&h, "/bump"))
+            .header(reqwest::header::HOST, "counter-demo.localhost")
             .body("{}")
             .send()
             .await
