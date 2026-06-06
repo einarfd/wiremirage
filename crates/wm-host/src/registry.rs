@@ -44,6 +44,10 @@ pub enum RegistryError {
     InvalidPath(#[from] PatternError),
     #[error("invalid method `{0}`: must be uppercase ASCII or `ANY`")]
     InvalidMethod(String),
+    #[error(
+        "invalid group name `{0}`: must be a DNS label (lowercase a-z, 0-9, hyphen; 1-63 chars; no leading/trailing hyphen)"
+    )]
+    InvalidName(String),
 }
 
 /// One stored route. Fields here mirror the REST `route record` shape from
@@ -261,6 +265,11 @@ impl Registry {
         let name = if params.name.trim().is_empty() {
             self.generate_group_name(&mut bucket)?
         } else {
+            // Group names double as subdomains (ADR-0030), so an explicit
+            // name must be a valid DNS label.
+            if !crate::naming::is_valid_label(&params.name) {
+                return Err(RegistryError::InvalidName(params.name));
+            }
             if bucket
                 .get(&format!("group:by-name:{}", params.name))?
                 .is_some()
@@ -1328,6 +1337,46 @@ mod tests {
         // Retrievable by the assigned name.
         let by_name = registry.read_group_by_ref(&group.name).unwrap();
         assert_eq!(by_name.id, group.id);
+    }
+
+    #[test]
+    fn create_group_rejects_explicit_name_that_is_not_a_dns_label() {
+        let registry = fresh_registry();
+        // Group names double as subdomains (ADR-0030), so an explicit name
+        // that isn't a valid DNS label is rejected (uppercase, underscore,
+        // space, dot, leading hyphen, too long).
+        for bad in [
+            "My Group",
+            "under_score",
+            "Caps",
+            "dot.dot",
+            "-lead",
+            &"x".repeat(64),
+        ] {
+            let err = registry
+                .create_group(NewGroup {
+                    name: bad.to_string(),
+                    owner_id: "o".into(),
+                    ttl_seconds: None,
+                    sliding_ttl: None,
+                })
+                .unwrap_err();
+            assert!(
+                matches!(err, RegistryError::InvalidName(_)),
+                "expected InvalidName for {bad:?}, got {err:?}"
+            );
+        }
+        // A valid label still works.
+        assert!(
+            registry
+                .create_group(NewGroup {
+                    name: "stripe-mock".into(),
+                    owner_id: "o".into(),
+                    ttl_seconds: None,
+                    sliding_ttl: None,
+                })
+                .is_ok()
+        );
     }
 
     #[test]

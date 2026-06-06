@@ -162,9 +162,10 @@ pub enum GroupsCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct CreateGroupArgs {
-    /// Group name (canonical external identifier). Omit when using
-    /// `--from-file` — the name comes from the spec file in that
-    /// case.
+    /// Group name (canonical external identifier; also the group's
+    /// subdomain, so it must be a valid DNS label). Optional — omit to be
+    /// assigned a friendly name automatically. Also omit when using
+    /// `--from-file` (the name then comes from the spec file).
     pub name: Option<String>,
     /// Create the group and every route it contains from a YAML/JSON
     /// spec file. Format is detected from the extension (`.yaml`,

@@ -86,8 +86,11 @@ pub struct ShowGroupArgs {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct CreateGroupArgs {
-    /// Canonical group name. Must be unique. Used in route slugs.
-    pub name: String,
+    /// Canonical group name; doubles as the group's subdomain, so it must
+    /// be a valid DNS label (lowercase a-z, 0-9, hyphen; no leading/trailing
+    /// hyphen). Optional — omit to be assigned a friendly name (ADR-0030).
+    /// Must be unique. Used in route slugs.
+    pub name: Option<String>,
     /// TTL in seconds. Defaults to 24h. Capped at 30d.
     pub ttl_seconds: Option<u64>,
     /// When `true`, every successful route hit bumps the group's
@@ -242,7 +245,8 @@ impl WmMcpServer {
             .routes()
             .registry()
             .create_group(NewGroup {
-                name: args.name,
+                // Empty/omitted name → registry auto-assigns a friendly one.
+                name: args.name.unwrap_or_default(),
                 owner_id: auth.user_id,
                 ttl_seconds: args.ttl_seconds,
                 sliding_ttl: args.sliding_ttl,

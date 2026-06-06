@@ -290,9 +290,18 @@ async fn handle_groups_create(
         (Some(_), Some(_)) => Err(ClientError::Validation(
             "pass either <name> or --from-file FILE, not both".into(),
         )),
-        (None, None) => Err(ClientError::Validation(
-            "missing group name: pass <name> or use --from-file FILE".into(),
-        )),
+        (None, None) => {
+            // No name and no spec file → the server assigns a friendly
+            // DNS-safe name (ADR-0030). An empty name is the wire signal.
+            let body = CreateGroupBody {
+                name: String::new(),
+                ttl_seconds: args.ttl_seconds,
+                sliding_ttl: sliding_flag(args.sliding, args.no_sliding),
+            };
+            let g = client.create_group(&body).await?;
+            format::render_group(&g, format);
+            Ok(())
+        }
         (None, Some(name)) => {
             let body = CreateGroupBody {
                 name: name.to_string(),
