@@ -45,6 +45,10 @@ pub fn map_registry_error(err: RegistryError) -> ErrorData {
         RegistryError::InvalidMethod(m) => validation(format!(
             "invalid method `{m}`: must be uppercase ASCII or `ANY`"
         )),
+        RegistryError::InvalidName(n) => validation(format!(
+            "invalid group name `{n}`: must be a DNS label (lowercase a-z, 0-9, hyphen; \
+             1-63 chars; no leading/trailing hyphen)"
+        )),
         RegistryError::Storage(e) => internal(format!("storage: {e}")),
         RegistryError::Malformed(msg) => internal(format!("malformed registry record: {msg}")),
     }

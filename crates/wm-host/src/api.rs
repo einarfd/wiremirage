@@ -488,6 +488,9 @@ impl From<RegistryError> for ApiError {
             RegistryError::Conflict(msg) => ApiError::conflict(msg),
             RegistryError::InvalidPath(e) => ApiError::validation(format!("invalid path: {e}")),
             RegistryError::InvalidMethod(m) => ApiError::validation(format!("invalid method: {m}")),
+            RegistryError::InvalidName(n) => {
+                ApiError::validation(format!("invalid group name: {n}"))
+            }
             RegistryError::Storage(e) => ApiError::internal(format!("storage: {e}")),
             RegistryError::Malformed(msg) => ApiError::internal(format!("malformed record: {msg}")),
         }
@@ -1710,7 +1713,10 @@ async fn get_unmatched_entry(
 
 #[derive(Debug, Deserialize)]
 struct CreateGroupBody {
-    name: String,
+    /// Optional. Omit (or send empty) to be assigned a friendly DNS-safe
+    /// name (ADR-0030); an explicit name must be a valid DNS label.
+    #[serde(default)]
+    name: Option<String>,
     /// Optional configured TTL. Omit to take the default; values are
     /// validated against `MAX_GROUP_TTL_SECONDS`.
     ttl_seconds: Option<u64>,
@@ -1808,7 +1814,8 @@ async fn create_group(
     Json(body): Json<CreateGroupBody>,
 ) -> Result<Response, ApiError> {
     let group = state.routes().registry().create_group(NewGroup {
-        name: body.name,
+        // Empty name → registry auto-assigns a friendly DNS-safe one.
+        name: body.name.unwrap_or_default(),
         owner_id: auth.user_id.clone(),
         ttl_seconds: body.ttl_seconds,
         sliding_ttl: body.sliding_ttl,
