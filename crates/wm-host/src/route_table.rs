@@ -298,6 +298,19 @@ impl RouteTable {
         }
     }
 
+    /// Update the denormalized `group_name` on every in-memory route in a
+    /// renamed group (ADR-0030). Called after `Registry::rename_group` so the
+    /// match key (subdomain → group) and the slugs the table reports track
+    /// the new name without a full re-warm.
+    pub fn refresh_after_group_rename(&self, group_id: &str, new_name: &str) {
+        let mut routes = self.routes.write().expect("poisoned");
+        for r in routes.iter_mut() {
+            if r.group_id == group_id {
+                r.group_name = new_name.to_string();
+            }
+        }
+    }
+
     pub fn registry(&self) -> &Registry {
         &self.registry
     }

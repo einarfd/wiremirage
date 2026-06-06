@@ -193,12 +193,15 @@ async fn handle_groups(
         }
         GroupsCommand::Update(args) => {
             let body = PatchGroupBody {
+                name: args.rename.clone(),
                 ttl_seconds: args.ttl_seconds,
                 sliding_ttl: sliding_flag(args.sliding, args.no_sliding),
             };
-            if body.ttl_seconds.is_none() && body.sliding_ttl.is_none() {
+            if body.name.is_none() && body.ttl_seconds.is_none() && body.sliding_ttl.is_none() {
                 return Err(ClientError::Validation(
-                    "update requires at least one of --ttl-seconds, --sliding, --no-sliding".into(),
+                    "update requires at least one of --rename, --ttl-seconds, --sliding, \
+                     --no-sliding"
+                        .into(),
                 ));
             }
             let g = client.patch_group(&args.name, &body).await?;

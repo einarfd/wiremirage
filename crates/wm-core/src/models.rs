@@ -68,6 +68,10 @@ pub struct CreateGroupBody {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PatchGroupBody {
+    /// Rename the group (its name is also its subdomain). Omitted from the
+    /// wire when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

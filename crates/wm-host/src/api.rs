@@ -1726,6 +1726,10 @@ struct CreateGroupBody {
 
 #[derive(Debug, Deserialize)]
 struct PatchGroupBody {
+    /// Rename the group to this name. Must be a valid DNS label (it's the
+    /// group's subdomain; ADR-0030). Changes the group's served base URL.
+    #[serde(default)]
+    name: Option<String>,
     ttl_seconds: Option<u64>,
     sliding_ttl: Option<bool>,
 }
@@ -1994,17 +1998,31 @@ async fn patch_group(
     Json(body): Json<PatchGroupBody>,
 ) -> Result<Json<GroupResponse>, ApiError> {
     let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
-    if body.ttl_seconds.is_none() && body.sliding_ttl.is_none() {
+    if body.name.is_none() && body.ttl_seconds.is_none() && body.sliding_ttl.is_none() {
         return Err(ApiError::validation(
-            "PATCH body must include at least `ttl_seconds` or `sliding_ttl` — \
-             rename and owner-transfer aren't supported in this slice",
+            "PATCH body must include at least `name`, `ttl_seconds`, or `sliding_ttl`",
         ));
     }
-    let updated =
+    // Rename first (it rewrites the by-name index + route slugs and changes
+    // the served subdomain), then apply any ttl/sliding change.
+    if let Some(new_name) = body.name.as_deref() {
+        let renamed = state
+            .routes()
+            .registry()
+            .rename_group(&group.id, new_name)?;
+        state
+            .routes()
+            .refresh_after_group_rename(&group.id, &renamed.name);
+    }
+    let updated = if body.ttl_seconds.is_some() || body.sliding_ttl.is_some() {
         state
             .routes()
             .registry()
-            .patch_group(&group.id, body.ttl_seconds, body.sliding_ttl)?;
+            .patch_group(&group.id, body.ttl_seconds, body.sliding_ttl)?
+    } else {
+        // Rename-only: re-read so the response reflects the new name.
+        state.routes().registry().read_group_by_ref(&group.id)?
+    };
     Ok(Json(GroupResponse::from(&updated)))
 }
 

@@ -229,6 +229,10 @@ impl From<SpecFormatArg> for crate::spec::SpecFormat {
 pub struct UpdateGroupArgs {
     /// Group name or ULID.
     pub name: String,
+    /// Rename the group to this name. It's also the group's subdomain, so it
+    /// must be a valid DNS label — and renaming changes the served base URL.
+    #[arg(long)]
+    pub rename: Option<String>,
     /// New TTL in seconds. The Valkey TTL is reset to this on update.
     #[arg(long)]
     pub ttl_seconds: Option<u64>,
