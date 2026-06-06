@@ -25,7 +25,7 @@ fn echo_bytes() -> Vec<u8> {
 async fn start_with_seeded_route(
     methods: Vec<&str>,
     path: &str,
-) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+) -> (std::net::SocketAddr, String, tokio::task::JoinHandle<()>) {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     auth.bootstrap_admin("bootstrap", "wmt_test")
@@ -44,6 +44,9 @@ async fn start_with_seeded_route(
             owner_id: "test-owner".into(),
         })
         .expect("create route");
+    // The route's auto-named group is the mock-traffic virtual host
+    // (ADR-0030): `{group}.localhost`.
+    let group = route.group_name.clone();
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
     let journal = Journal::new(storage);
@@ -56,7 +59,7 @@ async fn start_with_seeded_route(
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("axum::serve");
     });
-    (addr, server)
+    (addr, group, server)
 }
 
 async fn start_empty() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
@@ -82,10 +85,11 @@ async fn start_empty() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
 
 #[tokio::test]
 async fn echo_via_http() {
-    let (addr, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
+    let (addr, group, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/charges"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body(r#"{"amount":1000}"#)
         .send()
         .await
@@ -105,8 +109,11 @@ async fn echo_via_http() {
 
 #[tokio::test]
 async fn unmatched_path_returns_404() {
-    let (addr, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
-    let resp = reqwest::get(format!("http://{addr}/nope"))
+    let (addr, group, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/nope"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
         .await
         .expect("get");
     assert_eq!(resp.status().as_u16(), 404);
@@ -175,9 +182,12 @@ async fn matched_pattern_reaches_handler() {
     // The echo handler reflects method + literal path. Verify a
     // parametrised route matches multiple concrete paths — proof that the
     // router extracts path-param-style URLs correctly.
-    let (addr, server) = start_with_seeded_route(vec!["GET"], "/users/{id}").await;
+    let (addr, group, server) = start_with_seeded_route(vec!["GET"], "/users/{id}").await;
     for id in ["123", "456", "me"] {
-        let body = reqwest::get(format!("http://{addr}/users/{id}"))
+        let body = reqwest::Client::new()
+            .get(format!("http://{addr}/users/{id}"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
+            .send()
             .await
             .expect("get")
             .text()
@@ -194,10 +204,11 @@ async fn dispatch_rejects_body_above_limit_with_413() {
     // body bigger than the configured limit should be rejected
     // before the handler runs. 12 MiB is comfortably over the 10 MiB
     // limit and below anything an actual mock-test body would carry.
-    let (addr, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
+    let (addr, group, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
     let body = vec![b'x'; 12 * 1024 * 1024];
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/charges"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body(body)
         .send()
         .await
@@ -216,11 +227,12 @@ async fn dispatch_accepts_body_below_limit() {
     // Sibling to the rejection test: a body just under the cap should
     // still go through. Echo's response repeats the body size, so we
     // can assert the round-trip worked.
-    let (addr, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
+    let (addr, group, server) = start_with_seeded_route(vec!["POST"], "/v1/charges").await;
     // 1 MiB — well under the 10 MiB dispatch cap.
     let body = vec![b'x'; 1024 * 1024];
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/charges"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body(body)
         .send()
         .await

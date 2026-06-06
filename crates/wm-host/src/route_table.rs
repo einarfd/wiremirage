@@ -91,12 +91,39 @@ impl RouteTable {
     }
 
     /// Find the first route whose method spec accepts `method` and whose
-    /// pattern matches `path`. Slice 3 doesn't promise any particular tie-
-    /// breaker — strict conflict detection at create time keeps the route
-    /// set unambiguous.
+    /// pattern matches `path`, searching **all** groups. Used by the
+    /// host-less match probe (`GET /__api/match` / `find_route`); mock
+    /// dispatch uses [`find_match_in_group`] under virtual-host routing.
     pub fn find_match(&self, method: &str, path: &str) -> Option<MatchedRoute> {
+        self.find_match_filtered(None, method, path)
+    }
+
+    /// Find the first matching route **within a single group** (by group
+    /// name), the per-subdomain dispatch path under ADR-0030: each group
+    /// is its own path namespace, so matching is scoped to the group the
+    /// request's Host resolved to.
+    pub fn find_match_in_group(
+        &self,
+        group: &str,
+        method: &str,
+        path: &str,
+    ) -> Option<MatchedRoute> {
+        self.find_match_filtered(Some(group), method, path)
+    }
+
+    fn find_match_filtered(
+        &self,
+        group: Option<&str>,
+        method: &str,
+        path: &str,
+    ) -> Option<MatchedRoute> {
         let routes = self.routes.read().expect("poisoned");
         for route in routes.iter() {
+            if let Some(g) = group
+                && route.group_name != g
+            {
+                continue;
+            }
             let pattern = match Pattern::parse(&route.path) {
                 Ok(p) => p,
                 Err(_) => continue, // malformed in storage, skip
@@ -128,12 +155,38 @@ impl RouteTable {
 
     /// Compute near-misses for `(method, path)` without first checking
     /// whether the request actually matches. The dispatcher's unmatched-
-    /// write path uses this directly because it already knows nothing
-    /// matched — re-running `find_match` would be wasted work.
+    /// write path uses the group-scoped variant; the host-less probe uses
+    /// this all-groups version.
     pub fn compute_near_misses(&self, method: &str, path: &str) -> Vec<NearMiss> {
+        self.compute_near_misses_filtered(None, method, path)
+    }
+
+    /// Near-misses scoped to a single group (by name) — used by the
+    /// per-subdomain dispatch path so "did you mean…?" suggestions stay
+    /// within the tenant's own routes (ADR-0030).
+    pub fn compute_near_misses_in_group(
+        &self,
+        group: &str,
+        method: &str,
+        path: &str,
+    ) -> Vec<NearMiss> {
+        self.compute_near_misses_filtered(Some(group), method, path)
+    }
+
+    fn compute_near_misses_filtered(
+        &self,
+        group: Option<&str>,
+        method: &str,
+        path: &str,
+    ) -> Vec<NearMiss> {
         let routes = self.routes.read().expect("poisoned");
         let mut near = Vec::new();
         for route in routes.iter() {
+            if let Some(g) = group
+                && route.group_name != g
+            {
+                continue;
+            }
             let pattern = match Pattern::parse(&route.path) {
                 Ok(p) => p,
                 Err(_) => continue,

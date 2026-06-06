@@ -20,7 +20,7 @@ use wm_host::journal::{
     NewUnmatchedEntry, RequestEnvelope, UnmatchedNearMiss, UnmatchedNearMissReason,
 };
 use wm_host::local_auth::LocalAuth;
-use wm_host::registry::Registry;
+use wm_host::registry::{NewGroup, Registry};
 use wm_host::route_table::RouteTable;
 use wm_host::session::SessionStore;
 use wm_host::{AppState, Runtime, Storage, router};
@@ -64,6 +64,20 @@ async fn start() -> Harness {
             LocalAuth::parse("admin:devpassword:admin,alice:devpassword").expect("auth"),
         )
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
+    // An existing group whose subdomain the unmatched-traffic helper
+    // targets: under virtual-host routing (ADR-0030) an unmatched request
+    // only records a journal entry when it hits a *known* group's
+    // subdomain (an unknown host/group is a 404 with no journal).
+    state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "mock".into(),
+            owner_id: "admin".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("seed group");
     let app = router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -117,8 +131,12 @@ fn extract_csrf_value(body: &str) -> Option<String> {
 /// Drive a request at a path that doesn't match any route, which causes
 /// the dispatcher to record an unmatched-journal entry.
 async fn record_unmatched(h: &Harness, client: &Client, method: &str, path: &str) {
+    // Target the seeded `mock` group's subdomain so the dispatcher records
+    // an unmatched entry (a known group, no matching route) rather than
+    // 404ing as an unknown host (ADR-0030). The apex is `localhost` in tests.
     let resp = client
         .request(method.parse().unwrap(), url(h, path))
+        .header(reqwest::header::HOST, "mock.localhost")
         .body("body")
         .send()
         .await

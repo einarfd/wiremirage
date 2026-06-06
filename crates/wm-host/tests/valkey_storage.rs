@@ -123,6 +123,7 @@ async fn counter_persists_across_requests_via_http() {
             owner_id: "test-owner".into(),
         })
         .expect("create route");
+    let group = route.group_name.clone();
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
     let journal = Journal::new(storage);
@@ -140,7 +141,10 @@ async fn counter_persists_across_requests_via_http() {
     // Three requests should yield count=1, count=2, count=3 — proving state
     // is durable in Valkey across the per-request fresh wasmtime instances.
     for expected in 1..=3 {
-        let body = reqwest::get(format!("http://{addr}/bump"))
+        let body = reqwest::Client::new()
+            .get(format!("http://{addr}/bump"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
+            .send()
             .await
             .expect("get")
             .text()

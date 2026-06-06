@@ -85,6 +85,48 @@ impl StreamSummary {
 const RESERVED_PREFIXES: &[&str] = &["/__api/", "/__ui/", "/__auth/", "/__admin/"];
 const RESERVED_EXACT: &[&str] = &["/__health", "/__ready", "/__api", "/__ui", "/__auth"];
 
+/// Which routing target a request's `Host` header resolves to under
+/// virtual-host routing (ADR-0030).
+enum HostKind {
+    /// The bare apex — control-plane only, serves no mock traffic.
+    Apex,
+    /// A `{group}.{apex}` subdomain; the captured label is the group name.
+    Group(String),
+    /// Anything else — a foreign host, a bare IP, or a multi-level name —
+    /// with no group to route to.
+    Foreign,
+}
+
+/// Resolve the request `Host` against the configured apex. The port is
+/// stripped and the host lowercased before comparison; `apex` is already
+/// lowercased on `AppState`.
+fn resolve_host_kind(headers: &HeaderMap, apex: &str) -> HostKind {
+    let raw = headers
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let host = raw
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return HostKind::Foreign;
+    }
+    if host == apex {
+        return HostKind::Apex;
+    }
+    if let Some(label) = host.strip_suffix(&format!(".{apex}")) {
+        // Single-level subdomains only: a label with an embedded dot
+        // (`a.b.{apex}`) isn't a group we serve.
+        if !label.is_empty() && !label.contains('.') {
+            return HostKind::Group(label.to_string());
+        }
+    }
+    HostKind::Foreign
+}
+
 #[derive(Clone)]
 pub struct AppState {
     runtime: Arc<Runtime>,
@@ -130,6 +172,14 @@ pub struct AppState {
     /// DNS-rebinding protection). Empty = MCP accepts localhost only. Set
     /// from `WM_TRUSTED_PROXY`.
     mcp_allowed_hosts: Vec<String>,
+    /// The apex hostname this instance serves on (ADR-0030 virtual-host
+    /// routing). Mock traffic is served on group subdomains
+    /// `{group}.{apex_host}`; the apex itself is control-plane only.
+    /// Derived in `main.rs` from `WM_APEX_HOST`, else the first
+    /// `WM_TRUSTED_PROXY` host, else `localhost` (dev default). Stored
+    /// lowercased. Compared against the request `Host` header to resolve
+    /// which group a mock request targets.
+    apex_host: String,
     /// GitHub OAuth config, populated when both `WM_GITHUB_CLIENT_ID`
     /// and `WM_GITHUB_CLIENT_SECRET` are set. `None` means the login
     /// page hides the "Continue with GitHub" button and the
@@ -158,6 +208,7 @@ impl AppState {
             secure_cookies: false,
             trust_forwarded_headers: false,
             mcp_allowed_hosts: Vec::new(),
+            apex_host: "localhost".to_string(),
             github_oauth: None,
         }
     }
@@ -189,6 +240,17 @@ impl AppState {
 
     pub fn mcp_allowed_hosts(&self) -> &[String] {
         &self.mcp_allowed_hosts
+    }
+
+    /// Set the apex hostname (ADR-0030). Stored lowercased so Host-header
+    /// comparison is case-insensitive.
+    pub fn with_apex_host(mut self, apex: impl Into<String>) -> Self {
+        self.apex_host = apex.into().to_ascii_lowercase();
+        self
+    }
+
+    pub fn apex_host(&self) -> &str {
+        &self.apex_host
     }
 
     pub fn with_shutdown(mut self, rx: tokio::sync::watch::Receiver<bool>) -> Self {
@@ -554,18 +616,19 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let mut in_flight = Some(crate::metrics::dispatch_in_flight(method.as_str()));
     crate::metrics::record_request_body_bytes(method.as_str(), body_bytes.len() as u64);
 
-    let matched = match state.routes.find_match(method.as_str(), path) {
-        Some(m) => m,
-        None => {
-            // Per route-model.md, bare `GET /` with no user route
-            // claiming it bounces to the UI (if the caller has a
-            // session) or the login page (if not). Skipped if a user
-            // route explicitly registered `GET /` — `find_match`
-            // would have returned `Some` and shadowed this branch.
-            //
-            // The redirect deliberately doesn't write to the
-            // unmatched journal: a human pointing a browser at the
-            // bare hostname isn't a "missing mock" signal.
+    // Resolve the request Host to a group (ADR-0030 virtual-host routing).
+    // Mock traffic is served on `{group}.{apex}`; the apex is control-plane
+    // only, and anything that isn't a subdomain of the apex has no group to
+    // attribute to.
+    let group_name = match resolve_host_kind(&header_map, state.apex_host()) {
+        HostKind::Apex => {
+            // Bare `GET /` on the apex bounces a human to the UI (with a
+            // session) or login (without) — route-model.md. It deliberately
+            // isn't journaled: pointing a browser at the apex isn't a
+            // "missing mock" signal. Every other apex request is
+            // control-plane-only territory — the apex serves no mock
+            // traffic — so it's a plain 404 with no journal (no group to
+            // attribute it to).
             if method == http::Method::GET && path == "/" {
                 let target = if has_valid_session(&state, &header_map) {
                     "/__ui/"
@@ -577,19 +640,77 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 inject_response_trace_id(&trace_id, resp.headers_mut());
                 return Ok(resp);
             }
+            span.record("outcome", "apex_no_mock_404");
+            crate::metrics::record_dispatch(
+                method.as_str(),
+                404,
+                "apex_no_mock_404",
+                started.elapsed().as_millis() as u64,
+            );
+            let mut resp =
+                not_found_response("mock traffic is served on group subdomains, not the apex");
+            inject_response_trace_id(&trace_id, resp.headers_mut());
+            return Ok(resp);
+        }
+        HostKind::Foreign => {
+            // Host isn't the apex or a subdomain of it — no group to route
+            // to, so 404 with no journal write.
+            span.record("outcome", "unknown_host_404");
+            crate::metrics::record_dispatch(
+                method.as_str(),
+                404,
+                "unknown_host_404",
+                started.elapsed().as_millis() as u64,
+            );
+            let mut resp = not_found_response("unknown host");
+            inject_response_trace_id(&trace_id, resp.headers_mut());
+            return Ok(resp);
+        }
+        HostKind::Group(label) => label,
+    };
+
+    let matched = match state
+        .routes
+        .find_match_in_group(&group_name, method.as_str(), path)
+    {
+        Some(m) => m,
+        None => {
+            // No route in this group matched. Distinguish an unknown
+            // subdomain (no such group → 404, nothing to journal) from a
+            // real group with no matching route (record an unmatched
+            // entry, with near-misses scoped to the group).
+            let group_exists = state
+                .routes()
+                .registry()
+                .read_group_by_ref(&group_name)
+                .is_ok();
+            if !group_exists {
+                span.record("outcome", "unknown_group_404");
+                crate::metrics::record_dispatch(
+                    method.as_str(),
+                    404,
+                    "unknown_group_404",
+                    started.elapsed().as_millis() as u64,
+                );
+                let mut resp = not_found_response("no such group");
+                inject_response_trace_id(&trace_id, resp.headers_mut());
+                return Ok(resp);
+            }
 
             span.record("outcome", "unmatched_404");
-            // Compute nearby routes the SUT might have meant. Slice 35
-            // — the heavy lifting is already in `compute_near_misses`,
-            // which is the same probe slice 13's `find_route` runs.
+            // Near-misses scoped to this group (ADR-0030) so "did you
+            // mean…?" suggestions stay within the tenant's own routes.
             let near_misses: Vec<UnmatchedNearMiss> = state
                 .routes()
-                .compute_near_misses(method.as_str(), uri.path())
+                .compute_near_misses_in_group(&group_name, method.as_str(), uri.path())
                 .into_iter()
                 .map(project_near_miss)
                 .collect();
-            // Journal the unmatched request. Best-effort: a journal
-            // failure is logged but doesn't change what the SUT sees.
+            // Journal the unmatched request. Best-effort: a journal failure
+            // is logged but doesn't change what the SUT sees. NOTE: the
+            // unmatched journal is still host-wide + admin-only in this
+            // slice; making it per-group / owner-visible is the Phase-3
+            // SemFLIP (see virtual-host-impact.md).
             let envelope = build_request_envelope(
                 &method,
                 &uri,

@@ -27,7 +27,7 @@ fn vendored_engine_path() -> Option<PathBuf> {
 
 async fn start_with_js_route(
     source: &str,
-) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+) -> Option<(std::net::SocketAddr, String, tokio::task::JoinHandle<()>)> {
     let engine_path = vendored_engine_path()?;
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
@@ -53,6 +53,10 @@ async fn start_with_js_route(
             owner_id: "test-owner".into(),
         })
         .expect("create route");
+    // The route landed in an auto-named implicit group; the mock-traffic
+    // virtual host (ADR-0030) is `{group}.localhost`, so hand the group
+    // name back to the caller.
+    let group = route.group_name.clone();
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
     let journal = Journal::new(storage);
@@ -65,7 +69,7 @@ async fn start_with_js_route(
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("axum::serve");
     });
-    Some((addr, server))
+    Some((addr, group, server))
 }
 
 /// As `start_with_js_route`, but with a custom engine epoch budget and
@@ -77,7 +81,7 @@ async fn start_with_js_route_limited(
     source: &str,
     epoch_ticks: u64,
     stream_max: std::time::Duration,
-) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+) -> Option<(std::net::SocketAddr, String, tokio::task::JoinHandle<()>)> {
     let engine_path = vendored_engine_path()?;
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
@@ -104,6 +108,7 @@ async fn start_with_js_route_limited(
             owner_id: "test-owner".into(),
         })
         .expect("create route");
+    let group = route.group_name.clone();
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
     let journal = Journal::new(storage);
@@ -116,7 +121,7 @@ async fn start_with_js_route_limited(
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("axum::serve");
     });
-    Some((addr, server))
+    Some((addr, group, server))
 }
 
 #[tokio::test]
@@ -133,13 +138,14 @@ async fn javascript_route_dispatches_through_shared_engine() {
           };
         }
     "#;
-    let Some((addr, server)) = start_with_js_route(source).await else {
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
         eprintln!("skipping: vendored js-engine.wasm not present");
         return;
     };
 
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body("{}")
         .send()
         .await
@@ -162,7 +168,7 @@ async fn javascript_route_can_persist_kv_state_via_shared_engine() {
           return { status: 200, headers: [], body };
         }
     "#;
-    let Some((addr, server)) = start_with_js_route(source).await else {
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
         return;
     };
 
@@ -170,6 +176,7 @@ async fn javascript_route_can_persist_kv_state_via_shared_engine() {
     for expected in 1..=3 {
         let resp = client
             .post(format!("http://{addr}/v1/echo"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
             .body("{}")
             .send()
             .await
@@ -188,12 +195,13 @@ async fn javascript_route_handler_error_surfaces_as_500_with_message() {
           throw new Error("intentional");
         }
     "#;
-    let Some((addr, server)) = start_with_js_route(source).await else {
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
         return;
     };
 
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("send");
@@ -241,13 +249,14 @@ async fn javascript_route_can_use_clock_primitives() {
           };
         }
     "#;
-    let Some((addr, server)) = start_with_js_route(source).await else {
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
         return;
     };
 
     let started = std::time::Instant::now();
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("send");
@@ -295,13 +304,14 @@ async fn javascript_route_monotonic_ms_is_non_decreasing_across_requests() {
           };
         }
     "#;
-    let Some((addr, server)) = start_with_js_route(source).await else {
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
         return;
     };
 
     let client = reqwest::Client::new();
     let first: u64 = client
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("send 1")
@@ -317,6 +327,7 @@ async fn javascript_route_monotonic_ms_is_non_decreasing_across_requests() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let second: u64 = client
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .send()
         .await
         .expect("send 2")
@@ -357,13 +368,14 @@ async fn javascript_route_can_stream_response_via_host_response_stream() {
           // No return value — the host uses the streamed chunks.
         }
     "#;
-    let Some((addr, server)) = start_with_js_route(source).await else {
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
         eprintln!("skipping: vendored js-engine.wasm not present");
         return;
     };
 
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body("{}")
         .send()
         .await
@@ -406,13 +418,14 @@ async fn javascript_route_streams_chunks_incrementally_over_time() {
           out.close();
         }
     "#;
-    let Some((addr, server)) = start_with_js_route(source).await else {
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
         eprintln!("skipping: vendored js-engine.wasm not present");
         return;
     };
 
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body("{}")
         .send()
         .await
@@ -470,7 +483,7 @@ async fn streaming_handler_runs_past_the_non_streaming_epoch() {
           out.close();
         }
     "#;
-    let Some((addr, server)) =
+    let Some((addr, group, server)) =
         start_with_js_route_limited(source, 20, std::time::Duration::from_secs(5)).await
     else {
         eprintln!("skipping: vendored js-engine.wasm not present");
@@ -479,6 +492,7 @@ async fn streaming_handler_runs_past_the_non_streaming_epoch() {
 
     let body = reqwest::Client::new()
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body("{}")
         .send()
         .await
@@ -506,7 +520,7 @@ async fn non_streaming_handler_still_traps_at_the_epoch() {
           return { status: 200, headers: [], body: new Uint8Array() };
         }
     "#;
-    let Some((addr, server)) =
+    let Some((addr, group, server)) =
         start_with_js_route_limited(source, 20, std::time::Duration::from_secs(5)).await
     else {
         return;
@@ -514,6 +528,7 @@ async fn non_streaming_handler_still_traps_at_the_epoch() {
 
     let resp = reqwest::Client::new()
         .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body("{}")
         .send()
         .await
