@@ -99,6 +99,13 @@ pub struct NormalizedRoute {
     pub source: String,
 }
 
+/// Result of importing a spec: the created group + how many routes landed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportSummary {
+    pub group: String,
+    pub routes_created: usize,
+}
+
 /// Parse a spec from a raw string. Does not validate beyond deserialization
 /// (and `deny_unknown_fields`); call [`normalize`] for semantic checks.
 pub fn parse_str(text: &str, format: SpecFormat) -> Result<GroupSpec> {

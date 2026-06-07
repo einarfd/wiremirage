@@ -98,10 +98,13 @@ pub fn router() -> Router<AppState> {
         // here supersedes the `clear-journal` shape from the rest-api
         // doc — same semantics, lives under the group's path.
         .route("/__api/groups", post(create_group).get(list_groups))
+        // Static segment — registered before `/__api/groups/{group}`.
+        .route("/__api/groups/import", post(import_group_handler))
         .route(
             "/__api/groups/{group}",
             get(get_group).patch(patch_group).delete(delete_group),
         )
+        .route("/__api/groups/{group}/export", get(export_group_handler))
         .route("/__api/groups/{group}/refresh", post(refresh_group))
         .route(
             "/__api/groups/{group}/state",
@@ -2173,6 +2176,120 @@ async fn delete_group_journal(
     let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
     state.routes().registry().clear_group_journal(&group.id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// -- /__api/groups/import + /__api/groups/{group}/export (spec) --------------
+//
+// Server-side import/export of a routes-only group spec (wm_core::spec).
+// Shared by REST (here), the MCP import_group/export_group tools, and the UI.
+// The CLI also uses these endpoints (resolving source_file → inline source
+// client-side first). State bundles (ADR-0031) stay out of scope.
+
+/// Create a group + its routes from a spec, as the calling user. Rolls the
+/// whole group back if any route fails, so a bad spec leaves nothing behind.
+pub(crate) async fn import_group_core(
+    state: &AppState,
+    auth: &AuthContext,
+    spec: wm_core::spec::GroupSpec,
+) -> Result<wm_core::spec::ImportSummary, ApiError> {
+    let normalized =
+        wm_core::spec::normalize(&spec).map_err(|e| ApiError::validation(format!("{e:#}")))?;
+    let group = state.routes().registry().create_group(NewGroup {
+        name: normalized.name.clone(),
+        owner_id: auth.user_id.clone(),
+        ttl_seconds: normalized.ttl_seconds,
+        sliding_ttl: normalized.sliding,
+    })?;
+    for (idx, r) in normalized.routes.iter().enumerate() {
+        let body = CreateRouteBody {
+            group: Some(group.name.clone()),
+            methods: r.methods.clone(),
+            path: r.path.clone(),
+            language: r.language.clone(),
+            source: Some(r.source.clone()),
+        };
+        if let Err(e) = create_route_core(state, auth, body).await {
+            // Roll the partial group back so the caller can re-import after
+            // fixing the spec (mirrors the CLI's old client-side rollback).
+            let _ = state.routes().registry().cascade_delete_group(&group.id);
+            state.routes().refresh_after_group_cascade(&group.id);
+            return Err(ApiError::validation(format!(
+                "route #{idx} ({path}) failed: {msg}; group {name:?} rolled back",
+                path = r.path,
+                msg = e.message(),
+                name = group.name,
+            )));
+        }
+    }
+    Ok(wm_core::spec::ImportSummary {
+        group: group.name,
+        routes_created: normalized.routes.len(),
+    })
+}
+
+/// Assemble a spec from a group + its routes (each route's stored source).
+/// Owner-or-admin. Errors on a wasm-only route (no source to put in a spec).
+pub(crate) fn export_group_core(
+    state: &AppState,
+    auth: &AuthContext,
+    group_ref: &str,
+) -> Result<wm_core::spec::GroupSpec, ApiError> {
+    let group = ensure_group_owner_or_admin(state, auth, group_ref)?;
+    let mut routes: Vec<Route> = state
+        .routes()
+        .registry()
+        .list_routes()?
+        .into_iter()
+        .filter(|r| r.group_id == group.id)
+        .collect();
+    routes.sort_by_key(|r| r.number);
+
+    let mut route_specs = Vec::with_capacity(routes.len());
+    for r in &routes {
+        let Some(source) = r.source.clone() else {
+            return Err(ApiError::validation(format!(
+                "route {}/{} was uploaded as pre-compiled {} (no source); spec export needs source",
+                group.name, r.number, r.language
+            )));
+        };
+        let (method, methods) = match r.methods.as_slice() {
+            [only] => (Some(only.clone()), Vec::new()),
+            _ => (None, r.methods.clone()),
+        };
+        route_specs.push(wm_core::spec::RouteSpec {
+            method,
+            methods,
+            path: r.path.clone(),
+            language: Some(r.language.clone()),
+            source: Some(source),
+            source_file: None,
+        });
+    }
+
+    Ok(wm_core::spec::GroupSpec {
+        name: group.name.clone(),
+        description: None,
+        ttl: Some(group.ttl_seconds.to_string()),
+        sliding: Some(group.sliding_ttl),
+        routes: route_specs,
+    })
+}
+
+async fn import_group_handler(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(spec): Json<wm_core::spec::GroupSpec>,
+) -> Result<Response, ApiError> {
+    let summary = import_group_core(&state, &auth, spec).await?;
+    Ok((StatusCode::CREATED, Json(summary)).into_response())
+}
+
+async fn export_group_handler(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+) -> Result<Json<wm_core::spec::GroupSpec>, ApiError> {
+    Ok(Json(export_group_core(&state, &auth, &group_ref)?))
 }
 
 // -- /__api/journal/tail (SSE) -----------------------------------------------

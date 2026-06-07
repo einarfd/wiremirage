@@ -3320,6 +3320,137 @@ async fn group_endpoints_require_auth() {
     }
 }
 
+// -- /__api/groups spec import/export ---------------------------------------
+
+#[tokio::test]
+async fn import_creates_group_and_routes() {
+    let h = Harness::start_with_engine().await;
+    let spec = json!({
+        "name": "imported",
+        "ttl": "1h",
+        "routes": [
+            {"method":"POST","path":"/v1/charges","language":"javascript","source": echo_source()},
+            {"method":"GET","path":"/v1/ping","language":"javascript","source": echo_source()}
+        ]
+    });
+    let resp = h
+        .client
+        .post(h.url("/__api/groups/import"))
+        .json(&spec)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["group"], "imported");
+    assert_eq!(body["routes_created"], 2);
+
+    let routes: serde_json::Value = h
+        .client
+        .get(h.url("/__api/routes?group=imported"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(routes["routes"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn import_rolls_back_on_bad_route() {
+    let h = Harness::start_with_engine().await;
+    let spec = json!({
+        "name": "rollback-me",
+        "routes": [
+            {"method":"POST","path":"/ok","language":"javascript","source": echo_source()},
+            {"method":"POST","path":"/bad","language":"typescript","source": "function handle( {"}
+        ]
+    });
+    let resp = h
+        .client
+        .post(h.url("/__api/groups/import"))
+        .json(&spec)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 400);
+    // The whole group is rolled back — nothing left behind.
+    let g = h
+        .client
+        .get(h.url("/__api/groups/rollback-me"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(g.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn export_round_trips_a_source_route() {
+    let h = Harness::start_with_engine().await;
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"], "path": "/v1/charges",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap().to_string();
+
+    let exp: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/__api/groups/{group}/export")))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(exp["name"], group);
+    assert_eq!(exp["routes"][0]["path"], "/v1/charges");
+    assert!(
+        !exp["routes"][0]["source"].as_str().unwrap().is_empty(),
+        "source is inline in the export"
+    );
+}
+
+#[tokio::test]
+async fn export_errors_on_wasm_only_route() {
+    let h = Harness::start().await;
+    let (group, _n) = h.seed_route(&["GET"], "/x", b"FAKE".to_vec());
+    let resp = h
+        .client
+        .get(h.url(&format!("/__api/groups/{group}/export")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn export_forbidden_for_non_owner() {
+    let h = Harness::start_with_engine().await;
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"], "path": "/v1/charges",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap().to_string();
+    let (_alice_id, alice) = h.provision_user("alice", false);
+    let resp = alice
+        .get(h.url(&format!("/__api/groups/{group}/export")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
 // -- /__api/match -----------------------------------------------------------
 
 #[tokio::test]
