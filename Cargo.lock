@@ -5277,7 +5277,6 @@ dependencies = [
  "clap_complete",
  "serde",
  "serde_json",
- "serde_yml",
  "tokio",
  "toml 0.8.23",
  "wm-core",
@@ -5293,8 +5292,10 @@ dependencies = [
  "base64",
  "chrono",
  "reqwest",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
+ "serde_yml",
  "thiserror 2.0.18",
  "tokio",
 ]
