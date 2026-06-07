@@ -189,6 +189,29 @@ async fn token_create_returns_plaintext_and_authenticates() {
 }
 
 #[tokio::test]
+async fn token_rename_changes_name_via_client() {
+    let h = start().await;
+    let client = client(&h.host_url);
+    client
+        .create_token(&CreateTokenBody {
+            name: "old-name".into(),
+            ttl_seconds: None,
+        })
+        .await
+        .expect("create");
+
+    let renamed = client
+        .rename_token("old-name", "new-name")
+        .await
+        .expect("rename");
+    assert_eq!(renamed.name, "new-name");
+
+    let tokens = client.list_tokens().await.expect("list");
+    assert!(tokens.tokens.iter().any(|t| t.name == "new-name"));
+    assert!(!tokens.tokens.iter().any(|t| t.name == "old-name"));
+}
+
+#[tokio::test]
 async fn journal_list_empty_for_fresh_group() {
     let h = start().await;
     let client = client(&h.host_url);

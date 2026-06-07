@@ -888,6 +888,13 @@ async fn handle_tokens(
                 println!("revoked {name}");
             }
         }
+        TokensCommand::Rename { name, new_name } => {
+            let record = client.rename_token(&name, &new_name).await?;
+            match format {
+                Format::Json => format::print_json(&record),
+                Format::Human => println!("renamed {name} -> {}", record.name),
+            }
+        }
     }
     Ok(())
 }

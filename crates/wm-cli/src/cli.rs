@@ -552,6 +552,13 @@ pub enum TokensCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Rename a token. The secret value is unchanged — only the name.
+    Rename {
+        /// Current token name.
+        name: String,
+        /// New token name (unique per owner).
+        new_name: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
