@@ -18,7 +18,7 @@
     <a class="link" href="/__ui/groups">View all &rarr;</a>
   </header>
   {% if groups | length == 0 %}
-  <p class="empty-state">No groups yet. Create one with <code>wm groups create &lt;name&gt;</code>.</p>
+  <p class="empty-state">No groups yet. <a class="link" href="/__ui/groups/new">Create one</a> (or <code>wm groups create &lt;name&gt;</code>).</p>
   {% else %}
   <table class="data-table">
     <thead>
@@ -49,6 +49,7 @@
   </header>
   <ul class="action-list">
     <li><a href="/__ui/connect">Connect an agent (MCP)</a></li>
+    <li><a href="/__ui/groups/new">Create a group</a></li>
     <li><a href="/__ui/routes/new">Create a route</a></li>
     <li><a href="/__ui/journal/live">Watch live journal</a></li>
     <li><a href="/__ui/me/tokens">Manage API tokens</a></li>
