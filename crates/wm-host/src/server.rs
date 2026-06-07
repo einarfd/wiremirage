@@ -679,23 +679,21 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             // subdomain (no such group → 404, nothing to journal) from a
             // real group with no matching route (record an unmatched
             // entry, with near-misses scoped to the group).
-            let group_exists = state
-                .routes()
-                .registry()
-                .read_group_by_ref(&group_name)
-                .is_ok();
-            if !group_exists {
-                span.record("outcome", "unknown_group_404");
-                crate::metrics::record_dispatch(
-                    method.as_str(),
-                    404,
-                    "unknown_group_404",
-                    started.elapsed().as_millis() as u64,
-                );
-                let mut resp = not_found_response("no such group");
-                inject_response_trace_id(&trace_id, resp.headers_mut());
-                return Ok(resp);
-            }
+            let group = match state.routes().registry().read_group_by_ref(&group_name) {
+                Ok(g) => g,
+                Err(_) => {
+                    span.record("outcome", "unknown_group_404");
+                    crate::metrics::record_dispatch(
+                        method.as_str(),
+                        404,
+                        "unknown_group_404",
+                        started.elapsed().as_millis() as u64,
+                    );
+                    let mut resp = not_found_response("no such group");
+                    inject_response_trace_id(&trace_id, resp.headers_mut());
+                    return Ok(resp);
+                }
+            };
 
             span.record("outcome", "unmatched_404");
             // Near-misses scoped to this group (ADR-0030) so "did you
@@ -706,11 +704,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 .into_iter()
                 .map(project_near_miss)
                 .collect();
-            // Journal the unmatched request. Best-effort: a journal failure
-            // is logged but doesn't change what the SUT sees. NOTE: the
-            // unmatched journal is still host-wide + admin-only in this
-            // slice; making it per-group / owner-visible is the Phase-3
-            // SemFLIP (see virtual-host-impact.md).
+            // Journal the unmatched request, attributed to the group it was
+            // addressed to (ADR-0030) so the group's owner can see it — not
+            // just admins. Best-effort: a journal failure is logged but
+            // doesn't change what the SUT sees.
             let envelope = build_request_envelope(
                 &method,
                 &uri,
@@ -720,6 +717,8 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             );
             if let Err(e) = state.journal().record_unmatched(NewUnmatchedEntry {
                 trace_id: trace_id.clone(),
+                group_id: group.id.clone(),
+                group_name: group.name.clone(),
                 request: envelope,
                 near_misses,
             }) {

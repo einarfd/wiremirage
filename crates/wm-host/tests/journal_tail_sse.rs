@@ -282,6 +282,8 @@ async fn tail_emits_unmatched_when_no_filters() {
         .journal()
         .record_unmatched(NewUnmatchedEntry {
             trace_id: None,
+            group_id: "mock".into(),
+            group_name: "mock".into(),
             request: RequestEnvelope {
                 method: "GET".into(),
                 path: "/missing".into(),

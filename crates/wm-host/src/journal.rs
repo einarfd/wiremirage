@@ -140,6 +140,15 @@ pub struct ResourceUsage {
 pub struct UnmatchedRecord {
     pub id: String,
     pub number: u64,
+    /// The group the request was addressed to (ADR-0030 virtual-host
+    /// routing): it hit `{group}.{apex}` and matched no route *in that
+    /// group*. Always populated since the dispatcher 404s unknown
+    /// groups without journaling; `#[serde(default)]` only guards the
+    /// ≤1h window where pre-attribution records may still be stored.
+    #[serde(default)]
+    pub group_id: String,
+    #[serde(default)]
+    pub group_name: String,
     pub trace_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub request: RequestEnvelope,
@@ -207,6 +216,9 @@ pub struct NewJournalEntry {
 #[derive(Debug, Clone)]
 pub struct NewUnmatchedEntry {
     pub trace_id: Option<String>,
+    /// Group the request was addressed to (resolved from the host).
+    pub group_id: String,
+    pub group_name: String,
     pub request: RequestEnvelope,
     /// Computed by the dispatcher (or the test driver) at write
     /// time. Empty when nothing nearby was found, or when the
@@ -442,6 +454,8 @@ impl Journal {
         let record = UnmatchedRecord {
             id: id.clone(),
             number: n,
+            group_id: entry.group_id,
+            group_name: entry.group_name,
             trace_id: entry.trace_id,
             created_at: Utc::now(),
             request: entry.request,
@@ -681,6 +695,8 @@ mod tests {
         let written = j
             .record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
+                group_id: "g1".into(),
+                group_name: "g1".into(),
                 request: sample_envelope(b"oops"),
                 near_misses: Vec::new(),
             })
@@ -697,6 +713,8 @@ mod tests {
         let r1 = j
             .record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
+                group_id: "g1".into(),
+                group_name: "g1".into(),
                 request: sample_envelope(b""),
                 near_misses: Vec::new(),
             })
@@ -704,6 +722,8 @@ mod tests {
         let r2 = j
             .record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
+                group_id: "g1".into(),
+                group_name: "g1".into(),
                 request: sample_envelope(b""),
                 near_misses: Vec::new(),
             })
@@ -718,6 +738,8 @@ mod tests {
         for _ in 0..4 {
             j.record_unmatched(NewUnmatchedEntry {
                 trace_id: None,
+                group_id: "g1".into(),
+                group_name: "g1".into(),
                 request: sample_envelope(b""),
                 near_misses: Vec::new(),
             })
