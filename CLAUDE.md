@@ -696,20 +696,26 @@ Or in-memory:
 WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_STORAGE=memory cargo run -p wm-host
 ```
 
-Register a TypeScript route and call it:
+Register a TypeScript route and call it. Mock traffic is served on the
+group's **subdomain** `{group}.{apex}` (ADR-0030 virtual-host routing); the
+apex (`localhost:8080` in dev) is control-plane only. The `/__api/*` calls
+go to the apex; the mock request carries a `Host` of `{group}.localhost`
+(no DNS needed — the `Host` header alone drives group resolution):
 
 ```sh
 curl -X POST localhost:8080/__api/routes \
   -H 'authorization: Bearer wmt_dev_local' \
   -H content-type:application/json \
   -d '{
+    "group": "demo",
     "methods": ["POST"],
     "path": "/v1/charges",
     "language": "typescript",
     "source": "function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"
   }'
-# Mock traffic does not need an Authorization header.
-curl -X POST localhost:8080/v1/charges -d '{}'
+# The create response includes the route's full `url`. Mock traffic needs no
+# Authorization header — just address the group's subdomain:
+curl -X POST -H 'Host: demo.localhost' http://localhost:8080/v1/charges -d '{}'
 ```
 
 Env vars (no silent fallbacks; missing required → fail-fast):

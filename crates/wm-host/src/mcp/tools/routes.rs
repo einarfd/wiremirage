@@ -27,6 +27,10 @@ pub struct RouteRecord {
     pub group: GroupRef,
     pub methods: Vec<String>,
     pub path: String,
+    /// Full public URL the SUT calls: `{scheme}://{group}.{apex}{path}`
+    /// (ADR-0030 virtual-host routing). The path component is the route's
+    /// pattern verbatim, `{param}` segments and all.
+    pub url: String,
     pub language: String,
     pub bindings_version: String,
     pub owner_id: String,
@@ -44,8 +48,15 @@ pub struct GroupRef {
     pub name: String,
 }
 
-impl From<&Route> for RouteRecord {
-    fn from(r: &Route) -> Self {
+impl RouteRecord {
+    /// Build a record, computing the per-group `url` from the request
+    /// headers (the apex this control-plane MCP call lands on).
+    pub fn build(r: &Route, headers: &http::HeaderMap, trust_forwarded: bool) -> Self {
+        let url = format!(
+            "{}{}",
+            crate::auth_api::group_base_url(&r.group_name, headers, trust_forwarded),
+            r.path
+        );
         Self {
             id: r.id.clone(),
             number: r.number,
@@ -55,6 +66,7 @@ impl From<&Route> for RouteRecord {
             },
             methods: r.methods.clone(),
             path: r.path.clone(),
+            url,
             language: r.language.clone(),
             bindings_version: r.bindings_version.clone(),
             owner_id: r.owner_id.clone(),
@@ -279,8 +291,12 @@ impl WmMcpServer {
         sort_routes(&mut filtered, sort_key, dir);
 
         let (page, total, next_offset) = slice_for_page(&filtered, offset, limit);
+        let trust = self.state.trust_forwarded_headers();
         Ok(Json(ListRoutesResult {
-            routes: page.iter().map(RouteRecord::from).collect(),
+            routes: page
+                .iter()
+                .map(|r| RouteRecord::build(r, &parts.headers, trust))
+                .collect(),
             total,
             next_offset,
         }))
@@ -298,7 +314,11 @@ impl WmMcpServer {
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_slug(&args.route)?;
         let route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
-        Ok(Json(RouteRecord::from(&route)))
+        Ok(Json(RouteRecord::build(
+            &route,
+            &parts.headers,
+            self.state.trust_forwarded_headers(),
+        )))
     }
 
     #[tool(
@@ -340,7 +360,11 @@ impl WmMcpServer {
         let route = crate::api::create_route_core(&self.state, &auth, body)
             .await
             .map_err(crate::mcp::error::map_api_error)?;
-        Ok(Json(RouteRecord::from(&route)))
+        Ok(Json(RouteRecord::build(
+            &route,
+            &parts.headers,
+            self.state.trust_forwarded_headers(),
+        )))
     }
 
     #[tool(
@@ -363,7 +387,11 @@ impl WmMcpServer {
         let updated = crate::api::patch_route_core(&self.state, &auth, &group_ref, number, body)
             .await
             .map_err(crate::mcp::error::map_api_error)?;
-        Ok(Json(RouteRecord::from(&updated)))
+        Ok(Json(RouteRecord::build(
+            &updated,
+            &parts.headers,
+            self.state.trust_forwarded_headers(),
+        )))
     }
 
     #[tool(
