@@ -493,12 +493,14 @@ By design user management is CLI-only; the MCP server does not expose
 it (per `mcp-surface.md`).
 
 The CLI design is captured in `cli-design.md` (private design doc).
-Most of the early deferrals have since landed — `wm match`, route
-`update` / `test` / `state`, shell completions, profiles, admin user
-CRUD (`wm users`), and `--from-file` group specs are all wired up. The
-remaining gap is **`wm journal tail`** (a live SSE tail); until it
-lands, watch live traffic via the MCP `tail_journal` / `wait_for_request`
-tools or the web UI's live journal page.
+The early deferrals have since landed — `wm match`, route `update` /
+`test` / `state`, shell completions, profiles, admin user CRUD
+(`wm users`), and `--from-file` group specs are all wired up. **Live
+journal tailing is deliberately not a CLI command**: live-watch is a
+push concern, served by the MCP `tail_journal` / `wait_for_request`
+tools (which return a batch — agent-friendly) and the web UI's live
+journal page. The CLI stays request/response (`wm journal list` /
+`show`).
 
 ## Using the MCP server
 
