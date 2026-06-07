@@ -256,6 +256,41 @@ impl Drop for Harness {
 // -- Happy path ---------------------------------------------------------------
 
 #[tokio::test]
+async fn route_responses_carry_per_group_url() {
+    // ADR-0030 phase 3a: REST route responses report the full per-group
+    // mock URL ({scheme}://{group}.{apex}{path}), pattern verbatim.
+    let h = Harness::start_with_engine().await;
+
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/widgets/{id}",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let group = body["group"]["name"].as_str().expect("group name");
+    let number = body["number"].as_u64().expect("number");
+    // The harness client sends a Host of `h.addr` — the apex these
+    // control-plane calls land on — so the group URL prefixes the label.
+    let expected = format!("http://{group}.{}/widgets/{{id}}", h.addr);
+    assert_eq!(body["url"].as_str().expect("url field"), expected);
+
+    // GET reflects the same URL.
+    let show = h
+        .client
+        .get(h.url(&format!("/__api/routes/{group}/{number}")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(show.status().as_u16(), 200);
+    let show_body: serde_json::Value = show.json().await.expect("json");
+    assert_eq!(show_body["url"].as_str().expect("url field"), expected);
+}
+
+#[tokio::test]
 async fn create_then_call_then_delete_then_404() {
     let h = Harness::start_with_engine().await;
 
