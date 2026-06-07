@@ -291,6 +291,37 @@ async fn route_responses_carry_per_group_url() {
 }
 
 #[tokio::test]
+async fn catch_all_route_handles_arbitrary_paths() {
+    // ADR-0028: an `ANY /{rest...}` backstop handles every path in its
+    // group — end-to-end through real dispatch, not just the matcher.
+    let h = Harness::start_with_engine().await;
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["ANY"],
+            "path": "/{rest...}",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap().to_string();
+
+    // A deep path no specific route defines still hits the catch-all.
+    let resp = h
+        .mock(reqwest::Method::GET, &group, "/anything/at/all")
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.text().await.expect("body"),
+        "echo: GET /anything/at/all"
+    );
+}
+
+#[tokio::test]
 async fn create_then_call_then_delete_then_404() {
     let h = Harness::start_with_engine().await;
 

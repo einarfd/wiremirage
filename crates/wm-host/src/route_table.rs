@@ -118,7 +118,15 @@ impl RouteTable {
         method: &str,
         path: &str,
     ) -> Option<MatchedRoute> {
+        // ADR-0028 precedence: try all **specific** (non-tail) routes first —
+        // conflict detection keeps them mutually unambiguous, so at most one
+        // matches and it wins outright. Only if none match do **tail**
+        // backstops get a turn, and among those the longest prefix wins
+        // (deterministic, creation-order-independent). Coexisting tails can
+        // never both match a path with equal prefix length (that's rejected
+        // at create as a conflict), so the longest-prefix pick is unambiguous.
         let routes = self.routes.read().expect("poisoned");
+        let mut best_tail: Option<(usize, MatchedRoute)> = None;
         for route in routes.iter() {
             if let Some(g) = group
                 && route.group_name != g
@@ -133,15 +141,24 @@ impl RouteTable {
             if !methods.matches(method) {
                 continue;
             }
-            if let Some(captures) = pattern.match_path(path) {
-                return Some(MatchedRoute {
-                    route: route.clone(),
-                    matched_pattern: pattern.raw,
-                    path_params: captures,
-                });
+            let Some(captures) = pattern.match_path(path) else {
+                continue;
+            };
+            let matched = MatchedRoute {
+                route: route.clone(),
+                matched_pattern: pattern.raw.clone(),
+                path_params: captures,
+            };
+            if pattern.has_tail() {
+                let prefix_len = pattern.segments.len();
+                if best_tail.as_ref().is_none_or(|(len, _)| prefix_len > *len) {
+                    best_tail = Some((prefix_len, matched));
+                }
+            } else {
+                return Some(matched);
             }
         }
-        None
+        best_tail.map(|(_, m)| m)
     }
 
     /// Run the match probe across **all** groups: the actual match if any,
@@ -346,6 +363,10 @@ impl RouteTable {
 /// This catches typos like `/v1/charge` vs `/v1/charges` without
 /// flagging unrelated paths.
 fn prefix_segment_diff(pattern: &Pattern, path: &str) -> Option<(usize, String, String)> {
+    // Tail patterns match broadly and don't produce a clean prefix near-miss.
+    if pattern.has_tail() {
+        return None;
+    }
     let trimmed = if path.len() > 1 && path.ends_with('/') {
         &path[..path.len() - 1]
     } else {
@@ -373,6 +394,10 @@ fn prefix_segment_diff(pattern: &Pattern, path: &str) -> Option<(usize, String, 
             Segment::Param(_) => {
                 // Param segments accept any non-empty value; not a
                 // diff candidate.
+            }
+            Segment::Tail(_) => {
+                // Unreachable — guarded by `pattern.has_tail()` above; kept
+                // for match exhaustiveness.
             }
             Segment::Literal(expected) => {
                 if expected == req_seg {
@@ -446,6 +471,71 @@ mod tests {
                 ("id".to_string(), "123".to_string()),
                 ("post-id".to_string(), "456".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn tail_backstop_precedence_and_coexistence() {
+        // One group holding a specific route plus a scoped and a root
+        // catch-all — they coexist (ADR-0028 conflict exemption), and
+        // matching honours specific-first then longest-prefix-tail.
+        let table = route_table();
+        let group = table
+            .registry()
+            .create_group(crate::registry::NewGroup {
+                name: "g".into(),
+                owner_id: "o".into(),
+                ttl_seconds: None,
+                sliding_ttl: None,
+            })
+            .unwrap();
+        let mk = |methods: &[&str], path: &str| {
+            let r = table
+                .registry()
+                .create_route(NewRoute {
+                    group: Some(group.name.clone()),
+                    methods: methods.iter().map(|s| s.to_string()).collect(),
+                    path: path.into(),
+                    language: "wasm".into(),
+                    bindings_version: "0.1.0".into(),
+                    compiled_wasm: b"FAKE".to_vec(),
+                    source: None,
+                    owner_id: "o".into(),
+                })
+                .expect("create (catch-all must coexist with specifics)");
+            table.refresh_after_create(r.clone());
+            r
+        };
+        let specific = mk(&["POST"], "/v1/charges");
+        let scoped = mk(&["ANY"], "/v1/{rest...}");
+        let root = mk(&["ANY"], "/{rest...}");
+
+        // Specific wins over both backstops.
+        assert_eq!(
+            table
+                .find_match_in_group("g", "POST", "/v1/charges")
+                .unwrap()
+                .route
+                .id,
+            specific.id
+        );
+        // Under /v1 but not the specific → longest-prefix tail wins.
+        assert_eq!(
+            table
+                .find_match_in_group("g", "GET", "/v1/other")
+                .unwrap()
+                .route
+                .id,
+            scoped.id
+        );
+        // Outside /v1 → only the root catch-all is left.
+        assert_eq!(
+            table
+                .find_match_in_group("g", "GET", "/zzz/yyy")
+                .unwrap()
+                .route
+                .id,
+            root.id
         );
     }
 
