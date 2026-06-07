@@ -113,6 +113,19 @@ pub struct DeleteGroupResult {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ClearJournalArgs {
+    /// Group name or ULID.
+    pub group: String,
+    /// Required guard against accidental clearing. Must be `true`.
+    pub confirm: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ClearJournalResult {
+    pub cleared: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RefreshGroupArgs {
     /// Group name or ULID.
     pub group: String,
@@ -351,5 +364,29 @@ impl WmMcpServer {
                 .map_err(map_registry_error)?
         };
         Ok(Json(GroupRecord::from(&updated)))
+    }
+
+    #[tool(
+        name = "clear_journal",
+        description = "Clear all journal (matched-traffic) entries for a group — handy to reset between test phases. Routes and kv/gkv state are untouched; only the journal is wiped. Owner-or-admin; requires `confirm: true`."
+    )]
+    pub async fn clear_journal(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ClearJournalArgs>,
+    ) -> Result<Json<ClearJournalResult>, ErrorData> {
+        if !args.confirm {
+            return Err(validation(
+                "clear_journal requires `confirm: true` — set it explicitly to proceed",
+            ));
+        }
+        let auth = auth_from(&parts)?;
+        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        self.state
+            .routes()
+            .registry()
+            .clear_group_journal(&group.id)
+            .map_err(map_registry_error)?;
+        Ok(Json(ClearJournalResult { cleared: true }))
     }
 }

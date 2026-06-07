@@ -288,6 +288,27 @@ async fn edit_rejects_invalid_rename() {
 }
 
 #[tokio::test]
+async fn clear_journal_redirects_to_group_detail() {
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+
+    let resp = client
+        .post(url(&h, "/__ui/groups/stripe-mock/journal/clear"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}"))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/__ui/groups/stripe-mock"
+    );
+}
+
+#[tokio::test]
 async fn edit_ttl_rejects_zero_or_garbage() {
     let (h, _, _) = start_seeded().await;
     let client = no_redirect_client();

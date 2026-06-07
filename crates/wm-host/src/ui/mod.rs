@@ -131,6 +131,10 @@ pub fn router(state: AppState) -> Router {
             "/__ui/groups/{group}/state/set",
             axum::routing::post(group_state_set_form),
         )
+        .route(
+            "/__ui/groups/{group}/journal/clear",
+            axum::routing::post(group_journal_clear_form),
+        )
         .route("/__ui/routes", get(routes_list_page))
         .route(
             "/__ui/routes/new",
@@ -1041,6 +1045,22 @@ async fn group_delete_form(
     }
     state.routes().refresh_after_group_cascade(&group.id);
     axum::response::Redirect::to("/__ui/groups").into_response()
+}
+
+async fn group_journal_clear_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    if let Err(e) = state.routes().registry().clear_group_journal(&group.id) {
+        return ui_error_500(&state, &auth, format!("clear journal: {e}"));
+    }
+    axum::response::Redirect::to(&format!("/__ui/groups/{}", group.name)).into_response()
 }
 
 /// Look up `group_ref` and confirm the caller can manage it. The

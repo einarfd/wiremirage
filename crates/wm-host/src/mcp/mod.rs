@@ -150,6 +150,8 @@ mod tests {
             "update_group",
             // Post-ADR-0021: MCP-side handler-API discoverability
             "get_capabilities",
+            // Cross-surface parity pass
+            "clear_journal",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");
