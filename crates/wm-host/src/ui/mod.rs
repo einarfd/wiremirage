@@ -195,6 +195,7 @@ async fn connect(State(state): State<AppState>, auth: AuthContext, headers: Head
             user => UserBadge::from(&auth),
             base_url => base,
             mcp_url => mcp_url,
+            apex_host => state.apex_host(),
         },
     )
 }
@@ -1049,6 +1050,7 @@ fn ui_error_400_text(state: &AppState, auth: &AuthContext, msg: &str) -> Respons
 async fn route_detail_page(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Path((group_ref, number)): Path<(String, u32)>,
 ) -> Response {
     let route = match state
@@ -1115,6 +1117,15 @@ async fn route_detail_page(
             .cloned()
             .unwrap_or_else(|| "GET".into()),
         path: route.path.clone(),
+        url: format!(
+            "{}{}",
+            crate::auth_api::group_base_url(
+                &route.group_name,
+                &headers,
+                state.trust_forwarded_headers()
+            ),
+            route.path
+        ),
         language: route.language.clone(),
         bindings_version: route.bindings_version.clone(),
         component_size_human: human_size(route.compiled_wasm.len()),
@@ -1145,6 +1156,8 @@ struct RouteDetailRoute {
     methods: String,
     first_method: String,
     path: String,
+    /// Full public URL the SUT calls: `{scheme}://{group}.{apex}{path}`.
+    url: String,
     language: String,
     bindings_version: String,
     component_size_human: String,

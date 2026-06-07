@@ -122,14 +122,17 @@ docker compose up -d   # starts Valkey
 WM_BOOTSTRAP_TOKEN=wmt_dev_local \
   WM_STORAGE=redis://localhost:6379 \
   cargo run -p wm-host
-# In another shell:
+# In another shell. Mock traffic is served on the group's subdomain
+# `{group}.{apex}` (ADR-0030); the apex (localhost:8080 in dev) is
+# control-plane only. /__api/* goes to the apex:
 curl -X POST localhost:8080/__api/routes \
   -H 'authorization: Bearer wmt_dev_local' \
   -H content-type:application/json \
-  -d '{"methods":["POST"],"path":"/v1/charges","language":"typescript",
+  -d '{"group":"demo","methods":["POST"],"path":"/v1/charges","language":"typescript",
        "source":"function handle(req,_r,_g){return {status:200,headers:[],body:new TextEncoder().encode(\"hi from \"+req.method)};}"}'
-# Mock traffic does not need an Authorization header.
-curl -X POST localhost:8080/v1/charges -d '{}'
+# Mock traffic needs no Authorization header — address the group's subdomain.
+# No DNS needed locally: the Host header alone drives group resolution.
+curl -X POST -H 'Host: demo.localhost' http://localhost:8080/v1/charges -d '{}'
 ```
 
 TypeScript and JavaScript source compile in-host — TS is transpiled via

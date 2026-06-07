@@ -55,6 +55,10 @@ pub struct UserInfo {
 pub struct GroupSummary {
     pub name: String,
     pub id: String,
+    /// The group's mock-traffic base URL: `{scheme}://{name}.{apex}`
+    /// (ADR-0030 virtual-host routing). Send the SUT here; the apex
+    /// `base_url` on the parent result is control-plane (UI/API/MCP) only.
+    pub base_url: String,
     pub owner_id: String,
     pub route_count: u32,
     pub ttl_seconds: u64,
@@ -222,15 +226,18 @@ impl WmMcpServer {
             .registry()
             .list_routes()
             .map_err(map_registry_error)?;
+        let trust = self.state.trust_forwarded_headers();
         let summaries = groups
             .into_iter()
             .map(|g| {
                 let route_count = all_routes.iter().filter(|r| r.group_id == g.id).count() as u32;
+                let base_url = crate::auth_api::group_base_url(&g.name, &parts.headers, trust);
                 GroupSummary {
                     is_mine: g.owner_id == auth.user_id,
                     owner_id: g.owner_id,
                     id: g.id,
                     name: g.name,
+                    base_url,
                     ttl_seconds: g.ttl_seconds,
                     route_count,
                 }
@@ -506,7 +513,11 @@ impl WmMcpServer {
         match self.state.routes().probe(&args.method, &args.path) {
             MatchProbe::Hit(m) => Ok(Json(FindRouteResult {
                 matched: true,
-                route: Some(RouteRecord::from(&m.route)),
+                route: Some(RouteRecord::build(
+                    &m.route,
+                    &parts.headers,
+                    self.state.trust_forwarded_headers(),
+                )),
                 path_params: Some(m.path_params),
                 near_misses: Vec::new(),
             })),

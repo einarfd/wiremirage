@@ -19,7 +19,8 @@
   <ul class="action-list">
     <li>Transport: <strong>streamable HTTP</strong>.</li>
     <li>Auth: <strong>bearer token</strong> in the <code>Authorization</code> header.</li>
-    <li>Mock traffic from your system-under-test hits your routes directly and needs <strong>no</strong> token — only this control endpoint does.</li>
+    <li>This endpoint (and the whole UI/API) lives on the <strong>apex</strong> — <code>{{ apex_host }}</code> — which is control-plane only.</li>
+    <li>Mock traffic from your system-under-test goes to each group's <strong>own subdomain</strong>, <code>{group}.{{ apex_host }}</code>, and needs <strong>no</strong> token. Every route page shows its full URL; <code>summarize_workspace</code> returns each group's <code>base_url</code>.</li>
   </ul>
 </section>
 

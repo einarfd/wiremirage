@@ -68,6 +68,9 @@ run-web:
       sleep 0.2
     done
     echo "Valkey ready. Starting host ..."
+    echo "  Control plane (UI/API/MCP): http://localhost:8080/__ui/  (log in admin / devpassword)"
+    echo "  Mock traffic is per-group (ADR-0030): http://{group}.localhost:8080/...  "
+    echo "    e.g. curl -H 'Host: my-group.localhost' http://localhost:8080/v1/charges"
     WM_STORAGE=redis://localhost:6379 \
       WM_BOOTSTRAP_TOKEN=wmt_dev_local \
       WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
