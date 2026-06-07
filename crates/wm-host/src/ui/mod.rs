@@ -2727,9 +2727,20 @@ async fn unmatched_index_page(
     auth: AuthContext,
     Query(raw_q): Query<UiUnmatchedQuery>,
 ) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
+    // ADR-0030 SemFLIP: any authed user may view; admin sees every
+    // group's unmatched, a tenant sees only their own groups'.
+    let visible: Option<std::collections::HashSet<String>> = if auth.is_admin {
+        None
+    } else {
+        match state
+            .routes()
+            .registry()
+            .list_groups_by_owner(&auth.user_id)
+        {
+            Ok(groups) => Some(groups.into_iter().map(|g| g.id).collect()),
+            Err(e) => return ui_error_500(&state, &auth, format!("list groups: {e}")),
+        }
+    };
     let method = match nonempty(raw_q.method.as_deref()) {
         Some(m) => match validate_method(&m) {
             Ok(v) => Some(v),
@@ -2752,7 +2763,7 @@ async fn unmatched_index_page(
         before: raw_q.before,
         limit: raw_limit,
     };
-    let raw = match state.journal().list_unmatched(cursor) {
+    let raw = match state.journal().list_unmatched(cursor, visible.as_ref()) {
         Ok(r) => r,
         Err(e) => return ui_error_500(&state, &auth, format!("list unmatched: {e}")),
     };
@@ -2812,13 +2823,19 @@ async fn unmatched_detail_page(
     auth: AuthContext,
     Path(number): Path<u64>,
 ) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
     let record = match state.journal().get_unmatched(number) {
         Ok(r) => r,
         Err(_) => return ui_not_found(&state, &auth, &format!("Unmatched #{number}")),
     };
+    // ADR-0030 SemFLIP: owner-or-admin of the group it was addressed to.
+    let owns = auth.is_admin
+        || matches!(
+            state.routes().registry().read_group_by_ref(&record.group_id),
+            Ok(g) if g.owner_id == auth.user_id
+        );
+    if !owns {
+        return forbidden_page(&state, &auth);
+    }
     let view = UnmatchedDetailView::from_record(&record);
     render(
         &state,
@@ -2834,6 +2851,7 @@ async fn unmatched_detail_page(
 #[derive(Serialize)]
 struct UnmatchedRow {
     number: u64,
+    group: String,
     method: String,
     path: String,
     created_at_iso: String,
@@ -2862,6 +2880,7 @@ impl UnmatchedRow {
         });
         Self {
             number: r.number,
+            group: r.group_name.clone(),
             method: r.request.method.clone(),
             path: r.request.path.clone(),
             created_at_iso: r.created_at.to_rfc3339(),
@@ -2889,6 +2908,7 @@ struct UnmatchedPagination {
 struct UnmatchedDetailView {
     id: String,
     number: u64,
+    group: String,
     method: String,
     path: String,
     created_at_iso: String,
@@ -2923,6 +2943,7 @@ impl UnmatchedDetailView {
         Self {
             id: r.id.clone(),
             number: r.number,
+            group: r.group_name.clone(),
             method: r.request.method.clone(),
             path: r.request.path.clone(),
             created_at_iso: r.created_at.to_rfc3339(),

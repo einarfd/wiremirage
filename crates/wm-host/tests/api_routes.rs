@@ -2806,7 +2806,10 @@ async fn cursor_pagination_round_trips() {
 }
 
 #[tokio::test]
-async fn unmatched_endpoint_is_admin_only() {
+async fn unmatched_endpoint_is_owner_scoped_not_admin_only() {
+    // ADR-0030 SemFLIP: any authed caller may list unmatched; a tenant who
+    // owns no groups gets a 200 with an empty list (not the old admin-only
+    // 403). Positive owner-visibility is covered in ui_unmatched_pages.rs.
     let h = Harness::start().await;
     let (_alice_id, alice) = h.provision_user("alice", false);
     let resp = alice
@@ -2814,7 +2817,13 @@ async fn unmatched_endpoint_is_admin_only() {
         .send()
         .await
         .expect("get");
-    assert_eq!(resp.status().as_u16(), 403);
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["entries"].as_array().map(|a| a.len()),
+        Some(0),
+        "a tenant owning no groups sees no unmatched entries"
+    );
 }
 
 #[tokio::test]
