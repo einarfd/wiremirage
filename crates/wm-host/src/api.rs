@@ -21,7 +21,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
@@ -160,6 +160,10 @@ struct RouteResponse {
     group: GroupRef,
     methods: Vec<String>,
     path: String,
+    /// Full public URL the SUT calls: `{scheme}://{group}.{apex}{path}`
+    /// (ADR-0030 virtual-host routing). The path component is the route's
+    /// pattern verbatim, `{param}` segments and all.
+    url: String,
     language: String,
     bindings_version: String,
     created_at: String,
@@ -175,8 +179,15 @@ struct GroupRef {
     name: String,
 }
 
-impl From<&Route> for RouteResponse {
-    fn from(r: &Route) -> Self {
+impl RouteResponse {
+    /// Build a response, computing the per-group `url` from the request
+    /// headers (the apex these control-plane surfaces are served on).
+    fn build(r: &Route, headers: &HeaderMap, trust_forwarded: bool) -> Self {
+        let url = format!(
+            "{}{}",
+            crate::auth_api::group_base_url(&r.group_name, headers, trust_forwarded),
+            r.path
+        );
         Self {
             id: r.id.clone(),
             number: r.number,
@@ -186,6 +197,7 @@ impl From<&Route> for RouteResponse {
             },
             methods: r.methods.clone(),
             path: r.path.clone(),
+            url,
             language: r.language.clone(),
             bindings_version: r.bindings_version.clone(),
             created_at: r.created_at.to_rfc3339(),
@@ -502,6 +514,7 @@ impl From<RegistryError> for ApiError {
 async fn create_route(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Json(body): Json<CreateRouteBody>,
 ) -> Result<Response, ApiError> {
     let route = create_route_core(&state, &auth, body).await?;
@@ -509,7 +522,8 @@ async fn create_route(
         "/__api/routes/{}",
         render_slug(&route.group_name, route.number)
     );
-    let mut resp = (StatusCode::CREATED, Json(RouteResponse::from(&route))).into_response();
+    let resp_body = RouteResponse::build(&route, &headers, state.trust_forwarded_headers());
+    let mut resp = (StatusCode::CREATED, Json(resp_body)).into_response();
     resp.headers_mut().insert(
         header::LOCATION,
         HeaderValue::try_from(location).expect("ascii location"),
@@ -616,10 +630,16 @@ pub(crate) async fn create_route_core(
 async fn list_routes(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Query(q): Query<RoutesListQuery>,
 ) -> Result<Json<ListRoutesResponse>, ApiError> {
     let paged = list_routes_core(&state, &auth, &q)?;
-    let routes = paged.routes.iter().map(RouteResponse::from).collect();
+    let trust = state.trust_forwarded_headers();
+    let routes = paged
+        .routes
+        .iter()
+        .map(|r| RouteResponse::build(r, &headers, trust))
+        .collect();
     Ok(Json(ListRoutesResponse {
         routes,
         total: paged.total,
@@ -824,23 +844,33 @@ pub(crate) fn slice_for_page<T: Clone>(
 async fn get_route(
     State(state): State<AppState>,
     _auth: AuthContext,
+    headers: HeaderMap,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<RouteResponse>, ApiError> {
     let route = state
         .routes()
         .registry()
         .get_route_by_slug(&group, number)?;
-    Ok(Json(RouteResponse::from(&route)))
+    Ok(Json(RouteResponse::build(
+        &route,
+        &headers,
+        state.trust_forwarded_headers(),
+    )))
 }
 
 async fn patch_route(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Path((group, number)): Path<(String, u32)>,
     Json(body): Json<PatchRouteBody>,
 ) -> Result<Json<RouteResponse>, ApiError> {
     let updated = patch_route_core(&state, &auth, &group, number, body).await?;
-    Ok(Json(RouteResponse::from(&updated)))
+    Ok(Json(RouteResponse::build(
+        &updated,
+        &headers,
+        state.trust_forwarded_headers(),
+    )))
 }
 
 /// Shared PATCH pipeline used by both the REST handler above and the
@@ -2290,6 +2320,7 @@ fn validate_match_query(q: &MatchQuery) -> Result<(), ApiError> {
 async fn match_probe(
     State(state): State<AppState>,
     _auth: AuthContext, // any authenticated user; the route record itself is the only thing returned
+    headers: HeaderMap,
     Query(q): Query<MatchQuery>,
 ) -> Result<Json<MatchResponse>, ApiError> {
     use crate::route_table::{MatchProbe, NearMissReason};
@@ -2299,7 +2330,11 @@ async fn match_probe(
     match state.routes().probe(&q.method, &q.path) {
         MatchProbe::Hit(m) => Ok(Json(MatchResponse::Hit {
             matched: true,
-            route: Box::new(RouteResponse::from(&m.route)),
+            route: Box::new(RouteResponse::build(
+                &m.route,
+                &headers,
+                state.trust_forwarded_headers(),
+            )),
             path_params: m.path_params,
         })),
         MatchProbe::Miss(near) => Ok(Json(MatchResponse::Miss {

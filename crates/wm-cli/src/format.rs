@@ -110,6 +110,9 @@ pub fn render_route(r: &RouteRecord, format: Format) {
             println!("group:            {} ({})", r.group.name, r.group.id);
             println!("methods:          {}", r.methods.join(", "));
             println!("path:             {}", r.path);
+            if let Some(url) = &r.url {
+                println!("url:              {url}");
+            }
             println!("language:         {}", r.language);
             println!("bindings_version: {}", r.bindings_version);
             println!("owner:            {}", r.owner_id);

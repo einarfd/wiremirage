@@ -87,6 +87,11 @@ pub struct RouteRecord {
     pub group: GroupRef,
     pub methods: Vec<String>,
     pub path: String,
+    /// Full public URL the SUT calls: `{scheme}://{group}.{apex}{path}`
+    /// (ADR-0030 virtual-host routing). `#[serde(default)]` keeps the client
+    /// tolerant of responses minted before the field existed.
+    #[serde(default)]
+    pub url: Option<String>,
     pub language: String,
     pub bindings_version: String,
     pub created_at: String,
