@@ -91,9 +91,10 @@ impl RouteTable {
     }
 
     /// Find the first route whose method spec accepts `method` and whose
-    /// pattern matches `path`, searching **all** groups. Used by the
-    /// host-less match probe (`GET /__api/match` / `find_route`); mock
-    /// dispatch uses [`find_match_in_group`] under virtual-host routing.
+    /// pattern matches `path`, searching **all** groups. A host-less
+    /// matching primitive (used by [`probe`] and this module's unit tests);
+    /// production matching is group-scoped ([`find_match_in_group`]) under
+    /// virtual-host routing.
     pub fn find_match(&self, method: &str, path: &str) -> Option<MatchedRoute> {
         self.find_match_filtered(None, method, path)
     }
@@ -143,14 +144,28 @@ impl RouteTable {
         None
     }
 
-    /// Run the match probe: return the actual match if there is one,
-    /// otherwise compute near-misses against the loaded route set.
-    /// Used by `GET /__api/match` and the MCP `find_route` tool.
+    /// Run the match probe across **all** groups: the actual match if any,
+    /// else near-misses against the whole route set. The host-less probe —
+    /// retained as a matching primitive (and exercised by this module's unit
+    /// tests). Production probes are group-scoped ([`probe_in_group`]) under
+    /// ADR-0030, since each subdomain is its own path namespace.
     pub fn probe(&self, method: &str, path: &str) -> MatchProbe {
         if let Some(m) = self.find_match(method, path) {
             return MatchProbe::Hit(Box::new(m));
         }
         MatchProbe::Miss(self.compute_near_misses(method, path))
+    }
+
+    /// Group-scoped match probe (ADR-0030): match + near-misses confined to
+    /// a single group, the per-tenant counterpart to [`probe`]. Backs the
+    /// group-scoped `GET /__api/match` and the MCP `find_route` tool so a
+    /// probe answers "would this match *in my group*?" without leaking other
+    /// tenants' routes.
+    pub fn probe_in_group(&self, group: &str, method: &str, path: &str) -> MatchProbe {
+        if let Some(m) = self.find_match_in_group(group, method, path) {
+            return MatchProbe::Hit(Box::new(m));
+        }
+        MatchProbe::Miss(self.compute_near_misses_in_group(group, method, path))
     }
 
     /// Compute near-misses for `(method, path)` without first checking

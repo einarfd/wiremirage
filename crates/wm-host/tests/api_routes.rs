@@ -3306,17 +3306,24 @@ async fn match_probe_requires_auth() {
 #[tokio::test]
 async fn match_probe_returns_hit_for_matching_route() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["POST"],
-        "path": "/v1/charges/{id}",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges/{id}",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
 
     let resp = h
         .client
-        .get(h.url("/__api/match?method=POST&path=/v1/charges/abc"))
+        .get(h.url(&format!(
+            "/__api/match?group={group}&method=POST&path=/v1/charges/abc"
+        )))
         .send()
         .await
         .expect("get");
@@ -3332,17 +3339,24 @@ async fn match_probe_returns_hit_for_matching_route() {
 #[tokio::test]
 async fn match_probe_returns_method_mismatch_near_miss() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["POST"],
-        "path": "/v1/charges",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"],
+            "path": "/v1/charges",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
 
     let resp = h
         .client
-        .get(h.url("/__api/match?method=GET&path=/v1/charges"))
+        .get(h.url(&format!(
+            "/__api/match?group={group}&method=GET&path=/v1/charges"
+        )))
         .send()
         .await
         .expect("get");
@@ -3366,17 +3380,24 @@ async fn match_probe_returns_method_mismatch_near_miss() {
 #[tokio::test]
 async fn match_probe_returns_prefix_match_near_miss() {
     let h = Harness::start().await;
-    h.create_route_body(json!({
-        "methods": ["GET"],
-        "path": "/v1/charges",
-        "language": "javascript",
-        "source": echo_source(),
-    }))
-    .await;
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/charges",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
 
     let resp = h
         .client
-        .get(h.url("/__api/match?method=GET&path=/v1/charge"))
+        .get(h.url(&format!(
+            "/__api/match?group={group}&method=GET&path=/v1/charge"
+        )))
         .send()
         .await
         .expect("get");
@@ -3388,6 +3409,99 @@ async fn match_probe_returns_prefix_match_near_miss() {
     assert_eq!(near[0]["reason"], "prefix_match");
     assert_eq!(near[0]["details"]["expected"], "charges");
     assert_eq!(near[0]["details"]["got"], "charge");
+}
+
+#[tokio::test]
+async fn match_probe_requires_group() {
+    // ADR-0030: matching is per-subdomain, so the probe must name a group.
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .get(h.url("/__api/match?method=GET&path=/v1/charges"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn match_probe_is_group_scoped() {
+    // Two groups can both define /v1/charges; a probe only sees the
+    // group it names (ADR-0030).
+    let h = Harness::start().await;
+    let a: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"], "path": "/v1/charges",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group_a = a["group"]["name"].as_str().unwrap().to_string();
+    let b: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"], "path": "/v1/charges",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group_b = b["group"]["name"].as_str().unwrap().to_string();
+
+    // POST /v1/charges hits in group A but only method-mismatches in B.
+    let in_a: serde_json::Value = h
+        .client
+        .get(h.url(&format!(
+            "/__api/match?group={group_a}&method=POST&path=/v1/charges"
+        )))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(in_a["matched"], true, "POST matches in group A");
+
+    let in_b: serde_json::Value = h
+        .client
+        .get(h.url(&format!(
+            "/__api/match?group={group_b}&method=POST&path=/v1/charges"
+        )))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(in_b["matched"], false, "POST does not match in group B");
+    assert_eq!(in_b["near_misses"][0]["reason"], "method_mismatch");
+}
+
+#[tokio::test]
+async fn match_probe_forbidden_for_non_owner() {
+    // Probing reveals a group's routes → owner-or-admin only (ADR-0030).
+    let h = Harness::start().await;
+    let create: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["POST"], "path": "/v1/charges",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = create["group"]["name"].as_str().unwrap();
+    let (_alice_id, alice) = h.provision_user("alice", false);
+    let resp = alice
+        .get(h.url(&format!(
+            "/__api/match?group={group}&method=POST&path=/v1/charges"
+        )))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
 }
 
 #[tokio::test]

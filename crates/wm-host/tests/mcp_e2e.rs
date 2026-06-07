@@ -791,6 +791,7 @@ async fn find_route_returns_hit_and_method_mismatch_near_miss() {
             owner_id: "test-owner".into(),
         })
         .expect("create_route");
+    let group = route.group_name.clone();
     h.state.routes().refresh_after_create(route);
 
     let client = DummyClient
@@ -802,7 +803,7 @@ async fn find_route_returns_hit_and_method_mismatch_near_miss() {
     let hit = client
         .call_tool(
             CallToolRequestParams::new("find_route").with_arguments(
-                serde_json::json!({ "method": "POST", "path": "/v1/charges" })
+                serde_json::json!({ "group": group, "method": "POST", "path": "/v1/charges" })
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -821,7 +822,7 @@ async fn find_route_returns_hit_and_method_mismatch_near_miss() {
     let miss = client
         .call_tool(
             CallToolRequestParams::new("find_route").with_arguments(
-                serde_json::json!({ "method": "GET", "path": "/v1/charges" })
+                serde_json::json!({ "group": group, "method": "GET", "path": "/v1/charges" })
                     .as_object()
                     .unwrap()
                     .clone(),

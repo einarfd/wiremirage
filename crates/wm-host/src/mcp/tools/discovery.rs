@@ -117,6 +117,9 @@ pub struct ShowUnmatchedArgs {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FindRouteArgs {
+    /// Group (name or ULID) to probe within. Required: matching is
+    /// per-subdomain under ADR-0030, so a probe names its tenant.
+    pub group: String,
     /// HTTP method (e.g. `GET`, `POST`, `ANY`).
     pub method: String,
     /// Request path (must start with `/`).
@@ -507,17 +510,18 @@ impl WmMcpServer {
 
     #[tool(
         name = "find_route",
-        description = "Probe what would match a hypothetical request: a method + path pair, like an inbound HTTP request. Returns the matching route if there is one, or a list of near-misses (method-mismatch or literal-prefix typos) explaining what almost matched. Reach for this when debugging \"my mock isn't firing\" — it tells you whether any route exists for the request, and if not, the closest candidates."
+        description = "Probe what would match a hypothetical request **within a group**: a method + path pair, like an inbound HTTP request to that group's subdomain. Returns the matching route if there is one, or a list of near-misses (method-mismatch or literal-prefix typos) explaining what almost matched. Reach for this when debugging \"my mock isn't firing\" — it tells you whether any route exists in the group for the request, and if not, the closest candidates. Owner-or-admin of the group (ADR-0030: matching is per-subdomain)."
     )]
     pub async fn find_route(
         &self,
         Extension(parts): Extension<http::request::Parts>,
         Parameters(args): Parameters<FindRouteArgs>,
     ) -> Result<Json<FindRouteResult>, ErrorData> {
-        // Auth: any authenticated user. The match probe is a
-        // read-only diagnostic; the route record itself is the only
-        // thing returned.
-        let _auth = auth_from(&parts)?;
+        // Probing reveals a group's routes, so it's owner-or-admin of the
+        // group being probed (ADR-0030) — not any authenticated user.
+        let auth = auth_from(&parts)?;
+        let group =
+            crate::mcp::context::ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
 
         if args.method.is_empty()
             || !args
@@ -533,7 +537,11 @@ impl WmMcpServer {
             return Err(validation("path must start with /"));
         }
 
-        match self.state.routes().probe(&args.method, &args.path) {
+        match self
+            .state
+            .routes()
+            .probe_in_group(&group.name, &args.method, &args.path)
+        {
             MatchProbe::Hit(m) => Ok(Json(FindRouteResult {
                 matched: true,
                 route: Some(RouteRecord::build(

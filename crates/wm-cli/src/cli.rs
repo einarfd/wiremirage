@@ -66,8 +66,12 @@ pub enum Command {
     /// Manage users (admin-only for cross-user actions).
     #[command(subcommand)]
     Users(UsersCommand),
-    /// Probe what would match a hypothetical request.
+    /// Probe what would match a hypothetical request, within a group.
+    /// Matching is per-subdomain (ADR-0030), so a group is required.
     Match {
+        /// Group (name or ULID) to probe within.
+        #[arg(short, long)]
+        group: String,
         /// HTTP method (e.g. `GET`, `POST`, `ANY`).
         method: String,
         /// Request path (must start with `/`).

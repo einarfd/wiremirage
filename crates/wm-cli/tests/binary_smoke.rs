@@ -206,6 +206,7 @@ async fn wm_match_against_real_host() {
             owner_id: "test-owner".into(),
         })
         .expect("create_route");
+    let group = route.group_name.clone();
     h.state.routes().refresh_after_create(route);
 
     let host = h.host_url.clone();
@@ -214,6 +215,7 @@ async fn wm_match_against_real_host() {
     // Hit case via JSON.
     let host_h = host.clone();
     let token_h = token.clone();
+    let group_h = group.clone();
     let hit = tokio::task::spawn_blocking(move || {
         Command::cargo_bin("wm")
             .expect("locate wm binary")
@@ -224,6 +226,8 @@ async fn wm_match_against_real_host() {
                 &token_h,
                 "--json",
                 "match",
+                "--group",
+                &group_h,
                 "POST",
                 "/v1/charges",
             ])
@@ -240,6 +244,7 @@ async fn wm_match_against_real_host() {
     // Miss case via human format.
     let host_m = host;
     let token_m = token;
+    let group_m = group;
     let miss = tokio::task::spawn_blocking(move || {
         Command::cargo_bin("wm")
             .expect("locate wm binary")
@@ -249,6 +254,8 @@ async fn wm_match_against_real_host() {
                 "--token",
                 &token_m,
                 "match",
+                "--group",
+                &group_m,
                 "GET",
                 "/v1/charges",
             ])

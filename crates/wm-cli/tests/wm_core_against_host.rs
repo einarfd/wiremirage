@@ -230,11 +230,12 @@ async fn match_route_round_trips_hit_and_miss() {
             owner_id: "test-owner".into(),
         })
         .expect("registry create_route");
+    let group = route.group_name.clone();
     h.state.routes().refresh_after_create(route);
 
     // Hit case.
     let hit_resp = client
-        .match_route("POST", "/v1/charges")
+        .match_route(&group, "POST", "/v1/charges")
         .await
         .expect("match POST /v1/charges");
     match hit_resp {
@@ -247,7 +248,7 @@ async fn match_route_round_trips_hit_and_miss() {
 
     // Miss + method mismatch near-miss.
     let miss_resp = client
-        .match_route("GET", "/v1/charges")
+        .match_route(&group, "GET", "/v1/charges")
         .await
         .expect("match GET /v1/charges");
     match miss_resp {
