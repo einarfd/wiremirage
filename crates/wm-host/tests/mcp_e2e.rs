@@ -1069,6 +1069,8 @@ async fn list_recent_unmatched_filters_by_path_pattern() {
             .journal()
             .record_unmatched(wm_host::journal::NewUnmatchedEntry {
                 trace_id: None,
+                group_id: "mock".into(),
+                group_name: "mock".into(),
                 request: wm_host::journal::RequestEnvelope {
                     method: "GET".into(),
                     path: path.into(),
@@ -1116,6 +1118,8 @@ async fn list_recent_unmatched_includes_near_misses_projection() {
         .journal()
         .record_unmatched(wm_host::journal::NewUnmatchedEntry {
             trace_id: None,
+            group_id: "mock".into(),
+            group_name: "mock".into(),
             request: wm_host::journal::RequestEnvelope {
                 method: "GET".into(),
                 path: "/v1/charges".into(),
@@ -1167,6 +1171,8 @@ async fn list_recent_unmatched_emits_empty_near_misses_when_none() {
         .journal()
         .record_unmatched(wm_host::journal::NewUnmatchedEntry {
             trace_id: None,
+            group_id: "mock".into(),
+            group_name: "mock".into(),
             request: wm_host::journal::RequestEnvelope {
                 method: "GET".into(),
                 path: "/totally/unknown".into(),
@@ -1636,6 +1642,8 @@ async fn show_unmatched_returns_full_request_envelope() {
         .journal()
         .record_unmatched(NewUnmatchedEntry {
             trace_id: None,
+            group_id: "mock".into(),
+            group_name: "mock".into(),
             request: RequestEnvelope {
                 method: "POST".into(),
                 path: "/v1/unknown-endpoint".into(),

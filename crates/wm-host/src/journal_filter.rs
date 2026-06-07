@@ -262,6 +262,8 @@ mod tests {
         JournalEvent::Unmatched(Box::new(UnmatchedRecord {
             id: "u".into(),
             number: 1,
+            group_id: "mock".into(),
+            group_name: "mock".into(),
             trace_id: None,
             created_at: Utc::now(),
             request: RequestEnvelope {

@@ -795,6 +795,8 @@ async fn wm_unmatched_list_filters_by_path_pattern() {
             .journal()
             .record_unmatched(wm_host::journal::NewUnmatchedEntry {
                 trace_id: None,
+                group_id: "mock".into(),
+                group_name: "mock".into(),
                 request: wm_host::journal::RequestEnvelope {
                     method: "GET".into(),
                     path: path.into(),

@@ -359,6 +359,8 @@ fn inject_unmatched_with_near_miss(h: &Harness, method: &str, path: &str) {
         .journal()
         .record_unmatched(NewUnmatchedEntry {
             trace_id: None,
+            group_id: "mock".into(),
+            group_name: "mock".into(),
             request: RequestEnvelope {
                 method: method.into(),
                 path: path.into(),

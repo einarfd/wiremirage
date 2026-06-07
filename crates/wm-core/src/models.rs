@@ -362,6 +362,13 @@ pub struct ListJournalResponse {
 pub struct UnmatchedRecord {
     pub id: String,
     pub number: u64,
+    /// The group the request was addressed to (`{group}.{apex}`,
+    /// ADR-0030). `#[serde(default)]` for tolerance of records minted
+    /// before group attribution existed.
+    #[serde(default)]
+    pub group_id: String,
+    #[serde(default)]
+    pub group_name: String,
     pub trace_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub request: RequestEnvelope,
