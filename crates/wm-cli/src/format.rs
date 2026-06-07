@@ -236,19 +236,20 @@ pub fn render_unmatched_list(list: &ListUnmatchedResponse, format: Format) {
                 println!("(no unmatched entries)");
                 return;
             }
-            let rows: Vec<[String; 4]> = list
+            let rows: Vec<[String; 5]> = list
                 .entries
                 .iter()
                 .map(|e| {
                     [
                         e.number.to_string(),
+                        e.group_name.clone(),
                         e.request.method.clone(),
                         e.request.path.clone(),
                         e.created_at.to_rfc3339(),
                     ]
                 })
                 .collect();
-            print_table(&["NUMBER", "METHOD", "PATH", "WHEN"], &rows);
+            print_table(&["NUMBER", "GROUP", "METHOD", "PATH", "WHEN"], &rows);
             if let Some(b) = list.next_before {
                 println!("\n(next page: --before={b})");
             }
@@ -261,6 +262,7 @@ pub fn render_unmatched_entry(u: &UnmatchedRecord, format: Format) {
         Format::Json => print_json(u),
         Format::Human => {
             println!("number:     {}", u.number);
+            println!("group:      {}", u.group_name);
             println!("trace_id:   {}", u.trace_id.as_deref().unwrap_or("-"));
             println!("when:       {}", u.created_at);
             println!(

@@ -1560,6 +1560,41 @@ fn caller_can_read_journal(
     Ok(owned.iter().any(|r| r.group_id == group_id))
 }
 
+/// Groups whose unmatched records the caller may see (ADR-0030 SemFLIP).
+/// `None` = admin (the cross-group view); `Some(set)` = the group IDs the
+/// caller owns. Unmatched visibility is keyed on **group ownership** (not
+/// route ownership like the matched journal), so a group with zero routes
+/// is still visible to its owner — exactly the case where all of a group's
+/// traffic is unmatched.
+fn unmatched_visible_groups(
+    state: &AppState,
+    auth: &AuthContext,
+) -> Result<Option<std::collections::HashSet<String>>, ApiError> {
+    if auth.is_admin {
+        return Ok(None);
+    }
+    let set = state
+        .routes()
+        .registry()
+        .list_groups_by_owner(&auth.user_id)?
+        .into_iter()
+        .map(|g| g.id)
+        .collect();
+    Ok(Some(set))
+}
+
+/// Whether the caller may read a single unmatched record attributed to
+/// `group_id` — admin, or the group's owner.
+fn caller_owns_unmatched(state: &AppState, auth: &AuthContext, group_id: &str) -> bool {
+    if auth.is_admin {
+        return true;
+    }
+    matches!(
+        state.routes().registry().read_group_by_ref(group_id),
+        Ok(g) if g.owner_id == auth.user_id
+    )
+}
+
 async fn list_journal(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -1688,7 +1723,9 @@ async fn list_unmatched(
     auth: AuthContext,
     Query(q): Query<UnmatchedListQuery>,
 ) -> Result<Json<ListUnmatchedResponse>, ApiError> {
-    require_admin(&auth)?;
+    // ADR-0030 SemFLIP: any authed caller may list; admin sees every
+    // group's unmatched, a tenant sees only their own groups'.
+    let visible = unmatched_visible_groups(&state, &auth)?;
     let filter = build_journal_filter_from_query(
         None,
         None,
@@ -1707,7 +1744,7 @@ async fn list_unmatched(
         before: q.before,
         limit: q.limit.unwrap_or(100),
     };
-    let entries = state.journal().list_unmatched(cursor)?;
+    let entries = state.journal().list_unmatched(cursor, visible.as_ref())?;
     let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
     let entries = if any_filter {
         entries
@@ -1728,8 +1765,12 @@ async fn get_unmatched_entry(
     auth: AuthContext,
     Path(number): Path<u64>,
 ) -> Result<Json<UnmatchedRecord>, ApiError> {
-    require_admin(&auth)?;
     let entry = state.journal().get_unmatched(number)?;
+    if !caller_owns_unmatched(&state, &auth, &entry.group_id) {
+        return Err(ApiError::forbidden(
+            "must be an admin or own this group to read its unmatched requests",
+        ));
+    }
     Ok(Json(entry))
 }
 

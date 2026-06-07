@@ -7,7 +7,9 @@
 //!   * Filter by path_pattern (glob) narrows the list
 //!   * Cursor pagination via `?before=` exposes the next page
 //!   * Detail page at /__ui/unmatched/{n} renders the request envelope
-//!   * Non-admin gets 403 on both pages
+//!   * ADR-0030 SemFLIP visibility: the index is owner-scoped (a tenant
+//!     sees only their own groups' unmatched; admin sees all), and the
+//!     detail page is owner-or-admin (non-owner → 403)
 //!   * Detail 404 for an unknown number
 
 use std::sync::Arc;
@@ -131,12 +133,16 @@ fn extract_csrf_value(body: &str) -> Option<String> {
 /// Drive a request at a path that doesn't match any route, which causes
 /// the dispatcher to record an unmatched-journal entry.
 async fn record_unmatched(h: &Harness, client: &Client, method: &str, path: &str) {
-    // Target the seeded `mock` group's subdomain so the dispatcher records
-    // an unmatched entry (a known group, no matching route) rather than
-    // 404ing as an unknown host (ADR-0030). The apex is `localhost` in tests.
+    record_unmatched_in(h, client, "mock", method, path).await;
+}
+
+/// Like `record_unmatched` but targets an arbitrary group's subdomain, so a
+/// test can attribute unmatched traffic to a group owned by a specific user
+/// (ADR-0030 SemFLIP visibility). The apex is `localhost` in tests.
+async fn record_unmatched_in(h: &Harness, client: &Client, group: &str, method: &str, path: &str) {
     let resp = client
         .request(method.parse().unwrap(), url(h, path))
-        .header(reqwest::header::HOST, "mock.localhost")
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
         .body("body")
         .send()
         .await
@@ -281,9 +287,14 @@ async fn unmatched_index_pagination_exposes_next_page() {
 }
 
 #[tokio::test]
-async fn unmatched_index_non_admin_is_forbidden() {
+async fn unmatched_index_scoped_to_owned_groups() {
+    // ADR-0030 SemFLIP: a non-admin may view the page, but sees only their
+    // own groups' unmatched. `mock` is admin-owned (see start()), so alice —
+    // who owns nothing — gets a 200 with none of mock's entries.
     let h = start().await;
     let client = no_redirect_client();
+    record_unmatched(&h, &client, "GET", "/v1/admin-only-thing").await;
+
     let cookie = login_cookie(&h, &client, "alice").await;
     let resp = client
         .get(url(&h, "/__ui/unmatched"))
@@ -291,7 +302,61 @@ async fn unmatched_index_non_admin_is_forbidden() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 403);
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("/v1/admin-only-thing"),
+        "alice must not see admin's group unmatched: {body}"
+    );
+    assert!(
+        body.contains("No unmatched requests"),
+        "empty for a tenant that owns no groups: {body}"
+    );
+}
+
+#[tokio::test]
+async fn unmatched_index_owner_sees_their_group() {
+    // The flip side: a non-admin who owns a group sees that group's unmatched.
+    let h = start().await;
+    let client = no_redirect_client();
+    // Owner must be alice's real user id (a ULID minted by create_user /
+    // upsert_local_user), not the literal "alice".
+    let alice_id = h
+        .state
+        .auth()
+        .get_user_by_name("alice")
+        .expect("query alice")
+        .expect("alice exists")
+        .id;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "alice-grp".into(),
+            owner_id: alice_id,
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("alice group");
+    record_unmatched_in(&h, &client, "alice-grp", "GET", "/v1/alice-thing").await;
+
+    let cookie = login_cookie(&h, &client, "alice").await;
+    let body = client
+        .get(url(&h, "/__ui/unmatched"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // Paths render with `/` HTML-escaped to `&#x2f;`, so match a slash-free
+    // fragment.
+    assert!(
+        body.contains("alice-thing"),
+        "owner sees their group's unmatched: {body}"
+    );
+    assert!(body.contains("alice-grp"), "group shown in the row: {body}");
 }
 
 // -- Detail page ------------------------------------------------------------

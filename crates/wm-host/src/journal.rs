@@ -484,9 +484,17 @@ impl Journal {
         self.read_unmatched_by_id(&mut bucket, &id)
     }
 
+    /// List recent unmatched records, newest-first, with cursor
+    /// pagination. `visible_groups` scopes by attribution (ADR-0030
+    /// SemFLIP): `None` returns every record (admin cross-group view);
+    /// `Some(set)` returns only records whose `group_id` is in the set
+    /// (a tenant seeing their own groups' unmatched). Filtering happens
+    /// inside the descending scan so a page still fills to `limit` from
+    /// visible records.
     pub fn list_unmatched(
         &self,
         cursor: UnmatchedCursor,
+        visible_groups: Option<&std::collections::HashSet<String>>,
     ) -> Result<Vec<UnmatchedRecord>, JournalError> {
         let mut bucket = self.bucket()?;
         let highest = bucket
@@ -509,7 +517,13 @@ impl Journal {
         let mut n = starting;
         while out.len() < limit && n > 0 {
             if let Ok(record) = self.get_unmatched_via_bucket(&mut bucket, n) {
-                out.push(record);
+                let visible = match visible_groups {
+                    None => true,
+                    Some(set) => set.contains(&record.group_id),
+                };
+                if visible {
+                    out.push(record);
+                }
             }
             n = n.saturating_sub(1);
         }
@@ -746,20 +760,26 @@ mod tests {
             .unwrap();
         }
         let page = j
-            .list_unmatched(UnmatchedCursor {
-                before: None,
-                limit: 2,
-            })
+            .list_unmatched(
+                UnmatchedCursor {
+                    before: None,
+                    limit: 2,
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(
             page.iter().map(|r| r.number).collect::<Vec<_>>(),
             vec![4, 3]
         );
         let next = j
-            .list_unmatched(UnmatchedCursor {
-                before: Some(3),
-                limit: 5,
-            })
+            .list_unmatched(
+                UnmatchedCursor {
+                    before: Some(3),
+                    limit: 5,
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(
             next.iter().map(|r| r.number).collect::<Vec<_>>(),

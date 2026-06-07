@@ -368,8 +368,10 @@ async fn admin_only_stubs_are_forbidden_for_non_admin() {
     let cookie = format!("wm_csrf={csrf_cookie}; wm_session={session_cookie}");
 
     // Admin-only stubs should return 403 (rendered through the same
-    // placeholder template but with `Forbidden` title).
-    for path in ["/__ui/unmatched", "/__ui/settings", "/__ui/admin/health"] {
+    // placeholder template but with `Forbidden` title). `/__ui/unmatched`
+    // is no longer here: ADR-0030 made it owner-scoped (a non-admin gets a
+    // 200 with only their own groups' entries) — see ui_unmatched_pages.rs.
+    for path in ["/__ui/settings", "/__ui/admin/health"] {
         let resp = client
             .get(url(&h, path))
             .header("cookie", &cookie)

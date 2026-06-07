@@ -306,10 +306,13 @@ async fn dry_run_does_not_persist_state_or_write_journal() {
     let unmatched = h
         .state
         .journal()
-        .list_unmatched(UnmatchedCursor {
-            before: None,
-            limit: 100,
-        })
+        .list_unmatched(
+            UnmatchedCursor {
+                before: None,
+                limit: 100,
+            },
+            None,
+        )
         .expect("unmatched");
     assert!(unmatched.is_empty(), "no unmatched entries: {unmatched:?}");
 }

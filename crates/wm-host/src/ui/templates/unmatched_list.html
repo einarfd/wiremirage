@@ -48,6 +48,7 @@
     <li class="stack">
       <header class="inline">
         <code class="text-muted"><time datetime="{{ e.created_at_iso }}">{{ e.created_at_short }}</time></code>
+        <span class="text-muted">{{ e.group }}</span>
         <strong>{{ e.method }} <code>{{ e.path }}</code></strong>
         <span class="text-muted">#{{ e.number }}</span>
       </header>

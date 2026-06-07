@@ -95,6 +95,8 @@ pub struct ListRecentUnmatchedResult {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnmatchedSummary {
     pub number: u64,
+    /// The group (subdomain) the request was addressed to (ADR-0030).
+    pub group: String,
     pub method: String,
     pub path: String,
     pub created_at: String,
@@ -265,7 +267,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "list_recent_unmatched",
-        description = "List recent unmatched-request entries — requests that arrived at the host but didn't match any route. Use this when the SUT seems to be hitting WireMirage but the mock isn't firing. Cursor-paginated (`before` / `limit`). Optional filters: `method`, `path_pattern` glob, `since`/`until` against `created_at`. Admin-only."
+        description = "List recent unmatched-request entries — requests that arrived at a group's subdomain but didn't match any route in it. Use this when the SUT seems to be hitting WireMirage but the mock isn't firing. Cursor-paginated (`before` / `limit`). Optional filters: `method`, `path_pattern` glob, `since`/`until` against `created_at`. Owner-or-admin: a tenant sees their own groups' unmatched; admin sees all."
     )]
     pub async fn list_recent_unmatched(
         &self,
@@ -273,9 +275,22 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListRecentUnmatchedArgs>,
     ) -> Result<Json<ListRecentUnmatchedResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        if !auth.is_admin {
-            return Err(forbidden("admin-only"));
-        }
+        // ADR-0030 SemFLIP: admin sees every group's unmatched; a tenant
+        // sees only records attributed to a group they own.
+        let visible: Option<std::collections::HashSet<String>> = if auth.is_admin {
+            None
+        } else {
+            Some(
+                self.state
+                    .routes()
+                    .registry()
+                    .list_groups_by_owner(&auth.user_id)
+                    .map_err(map_registry_error)?
+                    .into_iter()
+                    .map(|g| g.id)
+                    .collect(),
+            )
+        };
         let method = args
             .method
             .as_deref()
@@ -304,7 +319,7 @@ impl WmMcpServer {
         let records = self
             .state
             .journal()
-            .list_unmatched(cursor)
+            .list_unmatched(cursor, visible.as_ref())
             .map_err(map_journal_error)?;
         let next_before = records.last().filter(|e| e.number > 1).map(|e| e.number);
 
@@ -340,6 +355,7 @@ impl WmMcpServer {
             })
             .map(|r| UnmatchedSummary {
                 number: r.number,
+                group: r.group_name,
                 method: r.request.method,
                 path: r.request.path,
                 created_at: r.created_at.to_rfc3339(),
@@ -355,7 +371,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "show_unmatched",
-        description = "Fetch one unmatched-request entry in full by its `number` — the complete captured request the SUT sent to a path no route matched: method, path, all headers, and the body (UTF-8 string, or { \"base64\": \"...\" } for binary). `list_recent_unmatched` returns only a summary (method + path + near-misses); reach for this to see exactly what an SDK posted so you can build the matching mock. The unmatched journal is the discovery surface: a request hits an undefined path, lands here with its full envelope, and you register the real route from what you see. Admin-only."
+        description = "Fetch one unmatched-request entry in full by its `number` — the complete captured request the SUT sent to a path no route matched: method, path, all headers, and the body (UTF-8 string, or { \"base64\": \"...\" } for binary). `list_recent_unmatched` returns only a summary (group + method + path + near-misses); reach for this to see exactly what an SDK posted so you can build the matching mock. The unmatched journal is the discovery surface: a request hits an undefined path, lands here with its full envelope, and you register the real route from what you see. Owner-or-admin of the group the request was addressed to."
     )]
     pub async fn show_unmatched(
         &self,
@@ -363,14 +379,21 @@ impl WmMcpServer {
         Parameters(args): Parameters<ShowUnmatchedArgs>,
     ) -> Result<Json<UnmatchedRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
-        if !auth.is_admin {
-            return Err(forbidden("admin-only"));
-        }
         let record = self
             .state
             .journal()
             .get_unmatched(args.number)
             .map_err(map_journal_error)?;
+        let owns = auth.is_admin
+            || matches!(
+                self.state.routes().registry().read_group_by_ref(&record.group_id),
+                Ok(g) if g.owner_id == auth.user_id
+            );
+        if !owns {
+            return Err(forbidden(
+                "must be an admin or own this group to read its unmatched requests",
+            ));
+        }
         Ok(Json(record))
     }
 
