@@ -922,6 +922,9 @@ struct GroupDetailRouteRow {
 
 #[derive(serde::Deserialize)]
 struct EditGroupForm {
+    /// New name (DNS label). Empty/missing/unchanged leaves the name as-is;
+    /// a change rewrites the group's subdomain (ADR-0030).
+    name: Option<String>,
     /// New TTL in seconds. Empty/missing leaves the existing value.
     ttl_seconds: Option<String>,
     /// "on" when checked; absent when unchecked (HTML form quirk).
@@ -956,6 +959,25 @@ async fn group_edit_form(
         Ok(g) => g,
         Err(resp) => return *resp,
     };
+    // Rename first (rewrites the by-name index + route slugs + the served
+    // subdomain), mirroring MCP `update_group`. Skip when unchanged/blank.
+    let mut final_name = group.name.clone();
+    if let Some(new_name) = form
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != group.name)
+    {
+        match state.routes().registry().rename_group(&group.id, new_name) {
+            Ok(renamed) => {
+                state
+                    .routes()
+                    .refresh_after_group_rename(&group.id, &renamed.name);
+                final_name = renamed.name;
+            }
+            Err(e) => return ui_error_400_text(&state, &auth, &format!("rename: {e}")),
+        }
+    }
     let ttl_seconds = match form.ttl_seconds.as_deref().map(str::trim) {
         Some("") | None => None,
         Some(s) => match s.parse::<u64>() {
@@ -993,7 +1015,7 @@ async fn group_edit_form(
     {
         return ui_error_500(&state, &auth, format!("edit: {e}"));
     }
-    axum::response::Redirect::to(&format!("/__ui/groups/{}", group.name)).into_response()
+    axum::response::Redirect::to(&format!("/__ui/groups/{final_name}")).into_response()
 }
 
 async fn group_delete_form(

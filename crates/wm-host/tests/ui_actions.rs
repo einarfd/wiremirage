@@ -223,6 +223,71 @@ async fn edit_ttl_persists_new_ttl_and_sliding_flag() {
 }
 
 #[tokio::test]
+async fn edit_renames_group_and_redirects_to_new_subdomain() {
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+
+    let resp = client
+        .post(url(&h, "/__ui/groups/stripe-mock/edit"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&name=stripe-renamed&ttl_seconds=86400"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/__ui/groups/stripe-renamed"
+    );
+
+    // The new subdomain resolves; the old name is gone (the group moved).
+    let new = client
+        .get(url(&h, "/__ui/groups/stripe-renamed"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(new.status().as_u16(), 200);
+    let old = client
+        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn edit_rejects_invalid_rename() {
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+
+    let resp = client
+        .post(url(&h, "/__ui/groups/stripe-mock/edit"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        // Uppercase + underscore is not a valid DNS label.
+        .body(format!("_csrf={csrf}&name=Bad_Name&ttl_seconds=86400"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    // The failed rename left the group untouched.
+    let still = client
+        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(still.status().as_u16(), 200);
+}
+
+#[tokio::test]
 async fn edit_ttl_rejects_zero_or_garbage() {
     let (h, _, _) = start_seeded().await;
     let client = no_redirect_client();
