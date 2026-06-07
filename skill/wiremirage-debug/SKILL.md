@@ -14,11 +14,16 @@ The first move in almost every case is to check the journal — it tells you whe
 Two cases: the request reached the host but didn't match a route, or it never reached the host at all.
 
 ```sh
-# What would the host actually do with this request?
-wm match POST /v1/charges
+# What would the host actually do with this request, in this group?
+wm match -g stripe-mock POST /v1/charges
 ```
 
-`wm match` is the fastest way to narrow this down. If it prints `matched stripe-mock/3 (POST /v1/charges)` then the routing is fine and the question is whether the request actually reaches the host. If it prints `no match. near-misses: ...` the response tells you why — the most common shapes:
+`wm match` is the fastest way to narrow this down. Matching is per-group
+(each group is its own subdomain `{group}.{host}` and its own path space),
+so the probe takes a `--group`/`-g`. If it prints `matched stripe-mock/3
+(POST /v1/charges)` then the routing is fine and the question is whether the
+request actually reaches the host. If it prints `no match. near-misses: ...`
+the response tells you why — the most common shapes:
 
 - `method_mismatch` — the path is right but you're sending GET when the route expects POST (or vice versa). Check the SUT.
 - `prefix_match` — there's a route at `/v1/charges` and you're hitting `/v1/charge`, or you have a typo in either direction. Fix the path.
@@ -32,10 +37,11 @@ To confirm whether the request actually reached WireMirage:
 wm journal list <group> --limit 5
 ```
 
-For unmatched-traffic inspection, the host's unmatched log is admin-only:
+For unmatched-traffic inspection, the unmatched log shows the unmatched
+requests for groups you own (an admin sees every group's):
 
 ```sh
-wm unmatched list                           # most recent first, cursor-paginated
+wm unmatched list                           # your groups', most recent first
 wm unmatched list --path-pattern '/v1/*'    # narrow by path
 wm unmatched show <n>                       # full record: headers, body, near-misses
 ```
@@ -44,17 +50,21 @@ Each entry has the request method, path, headers, body, and — if any route was
 
 ## "My route exists but doesn't fire"
 
-Three common causes: the group expired, another route in another group is winning, or your method/path pattern is wrong.
+Two common causes: the group expired, or your method/path pattern is wrong.
+(Under virtual-host routing each group is an isolated path space, so a route
+in *another* group can never win this group's traffic — that whole class of
+cross-group collision is gone.)
 
 ```sh
-# What does the host actually match for the request the SUT is making?
-wm match <method> <path>
+# What does the host actually match for the request the SUT is making,
+# in this group?
+wm match -g <group> <method> <path>
 
 # Check the group's expiry. If it's gone, the routes went with it.
 wm groups show <group>
 
 # If the group is alive, list its routes and confirm yours is there.
-wm routes list
+wm routes list --group <group>
 
 # Read the route's method/path verbatim and compare to what the SUT
 # is actually sending. The journal entry's `request` field has the
@@ -62,7 +72,11 @@ wm routes list
 wm routes show <group>/<n>
 ```
 
-`wm match` is especially useful here: it scans every route the host knows about (across all groups), so if some other group's route is winning, the slug in the result will say so. Path-pattern conflicts surface as 409 errors at create time, but recently-deleted-and-recreated routes can leave a previous owner's route holding the path until full cleanup completes.
+`wm match -g <group>` is especially useful here: it probes only that group's
+routes, so the slug in a `matched …` result confirms exactly which of your
+routes wins. Within a group, path-pattern conflicts surface as 409 errors at
+create time; a recently-deleted-and-recreated route can briefly leave the
+prior route holding the path until cleanup completes.
 
 ## "My handler returned a 500 / the response shape is wrong"
 
@@ -82,7 +96,7 @@ wm routes test stripe-mock/1 --method POST --body '{"x":1}'
 wm routes test stripe-mock/1 --kv counter=4   # seed state for this run
 ```
 
-`wm match METHOD PATH` is the lighter-weight probe — it confirms the route would be *selected* without running the handler. Use it for "did my path pattern match" questions; use `routes test` for "did my handler produce the right response."
+`wm match -g GROUP METHOD PATH` is the lighter-weight probe — it confirms the route would be *selected* without running the handler. Use it for "did my path pattern match" questions; use `routes test` for "did my handler produce the right response."
 
 ## "State isn't persisting between requests"
 

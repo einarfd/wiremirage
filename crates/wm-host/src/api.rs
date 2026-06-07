@@ -2305,6 +2305,9 @@ async fn tail_journal(
 
 #[derive(Debug, Deserialize)]
 struct MatchQuery {
+    /// Group (name or ULID) to probe within. Required under ADR-0030:
+    /// matching is per-subdomain, so a probe must name its tenant.
+    group: Option<String>,
     method: String,
     path: String,
 }
@@ -2355,12 +2358,17 @@ fn validate_match_query(q: &MatchQuery) -> Result<(), ApiError> {
     if !q.path.starts_with('/') {
         return Err(ApiError::validation("path must start with /"));
     }
+    if q.group.as_deref().unwrap_or("").is_empty() {
+        return Err(ApiError::validation(
+            "group is required (matching is per-subdomain; ADR-0030)",
+        ));
+    }
     Ok(())
 }
 
 async fn match_probe(
     State(state): State<AppState>,
-    _auth: AuthContext, // any authenticated user; the route record itself is the only thing returned
+    auth: AuthContext,
     headers: HeaderMap,
     Query(q): Query<MatchQuery>,
 ) -> Result<Json<MatchResponse>, ApiError> {
@@ -2368,7 +2376,22 @@ async fn match_probe(
 
     validate_match_query(&q)?;
 
-    match state.routes().probe(&q.method, &q.path) {
+    // Resolve + gate on the group: probing reveals routes, so it's
+    // owner-or-admin of the group being probed (ADR-0030).
+    let group_ref = q.group.as_deref().unwrap_or_default();
+    let group = state
+        .routes()
+        .registry()
+        .read_group_by_ref(group_ref)
+        .map_err(|_| ApiError::not_found())?;
+    if !auth.is_admin && group.owner_id != auth.user_id {
+        return Err(ApiError::forbidden("must be the group's owner or an admin"));
+    }
+
+    match state
+        .routes()
+        .probe_in_group(&group.name, &q.method, &q.path)
+    {
         MatchProbe::Hit(m) => Ok(Json(MatchResponse::Hit {
             matched: true,
             route: Box::new(RouteResponse::build(

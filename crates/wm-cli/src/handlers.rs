@@ -79,7 +79,11 @@ pub async fn dispatch(
         Command::Unmatched(cmd) => handle_unmatched(&client, cmd, format).await,
         Command::Tokens(cmd) => handle_tokens(&client, cmd, format).await,
         Command::Users(cmd) => handle_users(&client, cmd, format).await,
-        Command::Match { method, path } => handle_match(&client, &method, &path, format).await,
+        Command::Match {
+            group,
+            method,
+            path,
+        } => handle_match(&client, &group, &method, &path, format).await,
         Command::Capabilities { topic } => {
             handle_capabilities(&client, topic.as_deref(), format).await
         }
@@ -971,11 +975,12 @@ fn handle_completion(shell: clap_complete::Shell) {
 
 async fn handle_match(
     client: &Client,
+    group: &str,
     method: &str,
     path: &str,
     format: Format,
 ) -> Result<(), ClientError> {
-    let resp = client.match_route(method, path).await?;
+    let resp = client.match_route(group, method, path).await?;
     format::render_match(&resp, format);
     Ok(())
 }

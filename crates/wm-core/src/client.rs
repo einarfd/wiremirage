@@ -552,11 +552,13 @@ impl Client {
     /// list of near-misses (`MatchResponse::Miss`).
     pub async fn match_route(
         &self,
+        group: &str,
         method: &str,
         path: &str,
     ) -> Result<crate::models::MatchResponse, ClientError> {
         let qs = format!(
-            "/__api/match?method={}&path={}",
+            "/__api/match?group={}&method={}&path={}",
+            urlencode(group),
             urlencode(method),
             urlencode(path),
         );
