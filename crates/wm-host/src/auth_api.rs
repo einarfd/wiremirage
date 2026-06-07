@@ -565,6 +565,21 @@ pub(crate) fn public_base_url(headers: &HeaderMap, trust_forwarded: bool) -> Str
     format!("{scheme}://{host}")
 }
 
+/// The public base URL for a group's mock traffic: `{scheme}://{group}.{apex}`
+/// (ADR-0030 virtual-host routing). Mock traffic is served on per-group
+/// subdomains; the apex — where this control-plane request lands — serves
+/// control-plane only. These callers are apex-only surfaces, so the request
+/// `Host` *is* the apex; we reuse [`public_base_url`]'s scheme/host derivation
+/// (which also carries the dev port, e.g. `localhost:8080`) and prefix the
+/// group's DNS label. No trailing slash; append the route path to taste.
+pub(crate) fn group_base_url(group: &str, headers: &HeaderMap, trust_forwarded: bool) -> String {
+    let base = public_base_url(headers, trust_forwarded);
+    match base.split_once("://") {
+        Some((scheme, host)) => format!("{scheme}://{group}.{host}"),
+        None => format!("{group}.{base}"),
+    }
+}
+
 fn derive_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
     format!(
         "{}/__auth/callback",
