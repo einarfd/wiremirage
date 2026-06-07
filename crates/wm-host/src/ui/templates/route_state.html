@@ -65,6 +65,24 @@
   {% endif %}
 </section>
 
+<section class="card">
+  <header class="card__header"><h2>Set keys</h2></header>
+  <p class="text-muted">
+    Upsert this route's private (<code>kv:</code>) entries — one
+    <code>key=value</code> per line. Values are stored as UTF-8 text; existing
+    keys are overwritten, others left untouched. (For binary values, use the
+    CLI/MCP, which accept base64.)
+  </p>
+  <form method="post" action="/__ui/routes/{{ group_name }}/{{ route_number }}/state/set">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <textarea name="keys" rows="6" class="source-editor"
+              placeholder="counter=4&#10;seeded=true"></textarea>
+    <div class="action-row">
+      <button type="submit" class="btn btn--primary">Set keys</button>
+    </div>
+  </form>
+</section>
+
 <footer class="page-footer">
   <a class="link" href="/__ui/routes/{{ group_name }}/{{ route_number }}">&larr; Back to {{ route_methods }} {{ route_path }}</a>
 </footer>

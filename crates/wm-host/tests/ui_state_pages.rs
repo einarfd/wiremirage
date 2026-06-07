@@ -163,6 +163,86 @@ async fn route_state_empty_on_a_route_that_never_ran() {
 }
 
 #[tokio::test]
+async fn set_group_state_via_form_persists() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+
+    // `mode=slow\nrate=10`, URL-encoded.
+    let resp = client
+        .post(url(&h, "/__ui/groups/counter-demo/state/set"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&keys=mode%3Dslow%0Arate%3D10"))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+
+    let body = client
+        .get(url(&h, "/__ui/groups/counter-demo/state"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("mode") && body.contains("slow"),
+        "set key shown: {body}"
+    );
+    assert!(body.contains("rate"));
+}
+
+#[tokio::test]
+async fn set_route_state_via_form_persists() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+
+    let resp = client
+        .post(url(&h, "/__ui/routes/counter-demo/1/state/set"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&keys=seeded%3Dyes"))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+
+    let body = client
+        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("seeded") && body.contains("yes"),
+        "set key shown: {body}"
+    );
+}
+
+#[tokio::test]
+async fn set_state_rejects_form_without_kv() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let resp = client
+        .post(url(&h, "/__ui/groups/counter-demo/state/set"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&keys=not-a-kv-line"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
 async fn route_state_lists_entries_after_dispatch() {
     let h = start().await;
     let client = no_redirect_client();

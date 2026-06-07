@@ -127,6 +127,10 @@ pub fn router(state: AppState) -> Router {
             "/__ui/groups/{group}/state",
             get(group_state_page).post(group_state_clear_form),
         )
+        .route(
+            "/__ui/groups/{group}/state/set",
+            axum::routing::post(group_state_set_form),
+        )
         .route("/__ui/routes", get(routes_list_page))
         .route(
             "/__ui/routes/new",
@@ -140,6 +144,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/__ui/routes/{group}/{number}/state",
             get(route_state_page).post(route_state_clear_form),
+        )
+        .route(
+            "/__ui/routes/{group}/{number}/state/set",
+            axum::routing::post(route_state_set_form),
         )
         .route(
             "/__ui/routes/{group}/{number}/dry-run",
@@ -1800,6 +1808,98 @@ async fn route_state_clear_form(
         .clear_route_state(&group_ref, number)
     {
         return ui_error_500(&state, &auth, format!("clear: {e}"));
+    }
+    axum::response::Redirect::to(&format!(
+        "/__ui/routes/{}/{}/state",
+        route.group_name, number
+    ))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct SetStateForm {
+    #[serde(rename = "_csrf")]
+    _csrf: Option<String>,
+    /// `key=value` lines; values stored as UTF-8 bytes. The CLI/MCP
+    /// surfaces also accept base64 for binary — the UI form is text-only.
+    keys: String,
+}
+
+/// Parse a `key=value`-per-line textarea into state entries (UTF-8 byte
+/// values). Returns a human error for an empty form or a line without `=`.
+fn parse_state_kv_lines(raw: &str) -> Result<std::collections::HashMap<String, Vec<u8>>, String> {
+    let mut entries = std::collections::HashMap::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| format!("line {}: expected key=value", i + 1))?;
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!("line {}: empty key", i + 1));
+        }
+        entries.insert(key.to_string(), value.as_bytes().to_vec());
+    }
+    if entries.is_empty() {
+        return Err("no key=value lines provided".into());
+    }
+    Ok(entries)
+}
+
+async fn group_state_set_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    axum::Form(form): axum::Form<SetStateForm>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    let entries = match parse_state_kv_lines(&form.keys) {
+        Ok(e) => e,
+        Err(msg) => return ui_error_400_text(&state, &auth, &msg),
+    };
+    if let Err(e) = state
+        .routes()
+        .registry()
+        .set_group_state(&group.id, entries)
+    {
+        return ui_error_500(&state, &auth, format!("set: {e}"));
+    }
+    axum::response::Redirect::to(&format!("/__ui/groups/{}/state", group.name)).into_response()
+}
+
+async fn route_state_set_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group_ref, number)): Path<(String, u32)>,
+    axum::Form(form): axum::Form<SetStateForm>,
+) -> Response {
+    let route = match state
+        .routes()
+        .registry()
+        .get_route_by_slug(&group_ref, number)
+    {
+        Ok(r) => r,
+        Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
+    };
+    if !auth.is_admin && route.owner_id != auth.user_id {
+        return forbidden_page(&state, &auth);
+    }
+    let entries = match parse_state_kv_lines(&form.keys) {
+        Ok(e) => e,
+        Err(msg) => return ui_error_400_text(&state, &auth, &msg),
+    };
+    if let Err(e) = state
+        .routes()
+        .registry()
+        .set_route_state(&group_ref, number, entries)
+    {
+        return ui_error_500(&state, &auth, format!("set: {e}"));
     }
     axum::response::Redirect::to(&format!(
         "/__ui/routes/{}/{}/state",
