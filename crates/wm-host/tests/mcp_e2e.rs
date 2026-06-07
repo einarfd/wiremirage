@@ -172,11 +172,63 @@ async fn list_tools_returns_all_expected_tools() {
         "update_group",
         // Capabilities (post-ADR-0021 follow-up)
         "get_capabilities",
+        // Cross-surface parity pass
+        "clear_journal",
     ];
     expected.sort();
     assert_eq!(names, expected);
 
     client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn clear_journal_requires_confirm_and_succeeds() {
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(wm_host::registry::NewGroup {
+            name: "j-clear".into(),
+            owner_id: "someone".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Without confirm → rejected.
+    let denied = client
+        .call_tool(
+            CallToolRequestParams::new("clear_journal").with_arguments(
+                serde_json::json!({ "group": "j-clear" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    assert!(denied.is_err(), "clear_journal without confirm must error");
+
+    // With confirm → cleared.
+    let ok = client
+        .call_tool(
+            CallToolRequestParams::new("clear_journal").with_arguments(
+                serde_json::json!({ "group": "j-clear", "confirm": true })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("clear_journal");
+    let structured = ok.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("cleared").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 }
 
 #[tokio::test]

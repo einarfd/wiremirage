@@ -73,13 +73,14 @@ async fn list_tools_works_over_stdio_duplex() {
         .expect("list_tools over stdio");
     assert_eq!(
         tools.len(),
-        28,
-        "stdio transport should expose the same 28 tools as HTTP \
+        29,
+        "stdio transport should expose the same 29 tools as HTTP \
          (13 slice-10 tools + 2 slice-11 streaming tools + 1 slice-13 find_route \
          + 1 slice-15 update_route + 3 slice-16 route-state/dry-run tools \
          + 1 slice-36 show_route_source + 1 slice-43 update_group \
          + 1 post-ADR-0021 get_capabilities + 2 ADR-0025 set_route_state/set_group_state \
-         + 3 parity-batch list_journal/show_group_state/show_unmatched)"
+         + 3 parity-batch list_journal/show_group_state/show_unmatched \
+         + 1 parity-pass clear_journal)"
     );
 
     client.cancel().await.expect("cancel");

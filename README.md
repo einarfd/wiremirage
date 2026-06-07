@@ -53,7 +53,7 @@ wraps the REST surface end-to-end: groups, routes (including `wm
 routes update`, `wm routes state`, `wm routes test`), journal,
 tokens, and the public probes — see "Using the CLI" below. The MCP
 server is part of the host and mounts at `/__api/mcp` over the
-streamable-HTTP transport; 28 tools cover identity, discovery,
+streamable-HTTP transport; 29 tools cover identity, discovery,
 group/route CRUD (now including `update_route`), route + group state
 (`show_route_state`, `show_group_state`, `set_route_state`,
 `set_group_state`, `clear_route_state`), dry-run (`dry_run_route`),
@@ -526,10 +526,10 @@ claude mcp add --transport http wiremirage \
   --header "Authorization: Bearer wmt_..."
 ```
 
-The current surface is 28 tools — identity (`who_am_i`), discovery
+The current surface is 29 tools — identity (`who_am_i`), discovery
 (`summarize_workspace`, `list_recent_unmatched`, `show_unmatched`,
 `list_journal`, `find_route`), group CRUD (`list_groups`, `show_group`, `create_group`,
-`update_group`, `delete_group`, `refresh_group_ttl`), route CRUD
+`update_group`, `delete_group`, `refresh_group_ttl`, `clear_journal`), route CRUD
 (`list_routes`, `show_route`, `show_route_source`, `create_route`,
 `update_route`, `delete_route`), state + dry-run (`clear_group_state`,
 `set_group_state`, `show_group_state`, `show_route_state`,

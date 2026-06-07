@@ -525,7 +525,7 @@ this same `WireBytes` encoding (`crate::wire`) is shared by dry-run's
 `kv_overrides`/`gkv_overrides`, which were migrated to it (a clean
 breaking change — the old REST array-of-ints / MCP `kv_overrides_b64`
 fields are gone). Per-key cap 1 MiB; owner-or-admin. Surfaces: REST,
-MCP (`set_route_state` / `set_group_state`, 28 tools now), CLI (`wm
+MCP (`set_route_state` / `set_group_state`, 29 tools now), CLI (`wm
 routes state --set KEY=VALUE / --snapshot / --reset-from FILE`, same on
 `wm groups state`). A reusable runtime-configurable mock now seeds its
 config straight through this API (the `conformance/s3-slowdown` lane's
@@ -580,7 +580,9 @@ full `UnmatchedRecord`. This was the *actual* gap behind the first user's
 "#5 catch-all" ask — the unmatched journal already captures the request,
 MCP just couldn't read all of it; a catch-all route was deferred
 (ADR-0028 in Arkiv, Deferred) as too blunt a tool for what was a
-discovery gap. 28 tools total.
+discovery gap. 28 tools total. A later cross-surface parity pass added
+`clear_journal` (MCP/UI counterpart to `wm groups journal --clear` /
+`DELETE /__api/groups/{group}/journal`) → 29 tools total.
 Docs-only companion: a `get_capabilities` `gotchas` entry on simulating
 an upstream hang past the ~30s buffered budget via a streaming handler
 (`responseStream` head + `sleep`, ~5 min budget). The CLI already had

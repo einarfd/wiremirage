@@ -154,6 +154,12 @@
   <span class="text-muted">·</span>
   <a class="link" href="/__ui/groups/{{ group.name }}/state">Group state</a>
   <span class="text-muted">·</span>
+  <form method="post" action="/__ui/groups/{{ group.name }}/journal/clear" class="inline-form"
+        onsubmit="return confirm('Clear all journal entries for {{ group.name }}? Routes and state are kept.');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn--ghost">Clear journal</button>
+  </form>
+  <span class="text-muted">·</span>
   <form method="post" action="/__ui/groups/{{ group.name }}/delete" class="inline-form"
         onsubmit="return confirm('Delete {{ group.name }} and all its routes? This can\'t be undone.');">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
