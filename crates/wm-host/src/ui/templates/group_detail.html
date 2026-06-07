@@ -35,9 +35,14 @@
       <button type="submit" class="btn">Refresh TTL</button>
     </form>
     <details class="edit-disclosure">
-      <summary>Edit TTL</summary>
+      <summary>Edit group</summary>
       <form method="post" action="/__ui/groups/{{ group.name }}/edit" class="filter-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <label class="filter-field">
+          <span class="filter-field__label">Name (subdomain)</span>
+          <input type="text" name="name" value="{{ group.name }}"
+                 pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" maxlength="63">
+        </label>
         <label class="filter-field">
           <span class="filter-field__label">TTL (seconds)</span>
           <input type="text" name="ttl_seconds" value="{{ group.ttl_seconds }}">
