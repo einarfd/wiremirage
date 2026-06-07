@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/__ui/groups/{{ group_name }}">{{ group_name }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">Match probe</span>
+</nav>
+
+<header class="page-header">
+  <h1>Match probe — <code>{{ group_name }}</code></h1>
+  <p class="text-muted">
+    Check what <code>(method, path)</code> would match in this group — no real
+    traffic, no handler run. Matching is per-group (ADR-0030). CLI equivalent:
+    <code>wm match -g {{ group_name }} METHOD PATH</code>.
+  </p>
+</header>
+
+<section class="card">
+  <form method="get" action="/__ui/groups/{{ group_name }}/match" class="filter-form">
+    <label class="filter-field">
+      <span class="filter-field__label">Method</span>
+      <select name="method">
+        {%- for m in methods %}
+        <option value="{{ m }}"{% if form.method == m %} selected{% endif %}>{{ m }}</option>
+        {%- endfor %}
+      </select>
+    </label>
+    <label class="filter-field">
+      <span class="filter-field__label">Path</span>
+      <input type="text" name="path" value="{{ form.path }}" placeholder="/v1/charges" required>
+    </label>
+    <button type="submit" class="btn btn--primary">Probe</button>
+  </form>
+</section>
+
+{% if result %}
+{% if result.error %}
+<section class="card card--error">
+  <header class="card__header"><h2>Invalid probe</h2></header>
+  <p>{{ result.error }}</p>
+</section>
+{% elif result.matched %}
+<section class="card">
+  <header class="card__header"><h2>Match</h2></header>
+  <p>
+    Matches
+    <a class="link" href="/__ui/routes/{{ result.hit.slug }}"><code>{{ result.hit.slug }}</code></a>
+    (<code>{{ result.hit.route_path }}</code>).
+  </p>
+  {% if result.hit.params | length > 0 %}
+  <dl class="meta-grid">
+    {%- for p in result.hit.params %}
+    <dt><code>{{ p[0] }}</code></dt>
+    <dd><code>{{ p[1] }}</code></dd>
+    {%- endfor %}
+  </dl>
+  {% endif %}
+</section>
+{% else %}
+<section class="card">
+  <header class="card__header"><h2>No match</h2></header>
+  {% if result.near_misses | length > 0 %}
+  <p class="text-muted">Closest routes:</p>
+  <ul class="action-list">
+    {%- for nm in result.near_misses %}
+    <li>
+      <a class="link" href="/__ui/routes/{{ nm.slug }}"><code>{{ nm.route_methods }} {{ nm.route_path }}</code></a>
+      — {{ nm.explanation }}
+    </li>
+    {%- endfor %}
+  </ul>
+  {% else %}
+  <p class="text-muted">No route in <code>{{ group_name }}</code> matches, and nothing's close.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endif %}
+
+<footer class="page-footer">
+  <a class="link" href="/__ui/groups/{{ group_name }}">&larr; Back to {{ group_name }}</a>
+</footer>
+{% endblock %}

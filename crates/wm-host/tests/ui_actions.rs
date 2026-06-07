@@ -288,6 +288,64 @@ async fn edit_rejects_invalid_rename() {
 }
 
 #[tokio::test]
+async fn match_probe_page_shows_hit_and_near_miss() {
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
+
+    // Empty form renders.
+    let form = client
+        .get(url(&h, "/__ui/groups/stripe-mock/match"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(form.contains("Match probe"), "form renders: {form}");
+
+    // Hit: POST /v1/charges is seeded in stripe-mock (route #1).
+    let hit = client
+        .get(url(
+            &h,
+            "/__ui/groups/stripe-mock/match?method=POST&path=/v1/charges",
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(hit.contains("<h2>Match</h2>"), "shows a match: {hit}");
+    assert!(
+        hit.contains("/__ui/routes/stripe-mock"),
+        "links the matched route: {hit}"
+    );
+
+    // Miss with a method-mismatch near-miss: GET /v1/charges.
+    let miss = client
+        .get(url(
+            &h,
+            "/__ui/groups/stripe-mock/match?method=GET&path=/v1/charges",
+        ))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(miss.contains("No match"), "shows no match: {miss}");
+    // (apostrophe in "don't" renders as &#x27;, so match an ascii fragment)
+    assert!(
+        miss.contains("expected POST, got GET"),
+        "method-mismatch explanation: {miss}"
+    );
+}
+
+#[tokio::test]
 async fn clear_journal_redirects_to_group_detail() {
     let (h, _, _) = start_seeded().await;
     let client = no_redirect_client();
