@@ -474,6 +474,23 @@ impl Client {
         .await
     }
 
+    pub async fn rename_token(
+        &self,
+        name: &str,
+        new_name: &str,
+    ) -> Result<crate::models::TokenRecord, ClientError> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            name: &'a str,
+        }
+        self.send(
+            Method::PATCH,
+            &format!("/__api/tokens/{}", urlencode(name)),
+            Some(&Body { name: new_name }),
+        )
+        .await
+    }
+
     // -- Users ----------------------------------------------------------
 
     /// List all users. Admin-only on the host side; non-admin callers
