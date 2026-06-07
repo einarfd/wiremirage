@@ -63,6 +63,24 @@
   {% endif %}
 </section>
 
+<section class="card">
+  <header class="card__header"><h2>Set keys</h2></header>
+  <p class="text-muted">
+    Upsert shared (<code>gkv:</code>) entries — one <code>key=value</code> per
+    line. Values are stored as UTF-8 text; existing keys are overwritten,
+    others left untouched. (For binary values, use the CLI/MCP, which accept
+    base64.)
+  </p>
+  <form method="post" action="/__ui/groups/{{ group_name }}/state/set">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <textarea name="keys" rows="6" class="source-editor"
+              placeholder="config.mode=slow&#10;config.rate=10"></textarea>
+    <div class="action-row">
+      <button type="submit" class="btn btn--primary">Set keys</button>
+    </div>
+  </form>
+</section>
+
 <footer class="page-footer">
   <a class="link" href="/__ui/groups/{{ group_name }}">&larr; Back to {{ group_name }}</a>
 </footer>
