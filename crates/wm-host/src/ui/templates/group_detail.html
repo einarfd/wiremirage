@@ -154,6 +154,8 @@
   <span class="text-muted">·</span>
   <a class="link" href="/__ui/groups/{{ group.name }}/state">Group state</a>
   <span class="text-muted">·</span>
+  <a class="link" href="/__ui/groups/{{ group.name }}/match">Match probe</a>
+  <span class="text-muted">·</span>
   <form method="post" action="/__ui/groups/{{ group.name }}/journal/clear" class="inline-form"
         onsubmit="return confirm('Clear all journal entries for {{ group.name }}? Routes and state are kept.');">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">

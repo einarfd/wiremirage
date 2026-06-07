@@ -64,6 +64,7 @@ impl UiTemplates {
         tmpl!("connect.html", "templates/connect.html");
         tmpl!("groups_list.html", "templates/groups_list.html");
         tmpl!("groups_new.html", "templates/groups_new.html");
+        tmpl!("match_probe.html", "templates/match_probe.html");
         tmpl!("group_detail.html", "templates/group_detail.html");
         tmpl!("routes_list.html", "templates/routes_list.html");
         tmpl!("route_new.html", "templates/route_new.html");
@@ -135,6 +136,7 @@ pub fn router(state: AppState) -> Router {
             "/__ui/groups/{group}/journal/clear",
             axum::routing::post(group_journal_clear_form),
         )
+        .route("/__ui/groups/{group}/match", get(group_match_page))
         .route("/__ui/routes", get(routes_list_page))
         .route(
             "/__ui/routes/new",
@@ -1061,6 +1063,146 @@ async fn group_journal_clear_form(
         return ui_error_500(&state, &auth, format!("clear journal: {e}"));
     }
     axum::response::Redirect::to(&format!("/__ui/groups/{}", group.name)).into_response()
+}
+
+// -- Match-probe page -------------------------------------------------------
+//
+// The UI counterpart to `wm match` / the `find_route` MCP tool: probe what
+// `(method, path)` would match *within this group* (ADR-0030 per-subdomain
+// matching). Read-only, so it's a GET with the inputs in the query string —
+// shareable, no CSRF. Owner-or-admin of the group (probing reveals routes).
+
+#[derive(Deserialize)]
+struct MatchProbeQuery {
+    method: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MatchProbeForm {
+    method: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct MatchProbeHitView {
+    slug: String,
+    route_path: String,
+    params: Vec<(String, String)>,
+}
+
+#[derive(Serialize)]
+struct MatchProbeNearMissView {
+    slug: String,
+    route_path: String,
+    route_methods: String,
+    explanation: String,
+}
+
+#[derive(Serialize)]
+struct MatchProbeResultView {
+    matched: bool,
+    hit: Option<MatchProbeHitView>,
+    near_misses: Vec<MatchProbeNearMissView>,
+    error: Option<String>,
+}
+
+fn probe_near_miss_view(nm: crate::route_table::NearMiss) -> MatchProbeNearMissView {
+    use crate::route_table::NearMissReason;
+    let explanation = match &nm.reason {
+        NearMissReason::MethodMismatch {
+            expected_methods,
+            got,
+        } => format!(
+            "Pattern matched, but the methods don't: expected {}, got {got}.",
+            expected_methods.join(", ")
+        ),
+        NearMissReason::PrefixMatch { expected, got, .. } => {
+            format!("One segment differs: expected `{expected}`, got `{got}`.")
+        }
+    };
+    MatchProbeNearMissView {
+        slug: crate::registry::render_slug(&nm.route.group_name, nm.route.number),
+        route_path: nm.route.path.clone(),
+        route_methods: nm.route.methods.join(", "),
+        explanation,
+    }
+}
+
+async fn group_match_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    Query(q): Query<MatchProbeQuery>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+
+    let method_in = nonempty(q.method.as_deref());
+    let path_in = nonempty(q.path.as_deref());
+    let result: Option<MatchProbeResultView> = match (&method_in, &path_in) {
+        (Some(method), Some(path)) => {
+            let m = method.to_ascii_uppercase();
+            let err = if !m
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '-' || c == '_')
+            {
+                Some("Method must be uppercase ASCII (e.g. POST, GET, ANY).".to_string())
+            } else if !path.starts_with('/') {
+                Some("Path must start with /.".to_string())
+            } else {
+                None
+            };
+            Some(match err {
+                Some(error) => MatchProbeResultView {
+                    matched: false,
+                    hit: None,
+                    near_misses: Vec::new(),
+                    error: Some(error),
+                },
+                None => match state.routes().probe_in_group(&group.name, &m, path) {
+                    crate::route_table::MatchProbe::Hit(hit) => MatchProbeResultView {
+                        matched: true,
+                        hit: Some(MatchProbeHitView {
+                            slug: crate::registry::render_slug(
+                                &hit.route.group_name,
+                                hit.route.number,
+                            ),
+                            route_path: hit.route.path.clone(),
+                            params: hit.path_params.clone(),
+                        }),
+                        near_misses: Vec::new(),
+                        error: None,
+                    },
+                    crate::route_table::MatchProbe::Miss(near) => MatchProbeResultView {
+                        matched: false,
+                        hit: None,
+                        near_misses: near.into_iter().map(probe_near_miss_view).collect(),
+                        error: None,
+                    },
+                },
+            })
+        }
+        _ => None,
+    };
+
+    render(
+        &state,
+        "match_probe.html",
+        context! {
+            page_title => format!("Match probe: {}", group.name),
+            user => UserBadge::from(&auth),
+            group_name => group.name,
+            methods => ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY"],
+            form => MatchProbeForm {
+                method: method_in.unwrap_or_else(|| "GET".into()),
+                path: path_in.unwrap_or_default(),
+            },
+            result => result,
+        },
+    )
 }
 
 /// Look up `group_ref` and confirm the caller can manage it. The
