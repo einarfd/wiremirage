@@ -57,7 +57,8 @@ pub enum Command {
     /// Inspect request journal entries.
     #[command(subcommand)]
     Journal(JournalCommand),
-    /// Inspect host-wide unmatched-request entries. Admin-only.
+    /// Inspect unmatched-request entries for groups you own (an admin
+    /// sees host-wide).
     #[command(subcommand)]
     Unmatched(UnmatchedCommand),
     /// Manage API tokens.
@@ -504,7 +505,8 @@ pub struct JournalListArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum UnmatchedCommand {
-    /// List unmatched-request entries. Admin-only host-side.
+    /// List unmatched-request entries for groups you own (an admin sees
+    /// host-wide).
     List(UnmatchedListArgs),
     /// Show one unmatched entry by its journal number.
     Show {
