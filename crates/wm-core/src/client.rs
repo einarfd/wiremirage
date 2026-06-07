@@ -168,6 +168,26 @@ impl Client {
         self.send(Method::POST, "/__api/groups", Some(body)).await
     }
 
+    /// Import a group + its routes from a spec (routes-only). The host
+    /// creates the group and every route, rolling back on any failure.
+    pub async fn import_group(
+        &self,
+        spec: &crate::spec::GroupSpec,
+    ) -> Result<crate::spec::ImportSummary, ClientError> {
+        self.send(Method::POST, "/__api/groups/import", Some(spec))
+            .await
+    }
+
+    /// Export a group as a spec (each route's stored source inline).
+    pub async fn export_group(&self, group: &str) -> Result<crate::spec::GroupSpec, ClientError> {
+        self.send(
+            Method::GET,
+            &format!("/__api/groups/{}/export", urlencode(group)),
+            None::<&()>,
+        )
+        .await
+    }
+
     pub async fn get_group(&self, group: &str) -> Result<GroupRecord, ClientError> {
         self.send(
             Method::GET,
