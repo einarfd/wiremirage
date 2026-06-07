@@ -10,6 +10,7 @@
 
 pub mod client;
 pub mod models;
+pub mod spec;
 
 pub use client::{Client, ClientBuilder, ClientError};
 pub use models::*;
