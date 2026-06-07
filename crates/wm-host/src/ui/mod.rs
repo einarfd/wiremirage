@@ -63,6 +63,7 @@ impl UiTemplates {
         tmpl!("home.html", "templates/home.html");
         tmpl!("connect.html", "templates/connect.html");
         tmpl!("groups_list.html", "templates/groups_list.html");
+        tmpl!("groups_new.html", "templates/groups_new.html");
         tmpl!("group_detail.html", "templates/group_detail.html");
         tmpl!("routes_list.html", "templates/routes_list.html");
         tmpl!("route_new.html", "templates/route_new.html");
@@ -103,6 +104,12 @@ pub fn router(state: AppState) -> Router {
         .route("/__ui/", get(home))
         .route("/__ui/connect", get(connect))
         .route("/__ui/groups", get(groups_list_page))
+        // Register before `/__ui/groups/{group}` — matchit prefers the
+        // static segment, but keep them adjacent for clarity.
+        .route(
+            "/__ui/groups/new",
+            get(group_new_form).post(group_new_submit),
+        )
         .route("/__ui/groups/{group}", get(group_detail_page))
         .route(
             "/__ui/groups/{group}/refresh",
@@ -3153,6 +3160,137 @@ fn render_route_new(
             user => UserBadge::from(auth),
             methods => ["POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY"],
             available_groups => available_groups,
+            form => form,
+            error => error,
+        },
+    );
+    if had_error {
+        *resp.status_mut() = StatusCode::BAD_REQUEST;
+    }
+    resp
+}
+
+// -- Group create form ------------------------------------------------------
+
+#[derive(Deserialize)]
+struct UiGroupNewForm {
+    _csrf: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    ttl_seconds: String,
+    /// Checkbox: present (`on`) when checked, absent when not.
+    #[serde(default)]
+    sliding_ttl: Option<String>,
+}
+
+#[derive(Serialize, Default, Clone)]
+struct GroupNewFormState {
+    name: String,
+    ttl_seconds: String,
+    sliding_ttl: bool,
+}
+
+#[derive(Serialize)]
+struct GroupNewError {
+    title: String,
+    message: String,
+}
+
+async fn group_new_form(State(state): State<AppState>, auth: AuthContext) -> Response {
+    // Empty name → the registry auto-assigns a friendly DNS-safe one
+    // (ADR-0030); sliding TTL defaults on, matching the registry default.
+    let form = GroupNewFormState {
+        sliding_ttl: true,
+        ..GroupNewFormState::default()
+    };
+    render_group_new(&state, &auth, form, None)
+}
+
+async fn group_new_submit(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::Form(form): axum::Form<UiGroupNewForm>,
+) -> Response {
+    let _ = form._csrf; // already validated by csrf_middleware
+    let sliding = form.sliding_ttl.is_some();
+    let form_state = GroupNewFormState {
+        name: form.name.clone(),
+        ttl_seconds: form.ttl_seconds.clone(),
+        sliding_ttl: sliding,
+    };
+
+    let ttl_seconds = match form.ttl_seconds.trim() {
+        "" => None,
+        s => match s.parse::<u64>() {
+            Ok(n) => Some(n),
+            Err(_) => {
+                return render_group_new(
+                    &state,
+                    &auth,
+                    form_state,
+                    Some(GroupNewError {
+                        title: "Invalid TTL".into(),
+                        message: "TTL must be a whole number of seconds, or blank for the default."
+                            .into(),
+                    }),
+                );
+            }
+        },
+    };
+
+    match state
+        .routes()
+        .registry()
+        .create_group(crate::registry::NewGroup {
+            // Empty name → registry auto-assigns a friendly DNS-safe one.
+            name: form.name.trim().to_string(),
+            owner_id: auth.user_id.clone(),
+            ttl_seconds,
+            sliding_ttl: Some(sliding),
+        }) {
+        Ok(group) => {
+            let location = format!("/__ui/groups/{}", group.name);
+            let mut resp = Response::default();
+            *resp.status_mut() = StatusCode::SEE_OTHER;
+            resp.headers_mut().insert(
+                axum::http::header::LOCATION,
+                axum::http::HeaderValue::try_from(location).expect("ascii location"),
+            );
+            resp
+        }
+        Err(e) => {
+            let title = match &e {
+                crate::registry::RegistryError::Conflict(_) => "Name already taken",
+                crate::registry::RegistryError::InvalidName(_) => "Invalid group name",
+                _ => "Couldn't create group",
+            };
+            render_group_new(
+                &state,
+                &auth,
+                form_state,
+                Some(GroupNewError {
+                    title: title.into(),
+                    message: e.to_string(),
+                }),
+            )
+        }
+    }
+}
+
+fn render_group_new(
+    state: &AppState,
+    auth: &AuthContext,
+    form: GroupNewFormState,
+    error: Option<GroupNewError>,
+) -> Response {
+    let had_error = error.is_some();
+    let mut resp = render(
+        state,
+        "groups_new.html",
+        context! {
+            page_title => "Create group",
+            user => UserBadge::from(auth),
             form => form,
             error => error,
         },

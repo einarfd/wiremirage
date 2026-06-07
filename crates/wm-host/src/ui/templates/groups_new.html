@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">New group</span>
+</nav>
+
+<header class="page-header">
+  <h1>Create group</h1>
+  <p class="text-muted">
+    A group is a tenant: it gets its own subdomain <code>{group}.{host}</code>,
+    its own path space, and a TTL after which it (and everything in it) is
+    reaped. Leave the name blank to be assigned a friendly DNS-safe one.
+  </p>
+</header>
+
+{% if error %}
+<section class="card card--error">
+  <header class="card__header"><h2>{{ error.title }}</h2></header>
+  <p>{{ error.message }}</p>
+</section>
+{% endif %}
+
+<form method="post" action="/__ui/groups/new">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+  <section class="card">
+    <header class="card__header"><h2>Group</h2></header>
+    <div class="form-grid">
+      <label for="group-name">Name</label>
+      <input type="text" id="group-name" name="name" value="{{ form.name }}"
+             placeholder="(auto-assigned if blank)"
+             pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" maxlength="63">
+
+      <label for="group-ttl">TTL (seconds)</label>
+      <input type="number" id="group-ttl" name="ttl_seconds" value="{{ form.ttl_seconds }}"
+             min="1" placeholder="(default)">
+
+      <label for="group-sliding">Sliding TTL</label>
+      <span class="filter-checkbox">
+        <input type="checkbox" id="group-sliding" name="sliding_ttl"{% if form.sliding_ttl %} checked{% endif %}>
+        <label for="group-sliding">Every matched request bumps the group's expiry</label>
+      </span>
+    </div>
+  </section>
+
+  <footer class="page-footer">
+    <button type="submit" class="btn btn--primary">Create group</button>
+    <a href="/__ui/groups" class="btn btn--ghost">Cancel</a>
+  </footer>
+</form>
+{% endblock %}
