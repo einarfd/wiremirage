@@ -347,110 +347,26 @@ async fn create_group_from_spec(
     loaded: &LoadedSpec,
     format: Format,
 ) -> Result<(), ClientError> {
-    let group_name = loaded.spec.name.clone();
-    let create_body = CreateGroupBody {
-        name: group_name.clone(),
-        ttl_seconds: loaded.ttl_seconds,
-        sliding_ttl: loaded.spec.sliding,
-    };
-    let group = client.create_group(&create_body).await?;
-
-    for (idx, route) in loaded.normalized_routes.iter().enumerate() {
-        let route_body = CreateRouteBody {
-            group: Some(group_name.clone()),
-            methods: route.methods.clone(),
-            path: route.path.clone(),
-            language: route.language.clone(),
-            source: Some(route.source.clone()),
-        };
-        if let Err(e) = client.create_route(&route_body).await {
-            // Best-effort rollback: delete the group we just made so
-            // the user can re-run after fixing the spec. If the
-            // rollback itself fails (network blip), surface both
-            // errors so it's obvious.
-            let rollback = client.delete_group(&group_name).await;
-            let primary = format!(
-                "route #{idx} ({path}) failed to create: {e}",
-                path = route.path
-            );
-            let msg = match rollback {
-                Ok(()) => format!(
-                    "{primary}\n         group {group_name:?} was rolled back; re-run after fixing the spec"
-                ),
-                Err(rerr) => format!(
-                    "{primary}\n         additionally, rollback failed: {rerr}; \
-                     the group may exist with partial routes, delete it manually"
-                ),
-            };
-            return Err(ClientError::Validation(msg));
-        }
-    }
-
-    format::render_group(&group, format);
-    if matches!(format, Format::Human) {
-        println!(
-            "created group {group_name:?} with {n} route(s) from spec",
-            n = loaded.normalized_routes.len()
-        );
+    // `loaded.spec` already has each route's `source_file` resolved to inline
+    // `source` (the CLI's only filesystem concern). The host creates the
+    // group + every route and rolls the whole group back on any failure, so
+    // the CLI just sends the spec and reports the summary.
+    let summary = client.import_group(&loaded.spec).await?;
+    match format {
+        Format::Json => format::print_json(&summary),
+        Format::Human => println!(
+            "created group {:?} with {} route(s) from spec",
+            summary.group, summary.routes_created
+        ),
     }
     Ok(())
 }
 
-/// `wm groups export` — read the group + routes + per-route source,
-/// assemble a spec, render in the requested format. Wasm-uploaded
-/// routes can't be represented (no source to put in the spec) and
-/// fail the export so the user isn't surprised by a silent drop.
+/// `wm groups export` — fetch the group's spec from the host (which
+/// assembles it from the group + each route's stored source, erroring on a
+/// wasm-only route) and render it in the requested format.
 async fn handle_groups_export(client: &Client, args: ExportGroupArgs) -> Result<(), ClientError> {
-    let group = client.get_group(&args.name).await?;
-
-    // Fetch every route in this group. Bypassing pagination by
-    // setting a high limit is fine — groups don't carry thousands
-    // of routes in practice.
-    let params = ListRoutesParams {
-        group: Some(group.name.clone()),
-        limit: Some(1000),
-        ..Default::default()
-    };
-    let routes = client.list_routes_with(&params).await?;
-
-    let mut route_specs = Vec::with_capacity(routes.routes.len());
-    for route in &routes.routes {
-        let slug = format!("{}/{}", route.group.name, route.number);
-        let source_resp = client.get_route_source(&slug).await?;
-        let Some(source) = source_resp.source else {
-            return Err(ClientError::Validation(format!(
-                "route {slug} was uploaded as pre-compiled {lang}; spec format requires source. \
-                 Either replace the route with a source-uploaded version, or skip exporting this group.",
-                lang = source_resp.language
-            )));
-        };
-
-        let (method, methods) = match route.methods.as_slice() {
-            [only] => (Some(only.clone()), Vec::new()),
-            _ => (None, route.methods.clone()),
-        };
-        route_specs.push(spec::RouteSpec {
-            method,
-            methods,
-            path: route.path.clone(),
-            language: Some(route.language.clone()),
-            source: Some(source),
-            source_file: None,
-        });
-    }
-
-    // Render with the TTL formatted as plain seconds; round-tripping
-    // a parsed "24h" back as "86400" is correct but loses the human
-    // form. We accept that trade-off rather than try to guess the
-    // user's intended unit.
-    let group_spec = spec::GroupSpec {
-        name: group.name.clone(),
-        description: None,
-        ttl: Some(group.ttl_seconds.to_string()),
-        sliding: Some(group.sliding_ttl),
-        routes: route_specs,
-    };
-
+    let group_spec = client.export_group(&args.name).await?;
     let format: SpecFormat = args.format.into();
     let rendered = spec::render(&group_spec, format)
         .map_err(|e| ClientError::Validation(format!("render spec: {e:#}")))?;

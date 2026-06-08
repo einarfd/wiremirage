@@ -495,7 +495,13 @@ it (per `mcp-surface.md`).
 The CLI design is captured in `cli-design.md` (private design doc).
 The early deferrals have since landed — `wm match`, route `update` /
 `test` / `state`, shell completions, profiles, admin user CRUD
-(`wm users`), and `--from-file` group specs are all wired up. **Live
+(`wm users`), and `--from-file` group specs are all wired up. Group
+specs (`wm groups create --from-file` / `wm groups export`) are no
+longer CLI-only: import/export is available on every surface — REST
+(`POST /__api/groups/import`, `GET /__api/groups/{group}/export`), the
+MCP `import_group` / `export_group` tools, and the web UI — all routed
+through one host-side core (the CLI now wraps the same endpoints).
+**Live
 journal tailing is deliberately not a CLI command**: live-watch is a
 push concern, served by the MCP `tail_journal` / `wait_for_request`
 tools (which return a batch — agent-friendly) and the web UI's live
