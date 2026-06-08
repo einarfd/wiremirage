@@ -16,9 +16,10 @@ just conformance openai-streaming
 # or: ./conformance/run.sh openai-streaming
 ```
 
-The shared runner boots the host in-memory, registers the routes (from
-`routes.json`), and runs this lane's client **in Docker** against the host, then
-tears the host down. **Opt-in** — not part of `just check`.
+The shared runner boots the host in-memory, imports this lane's group spec
+(`spec.json`, group `openai`), and runs the client **in Docker** against the
+host — addressing mock traffic on `http://openai.localhost:PORT` — then tears
+the host down. **Opt-in** — not part of `just check`.
 
 Prereqs on the machine: Docker + jq + a buildable host. The `openai` client and
 Python live in this lane's `Dockerfile` (pinned via `requirements.txt`), not on
@@ -38,7 +39,7 @@ the host.
 
 - `handler.ts` — the mock served at `/v1/chat/completions` (streaming + buffered, honors `mock_delay_ms`)
 - `error-handler.ts` — an OpenAI-shaped 429, served at `/v1-error/chat/completions` (check 5)
-- `routes.json` — which sources mount at which paths (read by the shared runner)
+- `spec.json` — the group spec (group `openai` + which sources mount at which paths), imported by the shared runner
 - `conformance.py` — the client-side assertions (run inside the container against `WM_BASE`)
 - `Dockerfile` — the client image: Python + pinned `openai`
 - `requirements.txt` — `openai==1.99.1`

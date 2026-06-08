@@ -18,12 +18,20 @@ just conformance openai-streaming # one lane
 ./conformance/run.sh [lane]
 ```
 
-`run.sh` boots `wm-host` in-memory (native, via cargo), registers each lane's
-routes, and runs that lane's client **in Docker** (`--network host`) against the
-host. Requirements on the machine: **Docker + jq + a buildable host** — no
+`run.sh` boots `wm-host` in-memory (native, via cargo), imports each lane's
+group spec (`POST /__api/groups/import` — the same spec round-trip the CLI / MCP
+/ UI use), and runs that lane's client **in Docker** (`--network host`) against
+the host. Requirements on the machine: **Docker + jq + a buildable host** — no
 per-language toolchain on the host itself (that lives in each lane's image). We
 already depend on Docker (the js-engine build), so this adds no new host
 dependency. Linux-oriented (`--network host` + the host's loopback bind).
+
+Mock traffic is served on the group's subdomain `{group}.{apex}` (ADR-0030
+virtual-host routing); the apex (`localhost`) is control-plane only. `run.sh`
+points each client's `WM_BASE` at `http://{group}.localhost:PORT` and adds
+`--add-host {group}.localhost:127.0.0.1` so the label resolves to loopback
+inside the container — no DNS needed; the host derives the group from the `Host`
+header.
 
 CI: `.github/workflows/conformance.yml` (`workflow_dispatch` only — heavier than
 the gating CI, so deliberately manual).
@@ -35,19 +43,20 @@ A lane is a subdirectory containing:
 | File | Role |
 |------|------|
 | `Dockerfile` | Builds the client image (its language + SDK, pinned). `CMD` runs the test against `$WM_BASE`. |
-| `routes.json` | The mock routes to register: `[{ "methods": [...], "path": "...", "source": "handler.ts", "group"?: "..." }]`. Sources are TypeScript handler files in the lane dir. An optional `group` attaches routes to a shared (auto-created) group so they share group state. |
-| `<sources>.ts` | The mock handler(s). |
-| `setup.sh` (optional) | Run after registration with `(base, token)` — for lane-specific seeding (e.g. POSTing config into a mock route). |
+| `spec.json` | The lane's **group spec**: `{ "name": "<group>", "routes": [{ "methods": [...], "path": "...", "language"?: "typescript", "source_file": "handler.ts" }] }`. `run.sh` inlines each `source_file` into `source` and imports the whole group in one call. The group `name` doubles as the subdomain the client addresses. |
+| `<sources>.ts` | The mock handler(s), referenced by `source_file`. |
+| `setup.sh` (optional) | Run after import with `(base, token)` — for lane-specific seeding the routes-only spec can't carry (e.g. `PUT /__api/groups/<group>/state`). |
 | the test | Whatever the `Dockerfile`'s `CMD` runs (e.g. `conformance.py`, a Go binary), asserting against `WM_BASE`. |
 | `README.md` | What the lane validates + findings. |
 
-All lanes run against **one** host instance (booted once per `run.sh`), so keep
-route paths distinct across lanes.
+All lanes run against **one** host instance (booted once per `run.sh`), but each
+lane is its own group/subdomain — its own path namespace — so route paths may
+overlap freely across lanes (ADR-0030).
 
 ## Add a lane
 
 1. `mkdir conformance/<name>/` with the files above.
-2. Write `handler.ts` (+ any others) and list them in `routes.json`.
+2. Write `handler.ts` (+ any others) and reference them from `spec.json` via `source_file`.
 3. Write the client test and a `Dockerfile` whose `CMD` runs it against `$WM_BASE`.
 4. `just conformance <name>`.
 
