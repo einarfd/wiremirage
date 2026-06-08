@@ -94,6 +94,31 @@ wm journal list stripe-mock
 wm groups delete stripe-mock --force
 ```
 
+## Importing / exporting a whole group
+
+A group plus all its routes (paths, methods, languages, inline source) is a
+single **spec** — YAML or JSON — so you can version a mock, share it, or stamp
+out the same fixture repeatedly:
+
+```sh
+# Export an existing group to a spec file.
+wm groups export stripe-mock --format yaml > stripe-mock.yaml
+
+# Recreate it (here, or on another host) in one shot. The host creates the
+# group and every route atomically — if any route fails to compile, the whole
+# group is rolled back, so you never get a half-applied spec.
+wm groups create --from-file stripe-mock.yaml
+```
+
+The spec is `{ name, ttl?, sliding?, routes: [{ method|methods, path,
+language?, source|source_file }] }`. `source_file` is resolved relative to the
+spec file (CLI only); inline `source` works everywhere. Export errors on a
+wasm-only route (no source to emit). This is available on **every surface** —
+the MCP `import_group` / `export_group` tools take/return the same structured
+spec, the web UI has an import textarea + export download, and REST exposes
+`POST /__api/groups/import` + `GET /__api/groups/{group}/export`. State (kv/gkv)
+is **not** part of the spec — seed it separately via `wm ... state` after import.
+
 ## Common patterns
 
 The `scripts/` directory next to this `SKILL.md` ships ready-to-run examples you can invoke directly via Bash, adapt by editing, or extract patterns from:
