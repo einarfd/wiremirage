@@ -152,6 +152,9 @@ mod tests {
             "get_capabilities",
             // Cross-surface parity pass
             "clear_journal",
+            // Spec import/export parity
+            "import_group",
+            "export_group",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");

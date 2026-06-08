@@ -126,6 +126,12 @@ pub struct ClearJournalResult {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExportGroupArgs {
+    /// Group name or ULID.
+    pub group: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct RefreshGroupArgs {
     /// Group name or ULID.
     pub group: String,
@@ -388,5 +394,36 @@ impl WmMcpServer {
             .clear_group_journal(&group.id)
             .map_err(map_registry_error)?;
         Ok(Json(ClearJournalResult { cleared: true }))
+    }
+
+    #[tool(
+        name = "import_group",
+        description = "Create a group and its routes from a spec in one call (routes-only): `{ name, ttl?, sliding?, routes: [{ method|methods, path, language?, source }] }`. Inline `source` only (no source_file). Creates the group as you, then each route; if any route fails to compile/validate, the whole group is rolled back. The inverse of `export_group` — use it to stand up a reusable mock bundle."
+    )]
+    pub async fn import_group(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(spec): Parameters<wm_core::spec::GroupSpec>,
+    ) -> Result<Json<wm_core::spec::ImportSummary>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        crate::api::import_group_core(&self.state, &auth, spec)
+            .await
+            .map(Json)
+            .map_err(crate::mcp::error::map_api_error)
+    }
+
+    #[tool(
+        name = "export_group",
+        description = "Export a group as a spec (routes-only) — the inverse of `import_group`. Returns `{ name, ttl, sliding, routes: [...] }` with each route's handler `source` inline, ready to re-import elsewhere. Errors if a route was uploaded as pre-compiled wasm (no source to emit). Owner-or-admin of the group."
+    )]
+    pub async fn export_group(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ExportGroupArgs>,
+    ) -> Result<Json<wm_core::spec::GroupSpec>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        crate::api::export_group_core(&self.state, &auth, &args.group)
+            .map(Json)
+            .map_err(crate::mcp::error::map_api_error)
     }
 }
