@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/__ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">Import</span>
+</nav>
+
+<header class="page-header">
+  <h1>Import a group from a spec</h1>
+  <p class="text-muted">
+    Choose a spec file (YAML or JSON) — or paste one below: a <code>name</code>,
+    optional <code>ttl</code> / <code>sliding</code>, and a list of
+    <code>routes</code> with inline <code>source</code>. The group is created as
+    you, with every route; if any route fails to compile the whole group is
+    rolled back. Equivalent to <code>wm groups create --from-file</code> and the
+    MCP <code>import_group</code> tool. (Routes only — seeded state isn't part of
+    the spec yet.)
+  </p>
+</header>
+
+{% if error %}
+<section class="card card--error">
+  <header class="card__header"><h2>Import failed</h2></header>
+  <p>{{ error }}</p>
+</section>
+{% endif %}
+
+<form method="post" action="/__ui/groups/import">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+  <section class="card">
+    <header class="card__header"><h2>Spec</h2></header>
+    <div class="form-grid">
+      <label for="import-file">Spec file</label>
+      <input type="file" id="import-file"
+             accept=".yaml,.yml,.json,application/yaml,application/json">
+
+      <label for="import-format">Format</label>
+      <select id="import-format" name="format">
+        <option value="yaml"{% if form.format == "yaml" %} selected{% endif %}>YAML</option>
+        <option value="json"{% if form.format == "json" %} selected{% endif %}>JSON</option>
+      </select>
+    </div>
+    <p class="text-muted">Pick a file above, or paste the spec directly:</p>
+    <textarea name="spec" rows="18" class="source-editor" required
+              placeholder="name: my-tenant&#10;routes:&#10;  - method: POST&#10;    path: /v1/charges&#10;    source: |&#10;      function handle(req, route, group) { return { status: 200, headers: [], body: new Uint8Array() }; }">{{ form.spec }}</textarea>
+  </section>
+
+  <footer class="page-footer">
+    <button type="submit" class="btn btn--primary">Import</button>
+    <a href="/__ui/groups" class="btn btn--ghost">Cancel</a>
+  </footer>
+</form>
+
+<script>
+// File chooser → load the picked spec into the textarea, and auto-detect the
+// format from the extension. The form still submits the textarea contents as a
+// normal urlencoded POST, so the CSRF middleware and server handler are
+// unchanged; the file never leaves the browser as a multipart upload.
+(function () {
+  var file = document.getElementById("import-file");
+  var area = document.querySelector("textarea[name=\"spec\"]");
+  var fmt = document.getElementById("import-format");
+  if (!file || !area) return;
+  file.addEventListener("change", function () {
+    var f = file.files && file.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      area.value = reader.result;
+      var name = f.name.toLowerCase();
+      if (fmt) {
+        if (name.endsWith(".json")) fmt.value = "json";
+        else if (name.endsWith(".yaml") || name.endsWith(".yml")) fmt.value = "yaml";
+      }
+    };
+    reader.readAsText(f);
+  });
+})();
+</script>
+{% endblock %}

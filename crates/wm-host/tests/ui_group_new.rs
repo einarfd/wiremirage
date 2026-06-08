@@ -219,3 +219,140 @@ async fn group_new_submit_without_csrf_is_forbidden() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 403);
 }
+
+// -- spec import / export ---------------------------------------------------
+
+const SPEC_YAML: &str = "name: PLACEHOLDER\nroutes:\n  - method: POST\n    path: /v1/charges\n    language: javascript\n    source: \"function handle(req, route, group) { return { status: 200, headers: [], body: new Uint8Array() }; }\"\n";
+
+/// Minimal `application/x-www-form-urlencoded` encoder (the test reqwest
+/// isn't built with the `form` helper, like the other UI tests).
+fn form_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn import_form_renders() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
+    let body = client
+        .get(url(&h, "/__ui/groups/import"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("Import a group from a spec"));
+    assert!(body.contains("name=\"spec\""));
+    assert!(body.contains("name=\"format\""));
+    // The file chooser (Open dialog) is present alongside the paste fallback.
+    assert!(
+        body.contains("id=\"import-file\"") && body.contains("type=\"file\""),
+        "import form offers a file chooser: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_creates_group_and_redirects() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let spec = SPEC_YAML.replace("PLACEHOLDER", "ui-import");
+    let resp = client
+        .post(url(&h, "/__ui/groups/import"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&format=yaml&spec={}",
+            form_encode(&spec)
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/__ui/groups/ui-import"
+    );
+    // The group landed.
+    let detail = client
+        .get(url(&h, "/__ui/groups/ui-import"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(detail.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn import_bad_spec_is_400() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    // Route missing `source` — parses, but normalize (in import_core) rejects.
+    let spec = "name: bad-import\nroutes:\n  - method: POST\n    path: /x\n";
+    let resp = client
+        .post(url(&h, "/__ui/groups/import"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&format=yaml&spec={}",
+            form_encode(spec)
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn export_downloads_a_spec() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let spec = SPEC_YAML.replace("PLACEHOLDER", "exp");
+    client
+        .post(url(&h, "/__ui/groups/import"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&format=yaml&spec={}",
+            form_encode(&spec)
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(url(&h, "/__ui/groups/exp/export?format=yaml"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(
+        resp.headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("exp.yaml")
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("/v1/charges"),
+        "exported spec has the route: {body}"
+    );
+}

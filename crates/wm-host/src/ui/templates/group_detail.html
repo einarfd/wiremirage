@@ -156,6 +156,9 @@
   <span class="text-muted">·</span>
   <a class="link" href="/__ui/groups/{{ group.name }}/match">Match probe</a>
   <span class="text-muted">·</span>
+  <a class="btn btn--ghost" download href="/__ui/groups/{{ group.name }}/export?format=yaml"
+     data-wm-save="{{ group.name }}.yaml">Export spec</a>
+  <span class="text-muted">·</span>
   <form method="post" action="/__ui/groups/{{ group.name }}/journal/clear" class="inline-form"
         onsubmit="return confirm('Clear all journal entries for {{ group.name }}? Routes and state are kept.');">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -168,4 +171,42 @@
     <button type="submit" class="btn btn--danger">Delete group</button>
   </form>
 </footer>
+
+<script>
+// Progressive enhancement for "Export spec": when the browser supports the
+// File System Access API, intercept the download link and open a native
+// "Save As" dialog so the user picks the folder + filename. Browsers without
+// the API (Firefox, Safari) keep the plain `download` anchor behaviour.
+(function () {
+  var link = document.querySelector("[data-wm-save]");
+  if (!link || typeof window.showSaveFilePicker !== "function") return;
+  link.addEventListener("click", async function (e) {
+    e.preventDefault();
+    var resp;
+    try {
+      resp = await fetch(link.href, { credentials: "same-origin" });
+    } catch (_) {
+      window.location = link.href; // network hiccup → fall back to download
+      return;
+    }
+    if (!resp.ok) { window.location = link.href; return; }
+    var text = await resp.text();
+    try {
+      var handle = await window.showSaveFilePicker({
+        suggestedName: link.getAttribute("data-wm-save") || "group.yaml",
+        types: [{
+          description: "WireMirage group spec",
+          accept: { "application/yaml": [".yaml", ".yml"] },
+        }],
+      });
+      var writable = await handle.createWritable();
+      await writable.write(text);
+      await writable.close();
+    } catch (err) {
+      if (err && err.name === "AbortError") return; // user cancelled the dialog
+      window.location = link.href; // any other failure → plain download
+    }
+  });
+})();
+</script>
 {% endblock %}
