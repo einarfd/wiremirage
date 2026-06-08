@@ -174,6 +174,9 @@ async fn list_tools_returns_all_expected_tools() {
         "get_capabilities",
         // Cross-surface parity pass
         "clear_journal",
+        // Spec import/export parity
+        "import_group",
+        "export_group",
     ];
     expected.sort();
     assert_eq!(names, expected);
@@ -228,6 +231,59 @@ async fn clear_journal_requires_confirm_and_succeeds() {
     assert_eq!(
         structured.get("cleared").and_then(|v| v.as_bool()),
         Some(true)
+    );
+}
+
+#[tokio::test]
+async fn import_then_export_group_round_trips() {
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let spec = serde_json::json!({
+        "name": "spec-demo",
+        "ttl": "1h",
+        "routes": [
+            {
+                "method": "POST",
+                "path": "/v1/charges",
+                "language": "javascript",
+                "source": "function handle(req, route, group) { return { status: 200, headers: [], body: new Uint8Array() }; }"
+            }
+        ]
+    });
+    let imported = client
+        .call_tool(
+            CallToolRequestParams::new("import_group")
+                .with_arguments(spec.as_object().unwrap().clone()),
+        )
+        .await
+        .expect("import_group");
+    let s = imported.structured_content.expect("structured");
+    assert_eq!(s.get("group").and_then(|v| v.as_str()), Some("spec-demo"));
+    assert_eq!(s.get("routes_created").and_then(|v| v.as_u64()), Some(1));
+
+    let exported = client
+        .call_tool(
+            CallToolRequestParams::new("export_group").with_arguments(
+                serde_json::json!({ "group": "spec-demo" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("export_group");
+    let e = exported.structured_content.expect("structured");
+    assert_eq!(e["name"].as_str(), Some("spec-demo"));
+    assert_eq!(e["routes"][0]["path"].as_str(), Some("/v1/charges"));
+    assert!(
+        e["routes"][0]["source"]
+            .as_str()
+            .unwrap()
+            .contains("handle")
     );
 }
 
