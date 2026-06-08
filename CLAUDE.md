@@ -648,18 +648,24 @@ Python client vs a mocked `POST /v1/chat/completions`, streaming + buffered) and
 `conformance/s3-slowdown/` (the real AWS Go SDK vs a **reusable, config-driven
 latency/throttle-injection** mock; proves the SDK auto-retries/recovers from
 injected `503 SlowDown`). Each lane is a dir with a `Dockerfile` (its
-language/SDK toolchain, pinned), a `routes.json` (sources → paths, optional
-`group`), the mock handler(s), an optional `setup.sh` (post-registration
-seeding), and the client test. The shared `conformance/run.sh` boots the host
-in-memory (native, cargo), registers a lane's routes via jq/curl, runs any
-`setup.sh`, and runs the lane's client **in Docker** (`--network host`) — so the
-host machine needs only Docker + jq + a buildable host, no per-language
-toolchain. Run with `just conformance [lane]` or `conformance/run.sh [lane]`
-(no arg = all lanes). Note: a reusable runtime-configurable mock seeds its
-config *through a mock route* (the s3 lane's `config.ts`) because there's no
-public kv/gkv-write API — only GET/DELETE. CI lane is
-`.github/workflows/conformance.yml` (`workflow_dispatch` only — not gating,
-since it builds + boots the host and builds SDK images). Not in `just check`.
+language/SDK toolchain, pinned), a `spec.json` (a **group spec**: a group name +
+routes referencing their handler by `source_file`), the mock handler(s), an
+optional `setup.sh` (post-import seeding), and the client test. The shared
+`conformance/run.sh` boots the host in-memory (native, cargo), inlines each
+lane's sources and **imports the group in one `POST /__api/groups/import` call**
+(jq/curl — the same spec round-trip the CLI/MCP/UI use), runs any `setup.sh`,
+and runs the lane's client **in Docker** (`--network host`) — so the host
+machine needs only Docker + jq + a buildable host, no per-language toolchain.
+Mock traffic is addressed on the group subdomain `http://{group}.localhost:PORT`
+(ADR-0030 virtual-host routing; the apex is control-plane only), with
+`--add-host {group}.localhost:127.0.0.1` resolving the label to loopback in the
+container — no client code change, the SDKs derive the right `Host` from
+`WM_BASE`. Run with `just conformance [lane]` or `conformance/run.sh [lane]`
+(no arg = all lanes). State the routes-only spec can't carry is seeded in
+`setup.sh` (the s3 lane `PUT`s its injection rules to `/__api/groups/{g}/state`,
+ADR-0025). CI lane is `.github/workflows/conformance.yml` (`workflow_dispatch`
+only — not gating, since it builds + boots the host and builds SDK images). Not
+in `just check`.
 
 The product skill (shipped to *users* of WireMirage) lives at
 `skill/wiremirage/` per ADR-0015 (with a debug sub-skill at
