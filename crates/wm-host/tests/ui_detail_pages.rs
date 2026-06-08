@@ -192,6 +192,13 @@ async fn group_detail_renders_metadata_and_routes_for_owner() {
         body.contains("/__ui/routes/new?group=stripe-mock"),
         "add-route link visible: {body}"
     );
+    // Export spec is an action button (Save-As enhanced), not a plain link:
+    // styled as a button, carries `download` + the suggested filename.
+    assert!(
+        body.contains("/__ui/groups/stripe-mock/export?format=yaml")
+            && body.contains("data-wm-save=\"stripe-mock.yaml\""),
+        "export is a download button: {body}"
+    );
 }
 
 #[tokio::test]

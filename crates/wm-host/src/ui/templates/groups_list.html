@@ -4,7 +4,10 @@
 <section class="page-header">
   <div class="page-header__row">
     <h1>Groups</h1>
-    <a class="btn btn--primary" href="/__ui/groups/new">+ New group</a>
+    <span>
+      <a class="btn btn--ghost" href="/__ui/groups/import">Import spec</a>
+      <a class="btn btn--primary" href="/__ui/groups/new">+ New group</a>
+    </span>
   </div>
   <p class="text-muted">
     {%- if user.is_admin and filters.owner_scope == "everyone" -%}

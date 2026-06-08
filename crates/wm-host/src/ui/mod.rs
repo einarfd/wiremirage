@@ -64,6 +64,7 @@ impl UiTemplates {
         tmpl!("connect.html", "templates/connect.html");
         tmpl!("groups_list.html", "templates/groups_list.html");
         tmpl!("groups_new.html", "templates/groups_new.html");
+        tmpl!("groups_import.html", "templates/groups_import.html");
         tmpl!("match_probe.html", "templates/match_probe.html");
         tmpl!("group_detail.html", "templates/group_detail.html");
         tmpl!("routes_list.html", "templates/routes_list.html");
@@ -111,7 +112,12 @@ pub fn router(state: AppState) -> Router {
             "/__ui/groups/new",
             get(group_new_form).post(group_new_submit),
         )
+        .route(
+            "/__ui/groups/import",
+            get(group_import_form).post(group_import_submit),
+        )
         .route("/__ui/groups/{group}", get(group_detail_page))
+        .route("/__ui/groups/{group}/export", get(group_export_download))
         .route(
             "/__ui/groups/{group}/refresh",
             axum::routing::post(group_refresh_form),
@@ -3583,6 +3589,131 @@ fn render_group_new(
         *resp.status_mut() = StatusCode::BAD_REQUEST;
     }
     resp
+}
+
+// -- Group spec import / export ---------------------------------------------
+
+#[derive(Deserialize)]
+struct ImportSpecForm {
+    #[serde(rename = "_csrf")]
+    _csrf: Option<String>,
+    /// "yaml" | "json".
+    format: String,
+    /// The pasted spec text.
+    spec: String,
+}
+
+#[derive(Serialize, Default, Clone)]
+struct ImportFormState {
+    format: String,
+    spec: String,
+}
+
+fn import_spec_format(s: &str) -> wm_core::spec::SpecFormat {
+    match s {
+        "json" => wm_core::spec::SpecFormat::Json,
+        _ => wm_core::spec::SpecFormat::Yaml,
+    }
+}
+
+async fn group_import_form(State(state): State<AppState>, auth: AuthContext) -> Response {
+    render_group_import(
+        &state,
+        &auth,
+        ImportFormState {
+            format: "yaml".into(),
+            ..ImportFormState::default()
+        },
+        None,
+    )
+}
+
+async fn group_import_submit(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::Form(form): axum::Form<ImportSpecForm>,
+) -> Response {
+    let _ = form._csrf; // validated by csrf_middleware
+    let form_state = ImportFormState {
+        format: form.format.clone(),
+        spec: form.spec.clone(),
+    };
+    let parsed = match wm_core::spec::parse_str(&form.spec, import_spec_format(&form.format)) {
+        Ok(s) => s,
+        Err(e) => return render_group_import(&state, &auth, form_state, Some(format!("{e:#}"))),
+    };
+    match crate::api::import_group_core(&state, &auth, parsed).await {
+        Ok(summary) => {
+            axum::response::Redirect::to(&format!("/__ui/groups/{}", summary.group)).into_response()
+        }
+        Err(e) => render_group_import(&state, &auth, form_state, Some(e.message().to_string())),
+    }
+}
+
+fn render_group_import(
+    state: &AppState,
+    auth: &AuthContext,
+    form: ImportFormState,
+    error: Option<String>,
+) -> Response {
+    let had_error = error.is_some();
+    let mut resp = render(
+        state,
+        "groups_import.html",
+        context! {
+            page_title => "Import group",
+            user => UserBadge::from(auth),
+            form => form,
+            error => error,
+        },
+    );
+    if had_error {
+        *resp.status_mut() = StatusCode::BAD_REQUEST;
+    }
+    resp
+}
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    format: Option<String>,
+}
+
+async fn group_export_download(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    Query(q): Query<ExportQuery>,
+) -> Response {
+    let format = import_spec_format(q.format.as_deref().unwrap_or("yaml"));
+    let spec = match crate::api::export_group_core(&state, &auth, &group_ref) {
+        Ok(s) => s,
+        Err(e) => {
+            return match e.code() {
+                "forbidden" => forbidden_page(&state, &auth),
+                "not_found" => ui_not_found(&state, &auth, &format!("Group {group_ref}")),
+                _ => ui_error_400_text(&state, &auth, e.message()),
+            };
+        }
+    };
+    let rendered = match wm_core::spec::render(&spec, format) {
+        Ok(r) => r,
+        Err(e) => return ui_error_500(&state, &auth, format!("render spec: {e:#}")),
+    };
+    let (ext, ctype) = match format {
+        wm_core::spec::SpecFormat::Json => ("json", "application/json"),
+        wm_core::spec::SpecFormat::Yaml => ("yaml", "application/yaml"),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, ctype.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}.{ext}\"", spec.name),
+            ),
+        ],
+        rendered,
+    )
+        .into_response()
 }
 
 // -- Stubs ------------------------------------------------------------------
