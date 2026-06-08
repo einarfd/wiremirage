@@ -1,0 +1,11 @@
+{
+  "name": "s3-slowdown",
+  "routes": [
+    {
+      "methods": ["GET"],
+      "path": "/{bucket}/{key}",
+      "language": "typescript",
+      "source_file": "inject.ts"
+    }
+  ]
+}

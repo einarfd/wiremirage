@@ -1,3 +1,0 @@
-[
-  { "group": "s3-slowdown", "methods": ["GET"], "path": "/{bucket}/{key}", "source": "inject.ts" }
-]

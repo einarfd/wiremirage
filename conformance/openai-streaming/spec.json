@@ -1,0 +1,17 @@
+{
+  "name": "openai",
+  "routes": [
+    {
+      "methods": ["POST"],
+      "path": "/v1/chat/completions",
+      "language": "typescript",
+      "source_file": "handler.ts"
+    },
+    {
+      "methods": ["POST"],
+      "path": "/v1-error/chat/completions",
+      "language": "typescript",
+      "source_file": "error-handler.ts"
+    }
+  ]
+}
