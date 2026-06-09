@@ -45,6 +45,14 @@ declare module "wiremirage:handler/response-stream@0.1.0" {
   export function finish(): void;
 }
 
+declare module "wiremirage:handler/log@0.1.0" {
+  /** Emit a handler log line; it attaches to this request's journal entry. */
+  export function emit(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+  ): void;
+}
+
 import { getSource } from "wiremirage:handler/engine-host@0.1.0";
 import {
   sleep as clockSleep,
@@ -56,6 +64,7 @@ import {
   writeChunk as respWriteChunk,
   finish as respFinish,
 } from "wiremirage:handler/response-stream@0.1.0";
+import { emit as logEmit } from "wiremirage:handler/log@0.1.0";
 
 // Expose the clock primitives to user code as a `host` global. The
 // WIT signatures use `u64`, which componentize-js maps to `bigint` on
@@ -93,6 +102,88 @@ function toBytes(chunk: unknown): Uint8Array {
     };
   },
 };
+
+// Handler logging. The `log` host import (WIT `interface log`) routes each
+// line to this request's journal entry (`handler_logs`), visible via
+// `wm journal show`, the journal-entry UI, and `dry_run`. Before this the
+// `log` global was never surfaced, so the documented logging path was dead
+// and `console.*` (StarlingMonkey's stderr console) reached nothing.
+const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
+type LogLevel = (typeof LOG_LEVELS)[number];
+
+function stringifyArg(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return value !== null && typeof value === "object"
+      ? JSON.stringify(value)
+      : String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function emitAt(level: LogLevel, args: unknown[]): void {
+  logEmit(level, args.map(stringifyArg).join(" "));
+}
+
+// Faithful to the WIT `log.emit(level, message)`, plus level-named
+// conveniences. An unknown level coerces to "info" so a typo can't trap
+// the instance (the WIT enum would otherwise reject it).
+(globalThis as Record<string, unknown>).log = {
+  emit: (level: string, message: unknown): void => {
+    const lvl: LogLevel = (LOG_LEVELS as readonly string[]).includes(level)
+      ? (level as LogLevel)
+      : "info";
+    logEmit(lvl, stringifyArg(message));
+  },
+  debug: (...args: unknown[]): void => emitAt("debug", args),
+  info: (...args: unknown[]): void => emitAt("info", args),
+  warn: (...args: unknown[]): void => emitAt("warn", args),
+  error: (...args: unknown[]): void => emitAt("error", args),
+};
+
+// Agents reach for `console.log` reflexively regardless of the docs, so
+// route the common console methods to the same handler-log channel. Augment
+// the existing console object rather than replace it, so other methods
+// (`console.dir`, etc.) keep working.
+{
+  const c = ((globalThis as Record<string, unknown>).console ??
+    {}) as Record<string, unknown>;
+  c.log = (...args: unknown[]): void => emitAt("info", args);
+  c.info = (...args: unknown[]): void => emitAt("info", args);
+  c.debug = (...args: unknown[]): void => emitAt("debug", args);
+  c.warn = (...args: unknown[]): void => emitAt("warn", args);
+  c.error = (...args: unknown[]): void => emitAt("error", args);
+  c.trace = (...args: unknown[]): void => emitAt("debug", args);
+  (globalThis as Record<string, unknown>).console = c;
+}
+
+// StarlingMonkey exposes web-platform network globals (fetch, WebSocket, …)
+// that have no host wiring in this engine, so calling them hard-traps the
+// wasm instance with an opaque backtrace instead of raising a catchable
+// error. WireMirage handlers have no network egress by design (the sandbox
+// imports are store / log / clock / response-stream only). Replace the
+// egress globals with stubs that throw a clear, catchable Error. Best-effort:
+// if a global is locked, leave it rather than break engine init.
+function networkUnavailable(name: string): never {
+  throw new Error(
+    `${name} is not available in WireMirage handlers — handlers have no ` +
+      `network access. Mock the upstream as another route instead.`,
+  );
+}
+for (const name of ["fetch", "WebSocket", "EventSource", "XMLHttpRequest"]) {
+  try {
+    Object.defineProperty(globalThis, name, {
+      value: function (): never {
+        networkUnavailable(name);
+      },
+      writable: true,
+      configurable: true,
+    });
+  } catch {
+    // Global is non-configurable in this engine build; leave it as-is.
+  }
+}
 
 // Each call to `handle` is a fresh wasmtime instance, so caching the
 // compiled user-handle function across requests doesn't pay rent.
