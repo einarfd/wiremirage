@@ -130,19 +130,22 @@ const bodyText = new TextDecoder().decode(req.body);
 const parsed = JSON.parse(bodyText);  // if you expect JSON
 ```
 
-## Reading a header
+## Convenience accessors
+
+The request also has accessor methods so you don't have to filter the tuple
+arrays by hand. Each returns the first match's value, or `undefined`:
 
 ```ts
-// Headers are tuples, not a map — iterate or filter.
-const ct = req.headers.find(([k]) => k === "content-type")?.[1];
+const ct = req.header("content-type");   // case-INSENSITIVE (HTTP headers)
+const userId = req.pathParam("id");      // exact match
+const page = req.queryParam("page");     // exact match
 ```
 
-## Reading a path parameter
+The underlying arrays (`req.headers`, `req.pathParams`, `req.query`) are still
+there if you'd rather iterate — e.g. for a multi-valued header:
 
 ```ts
-// Route registered with path "/users/{id}/posts/{post-id}"
-const userId = req.pathParams.find(([k]) => k === "id")?.[1];
-const postId = req.pathParams.find(([k]) => k === "post-id")?.[1];
+const cookies = req.headers.filter(([k]) => k === "set-cookie").map(([, v]) => v);
 ```
 "#;
 

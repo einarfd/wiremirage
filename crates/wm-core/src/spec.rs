@@ -43,11 +43,6 @@ impl SpecFormat {
 pub struct GroupSpec {
     /// Group name (DNS label). Required.
     pub name: String,
-    /// Free-form description carried through round-trips. Not persisted by
-    /// the host data model today, so it survives the spec file but is lost
-    /// once the group is created. Kept so authored specs don't break.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
     /// Duration string (`"24h"`, `"30m"`, `"86400"`). Plain integers are
     /// seconds. See [`parse_duration`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,7 +358,7 @@ mod tests {
     fn missing_name_errors() {
         // `name` has no serde default, so deserialize rejects it before
         // normalize even runs — either layer is fine, the spec is rejected.
-        let err = parse_str("description: nope\nroutes: []\n", SpecFormat::Yaml).unwrap_err();
+        let err = parse_str("ttl: 1h\nroutes: []\n", SpecFormat::Yaml).unwrap_err();
         assert!(format!("{err:#}").contains("name"));
     }
 
@@ -383,12 +378,11 @@ mod tests {
 
     #[test]
     fn yaml_round_trip_preserves_shape() {
-        let yaml = "name: stripe-mock\ndescription: Stripe mock\nttl: 1h\nsliding: true\nroutes:\n  - method: POST\n    path: /v1/charges\n    source: inline\n";
+        let yaml = "name: stripe-mock\nttl: 1h\nsliding: true\nroutes:\n  - method: POST\n    path: /v1/charges\n    source: inline\n";
         let spec = parse_str(yaml, SpecFormat::Yaml).unwrap();
         let rendered = render(&spec, SpecFormat::Yaml).unwrap();
         let again = parse_str(&rendered, SpecFormat::Yaml).unwrap();
         assert_eq!(again.name, "stripe-mock");
-        assert_eq!(again.description.as_deref(), Some("Stripe mock"));
         assert_eq!(again.ttl.as_deref(), Some("1h"));
         assert_eq!(again.sliding, Some(true));
         let n = normalize(&again).unwrap();

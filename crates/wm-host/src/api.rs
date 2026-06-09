@@ -2251,7 +2251,6 @@ pub(crate) fn export_group_core(
 
     Ok(wm_core::spec::GroupSpec {
         name: group.name.clone(),
-        description: None,
         ttl: Some(wm_core::spec::format_duration(group.ttl_seconds)),
         sliding: Some(group.sliding_ttl),
         routes: route_specs,

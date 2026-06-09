@@ -185,6 +185,45 @@ for (const name of ["fetch", "WebSocket", "EventSource", "XMLHttpRequest"]) {
   }
 }
 
+// Convenience accessors over the request's tuple-array fields, so a handler
+// can write `req.header("content-type")` instead of
+// `req.headers.find(([k]) => k === "content-type")?.[1]`. The arrays
+// (`headers` / `pathParams` / `query`) stay as-is; these are additive. Header
+// lookup is case-insensitive (HTTP semantics); path-params and query keys
+// match exactly. Each returns the first match's value, or `undefined`.
+function tupleLookup(
+  pairs: unknown,
+  name: string,
+  caseInsensitive: boolean,
+): string | undefined {
+  if (!Array.isArray(pairs)) return undefined;
+  const target = caseInsensitive ? name.toLowerCase() : name;
+  for (const pair of pairs) {
+    if (Array.isArray(pair) && pair.length >= 2) {
+      const key = caseInsensitive ? String(pair[0]).toLowerCase() : pair[0];
+      if (key === target) return pair[1] as string;
+    }
+  }
+  return undefined;
+}
+
+function withAccessors(req: unknown): unknown {
+  if (req === null || typeof req !== "object") return req;
+  const r = req as Record<string, unknown>;
+  try {
+    r.header = (name: string): string | undefined =>
+      tupleLookup(r.headers, name, true);
+    r.pathParam = (name: string): string | undefined =>
+      tupleLookup(r.pathParams, name, false);
+    r.queryParam = (name: string): string | undefined =>
+      tupleLookup(r.query, name, false);
+  } catch {
+    // Request object is non-extensible in this build — the array fields are
+    // still there, so handlers fall back to the `.find(...)` form.
+  }
+  return r;
+}
+
 // Each call to `handle` is a fresh wasmtime instance, so caching the
 // compiled user-handle function across requests doesn't pay rent.
 // (If we ever move to an instance pool, this is where the cache
@@ -222,7 +261,7 @@ export function handle(
   }
   try {
     const result = (userHandle as (a: unknown, b: unknown, c: unknown) => unknown)(
-      req,
+      withAccessors(req),
       routeStore,
       groupStore,
     );
