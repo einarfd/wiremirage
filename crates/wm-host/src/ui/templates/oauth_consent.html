@@ -8,7 +8,7 @@
 
   <p>
     <strong>{{ client_name }}</strong> wants to access your WireMirage
-    account. Approving will let it call <code>/__api/mcp</code> on your
+    account. Approving will let it call <code>/api/mcp</code> on your
     behalf for the next hour (and refresh that access until you revoke
     it from the tokens page).
   </p>
@@ -25,7 +25,7 @@
     request will be cancelled without issuing any tokens.
   </p>
 
-  <form method="post" action="/__ui/oauth/consent" class="action-row">
+  <form method="post" action="/ui/oauth/consent" class="action-row">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="state" value="{{ state }}">
     <button type="submit" name="action" value="approve" class="btn btn--primary">

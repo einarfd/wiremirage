@@ -136,13 +136,13 @@ async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
     // wm_csrf cookie + read the embedded `_csrf` form value, then POST
     // with both. Returns the combined cookie string callers send back
     // on subsequent requests.
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf form value");
 
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -173,7 +173,7 @@ fn extract_csrf_value(body: &str) -> Option<String> {
     Some(body[start..start + end].to_string())
 }
 
-// -- /__ui/journal/live -----------------------------------------------------
+// -- /ui/journal/live -----------------------------------------------------
 
 #[tokio::test]
 async fn live_journal_page_renders_with_group_filter() {
@@ -181,7 +181,7 @@ async fn live_journal_page_renders_with_group_filter() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/journal/live?group=stripe-mock"))
+        .get(url(&h, "/ui/journal/live?group=stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -195,7 +195,7 @@ async fn live_journal_page_renders_with_group_filter() {
     assert!(body.contains("POST"), "method visible in entry");
     // The SSE URL is wired through to the page script
     assert!(
-        body.contains("/__api/journal/tail?group=stripe-mock"),
+        body.contains("/api/journal/tail?group=stripe-mock"),
         "SSE URL in inline script: {body}"
     );
     // Status pill class for the 200 response
@@ -217,7 +217,7 @@ async fn live_journal_picker_view_omits_pause_button() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "alice").await;
     let body = client
-        .get(url(&h, "/__ui/journal/live"))
+        .get(url(&h, "/ui/journal/live"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -237,7 +237,7 @@ async fn live_journal_admin_without_group_renders_host_wide_picker() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/journal/live"))
+        .get(url(&h, "/ui/journal/live"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -248,7 +248,7 @@ async fn live_journal_admin_without_group_renders_host_wide_picker() {
     assert!(body.contains("Tailing every handled request"));
     assert!(body.contains("All (host-wide)"));
     // Inline SSE script connects to the unfiltered tail endpoint.
-    assert!(body.contains("/__api/journal/tail"));
+    assert!(body.contains("/api/journal/tail"));
 }
 
 #[tokio::test]
@@ -263,7 +263,7 @@ async fn live_journal_host_wide_prefetches_across_groups_for_admin() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/journal/live"))
+        .get(url(&h, "/ui/journal/live"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -287,7 +287,7 @@ async fn live_journal_non_admin_without_group_shows_picker_only() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "alice").await;
     let body = client
-        .get(url(&h, "/__ui/journal/live"))
+        .get(url(&h, "/ui/journal/live"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -312,7 +312,7 @@ async fn live_journal_non_owner_with_group_is_403() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/journal/live?group=stripe-mock"))
+        .get(url(&h, "/ui/journal/live?group=stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -326,7 +326,7 @@ async fn live_journal_unknown_group_is_404() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/journal/live?group=no-such"))
+        .get(url(&h, "/ui/journal/live?group=no-such"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -347,7 +347,7 @@ async fn live_journal_empty_form_values_do_not_wipe_entries() {
     let body = client
         .get(url(
             &h,
-            "/__ui/journal/live?group=stripe-mock&method=&path_pattern=&status=",
+            "/ui/journal/live?group=stripe-mock&method=&path_pattern=&status=",
         ))
         .header("cookie", &cookie)
         .send()
@@ -376,7 +376,7 @@ async fn live_journal_filters_round_trip_through_sse_url() {
     let body = client
         .get(url(
             &h,
-            "/__ui/journal/live?group=stripe-mock&method=POST&status=2xx",
+            "/ui/journal/live?group=stripe-mock&method=POST&status=2xx",
         ))
         .header("cookie", &cookie)
         .send()
@@ -393,7 +393,7 @@ async fn live_journal_filters_round_trip_through_sse_url() {
     assert!(body.contains("value=\"2xx\""));
 }
 
-// -- /__ui/journal/{group}/{number} ----------------------------------------
+// -- /ui/journal/{group}/{number} ----------------------------------------
 
 #[tokio::test]
 async fn journal_entry_renders_full_record_for_owner() {
@@ -402,7 +402,7 @@ async fn journal_entry_renders_full_record_for_owner() {
     let cookie = login_cookie(&h, &client, "admin").await;
     // The first journal entry from the seeded traffic should be #1.
     let body = client
-        .get(url(&h, "/__ui/journal/stripe-mock/1"))
+        .get(url(&h, "/ui/journal/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -420,11 +420,11 @@ async fn journal_entry_renders_full_record_for_owner() {
     // Breadcrumb walks Groups → group → route → entry (matches the
     // wireframe; slice-30-style restructure).
     assert!(
-        body.contains("/__ui/groups/stripe-mock"),
+        body.contains("/ui/groups/stripe-mock"),
         "breadcrumb has group link"
     );
     assert!(
-        body.contains("/__ui/routes/stripe-mock/1"),
+        body.contains("/ui/routes/stripe-mock/1"),
         "breadcrumb has route link"
     );
     assert!(body.contains("journal #1"), "current-page label visible");
@@ -436,7 +436,7 @@ async fn journal_entry_403_for_non_owner() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/journal/stripe-mock/1"))
+        .get(url(&h, "/ui/journal/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -450,7 +450,7 @@ async fn journal_entry_404_when_unknown_number() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/journal/stripe-mock/9999"))
+        .get(url(&h, "/ui/journal/stripe-mock/9999"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -464,7 +464,7 @@ async fn journal_entry_404_when_unknown_group() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/journal/no-such/1"))
+        .get(url(&h, "/ui/journal/no-such/1"))
         .header("cookie", &cookie)
         .send()
         .await

@@ -77,11 +77,11 @@ pub struct Route {
     /// Cumulative count of matched dispatches against this route. Bumped
     /// on every successful match; `0` for never-hit routes. Used as the
     /// `hits_total` field in REST responses and as a sort column on
-    /// `GET /__api/routes`.
+    /// `GET /api/routes`.
     pub hits_total: u64,
     /// Timestamp of the most recent matched dispatch. `None` for
     /// never-hit routes (or routes that pre-date this field). Used as
-    /// the default sort column on `GET /__api/routes`.
+    /// the default sort column on `GET /api/routes`.
     pub last_hit_at: Option<DateTime<Utc>>,
 }
 
@@ -107,7 +107,7 @@ pub struct Group {
     pub sliding_ttl: bool,
     /// Timestamp of the most recent matched dispatch against any
     /// route in this group. `None` for groups that have never seen
-    /// traffic. Used as the default sort column on `GET /__api/groups`.
+    /// traffic. Used as the default sort column on `GET /api/groups`.
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
@@ -245,7 +245,7 @@ impl Registry {
 
     /// Resolve a group reference (name or ULID) and return the group
     /// record, or `NotFound` if no such group exists. Used by
-    /// `/__api/journal/{group}` so callers can refer to groups by
+    /// `/api/journal/{group}` so callers can refer to groups by
     /// either form.
     pub fn read_group_by_ref(&self, reference: &str) -> Result<Group, RegistryError> {
         let mut bucket = self.bucket()?;
@@ -554,7 +554,7 @@ impl Registry {
     /// Returns each key alongside its storage-level kind, mirroring
     /// `list_route_state` — bytes values inline, list/hash/set values
     /// summarised by length so the caller can render a compact
-    /// overview. Used by the `/__ui/groups/{group}/state` page.
+    /// overview. Used by the `/ui/groups/{group}/state` page.
     pub fn list_group_state(&self, group_id: &str) -> Result<Vec<RouteStateEntry>, RegistryError> {
         let mut bucket = self.storage.group_bucket(group_id)?;
         let keys = bucket.list_keys(None)?;
@@ -601,7 +601,7 @@ impl Registry {
 
     /// Clear all per-route and per-group kv state for the group, but
     /// leave the routes themselves alive. Used by the
-    /// `DELETE /__api/groups/{group}/state` endpoint.
+    /// `DELETE /api/groups/{group}/state` endpoint.
     pub fn clear_group_state(&self, group_id: &str) -> Result<(), RegistryError> {
         let mut bucket = self.bucket()?;
         bucket.delete_with_prefix(&format!("kv:{group_id}:"))?;
@@ -612,7 +612,7 @@ impl Registry {
     /// Upsert byte values into the group's shared `gkv:` namespace
     /// (ADR-0025) — the store handlers read via `group-store`. Listed
     /// keys are written; others left untouched. Used by
-    /// `PUT /__api/groups/{group}/state`.
+    /// `PUT /api/groups/{group}/state`.
     pub fn set_group_state(
         &self,
         group_id: &str,
@@ -927,7 +927,7 @@ impl Registry {
     /// the value bytes are inlined; for list/hash/set values the
     /// payload is summarised (length / field count / member count)
     /// so the caller can render a compact overview without paying for
-    /// the full contents. Used by `GET /__api/routes/{group}/{n}/state`.
+    /// the full contents. Used by `GET /api/routes/{group}/{n}/state`.
     pub fn list_route_state(
         &self,
         group_ref: &str,
@@ -979,7 +979,7 @@ impl Registry {
 
     /// Clear the per-route kv namespace for the given route. The
     /// route itself stays; just its private state is wiped. Used by
-    /// `DELETE /__api/routes/{group}/{n}/state`.
+    /// `DELETE /api/routes/{group}/{n}/state`.
     pub fn clear_route_state(&self, group_ref: &str, number: u32) -> Result<u64, RegistryError> {
         let route = self.get_route_by_slug(group_ref, number)?;
         let mut bucket = self.bucket()?;
@@ -990,7 +990,7 @@ impl Registry {
     /// Upsert byte values into the route's private `kv:` namespace
     /// (ADR-0025). Listed keys are written at the same physical
     /// location the handler's `store` reads; other keys are left
-    /// untouched. Used by `PUT /__api/routes/{group}/{n}/state`.
+    /// untouched. Used by `PUT /api/routes/{group}/{n}/state`.
     pub fn set_route_state(
         &self,
         group_ref: &str,

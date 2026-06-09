@@ -2,9 +2,9 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/groups/{{ group_name }}">{{ group_name }}</a>
+  <a href="/ui/groups/{{ group_name }}">{{ group_name }}</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">State</span>
 </nav>
@@ -21,7 +21,7 @@
   <header class="card__header">
     <h2>{{ data.total }} entr{% if data.total == 1 %}y{% else %}ies{% endif %}</h2>
     {% if data.total > 0 %}
-    <form method="post" action="/__ui/groups/{{ group_name }}/state" class="inline-form"
+    <form method="post" action="/ui/groups/{{ group_name }}/state" class="inline-form"
           onsubmit="return confirm('Wipe ALL kv state for {{ group_name }} (gkv + every route)? Routes themselves stay; the kv contents are deleted.');">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button type="submit" class="btn btn--danger">Clear all group state</button>
@@ -71,7 +71,7 @@
     others left untouched. (For binary values, use the CLI/MCP, which accept
     base64.)
   </p>
-  <form method="post" action="/__ui/groups/{{ group_name }}/state/set">
+  <form method="post" action="/ui/groups/{{ group_name }}/state/set">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <textarea name="keys" rows="6" class="source-editor"
               placeholder="config.mode=slow&#10;config.rate=10"></textarea>
@@ -82,6 +82,6 @@
 </section>
 
 <footer class="page-footer">
-  <a class="link" href="/__ui/groups/{{ group_name }}">&larr; Back to {{ group_name }}</a>
+  <a class="link" href="/ui/groups/{{ group_name }}">&larr; Back to {{ group_name }}</a>
 </footer>
 {% endblock %}

@@ -1,5 +1,5 @@
 //! Tier-2 MCP integration tests. Boots wm-host on a random port,
-//! connects an rmcp streamable-HTTP client at `/__api/mcp`, and
+//! connects an rmcp streamable-HTTP client at `/api/mcp`, and
 //! exercises a representative slice of the 13 slice-10 tools end to
 //! end. The streamable-HTTP transport here is the same path real MCP
 //! clients (Claude Desktop, Cursor, etc.) take, so a green run here
@@ -113,7 +113,7 @@ fn transport(
     base_url: &str,
     token: Option<&str>,
 ) -> StreamableHttpClientTransport<reqwest::Client> {
-    let url = format!("{base_url}/__api/mcp");
+    let url = format!("{base_url}/api/mcp");
     let mut config = StreamableHttpClientTransportConfig::with_uri(url);
     if let Some(t) = token {
         config = config.auth_header(t);
@@ -1219,7 +1219,7 @@ async fn list_recent_unmatched_filters_by_path_pattern() {
 async fn list_recent_unmatched_includes_near_misses_projection() {
     // Backfill of the slice-35 deferral: the MCP UnmatchedSummary
     // used to drop the near_misses list, forcing agents to re-fetch
-    // via REST `/__api/unmatched/{n}` to see the "Did you mean…?"
+    // via REST `/api/unmatched/{n}` to see the "Did you mean…?"
     // candidates. Now it ships them on the list response.
     let h = start().await;
 

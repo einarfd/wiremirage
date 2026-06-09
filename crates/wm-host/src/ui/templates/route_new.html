@@ -2,7 +2,7 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/routes">Routes</a>
+  <a href="/ui/routes">Routes</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">New route</span>
 </nav>
@@ -12,7 +12,7 @@
   <p class="text-muted">
     Most routes should be created by an agent via the MCP server or REST API.
     This form is for ad-hoc fixes and one-offs. Pre-compiled wasm uploads still
-    need to go through <code>POST /__api/routes</code>.
+    need to go through <code>POST /api/routes</code>.
   </p>
 </header>
 
@@ -30,7 +30,7 @@
 </section>
 {% endif %}
 
-<form method="post" action="/__ui/routes/new" class="route-new-form">
+<form method="post" action="/ui/routes/new" class="route-new-form">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
   <section class="card">
@@ -73,16 +73,16 @@
 
   <footer class="page-footer">
     <button type="submit" class="btn btn--primary">Create route</button>
-    <a href="/__ui/routes" class="btn btn--ghost">Cancel</a>
+    <a href="/ui/routes" class="btn btn--ghost">Cancel</a>
   </footer>
 </form>
 
-<script src="/__ui/static/ace/ace.js"></script>
-<script src="/__ui/static/ace/mode-javascript.js"></script>
-<script src="/__ui/static/ace/mode-typescript.js"></script>
-<script src="/__ui/static/ace/theme-github_light_default.js"></script>
-<script src="/__ui/static/ace/theme-github_dark.js"></script>
-<script src="/__ui/static/wm-ace.js"></script>
+<script src="/ui/static/ace/ace.js"></script>
+<script src="/ui/static/ace/mode-javascript.js"></script>
+<script src="/ui/static/ace/mode-typescript.js"></script>
+<script src="/ui/static/ace/theme-github_light_default.js"></script>
+<script src="/ui/static/ace/theme-github_dark.js"></script>
+<script src="/ui/static/wm-ace.js"></script>
 <script>
   // Slice 41 follow-up: keep the editor's syntax mode in sync with
   // the language dropdown so the highlighting matches what the form

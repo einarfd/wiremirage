@@ -5,7 +5,7 @@
 //! already exist in the host. The 4 host-blocked tools
 //! (`find_route`, `update_route`, `dry_run_route`, per-route state)
 //! and the 2 streaming tools (`wait_for_request`, `tail_journal`,
-//! both depending on `GET /__api/journal/tail` SSE) land in
+//! both depending on `GET /api/journal/tail` SSE) land in
 //! follow-up slices.
 
 pub mod capabilities;

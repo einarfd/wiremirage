@@ -2,11 +2,11 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/groups/{{ route_group_name }}">{{ route_group_name }}</a>
+  <a href="/ui/groups/{{ route_group_name }}">{{ route_group_name }}</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}">{{ route_methods }} {{ route_path }}</a>
+  <a href="/ui/routes/{{ route_group_name }}/{{ route_number }}">{{ route_methods }} {{ route_path }}</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">Dry-run</span>
 </nav>
@@ -28,7 +28,7 @@
 </section>
 {% endif %}
 
-<form method="post" action="/__ui/routes/{{ route_group_name }}/{{ route_number }}/dry-run">
+<form method="post" action="/ui/routes/{{ route_group_name }}/{{ route_number }}/dry-run">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
   <section class="card">
@@ -83,7 +83,7 @@
     </div>
     <div class="action-row">
       <button type="submit" class="btn btn--primary">Run</button>
-      <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Back to route</a>
+      <a href="/ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Back to route</a>
     </div>
   </section>
 </form>

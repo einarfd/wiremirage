@@ -2,7 +2,7 @@
 //!
 //! 1. **MCP** — `get_capabilities` tool, for clients connected via MCP
 //!    (Claude Desktop, Cursor, MCP Inspector).
-//! 2. **REST** — `GET /__api/capabilities[/{topic}]`, for the `wm`
+//! 2. **REST** — `GET /api/capabilities[/{topic}]`, for the `wm`
 //!    CLI and any other bearer-token caller.
 //! 3. **Skill** — `skill/wiremirage/SKILL.md` ships the same shape
 //!    for agents driving via Bash. The skill is a static file; this
@@ -80,7 +80,7 @@ Fetch each via the appropriate surface:
 
 - **MCP**: `get_capabilities(topic: "<name>")`
 - **CLI**: `wm capabilities <name>`
-- **REST**: `GET /__api/capabilities/<name>`
+- **REST**: `GET /api/capabilities/<name>`
 
 Topics:
 
@@ -274,7 +274,7 @@ log.emit("error", `panic: ${e.message}`);
 Logs attach to the journal record for this request and show up in:
 
 - `wm journal show <group>/<n>` (CLI)
-- the `/__ui/journal/{group}/{n}` page (web UI)
+- the `/ui/journal/{group}/{n}` page (web UI)
 
 Logs do NOT go to stdout; the wasm sandbox doesn't expose stdio. Use
 this interface for anything you'd otherwise `console.log`.
@@ -471,7 +471,7 @@ body: new TextEncoder().encode(JSON.stringify(data));
 
 ## Mock traffic is unauthenticated by design
 
-The `/__api/*`, `/__ui/*`, `/__auth/*` paths require auth. Everything
+The `/api/*`, `/ui/*`, `/auth/*` paths require auth. Everything
 else (including your handler's path) is intentionally open — system-
 under-test code typically doesn't carry tokens. Don't put secrets in
 the URL.

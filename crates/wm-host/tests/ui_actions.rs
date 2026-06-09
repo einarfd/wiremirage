@@ -120,13 +120,13 @@ async fn start_seeded() -> (Harness, String, String) {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf form value");
 
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -169,7 +169,7 @@ async fn refresh_redirects_to_group_detail() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/refresh"))
+        .post(url(&h, "/ui/groups/stripe-mock/refresh"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -183,7 +183,7 @@ async fn refresh_redirects_to_group_detail() {
     );
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/__ui/groups/stripe-mock"
+        "/ui/groups/stripe-mock"
     );
 }
 
@@ -195,7 +195,7 @@ async fn edit_ttl_persists_new_ttl_and_sliding_flag() {
 
     // Set TTL to 7200, turn sliding off.
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/edit"))
+        .post(url(&h, "/ui/groups/stripe-mock/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&ttl_seconds=7200"))
@@ -207,7 +207,7 @@ async fn edit_ttl_persists_new_ttl_and_sliding_flag() {
     // Re-render the page; the new TTL should appear and sliding
     // should be off.
     let body = client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -229,7 +229,7 @@ async fn edit_renames_group_and_redirects_to_new_subdomain() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/edit"))
+        .post(url(&h, "/ui/groups/stripe-mock/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -241,19 +241,19 @@ async fn edit_renames_group_and_redirects_to_new_subdomain() {
     assert!((300..400).contains(&resp.status().as_u16()));
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/__ui/groups/stripe-renamed"
+        "/ui/groups/stripe-renamed"
     );
 
     // The new subdomain resolves; the old name is gone (the group moved).
     let new = client
-        .get(url(&h, "/__ui/groups/stripe-renamed"))
+        .get(url(&h, "/ui/groups/stripe-renamed"))
         .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
     assert_eq!(new.status().as_u16(), 200);
     let old = client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -268,7 +268,7 @@ async fn edit_rejects_invalid_rename() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/edit"))
+        .post(url(&h, "/ui/groups/stripe-mock/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         // Uppercase + underscore is not a valid DNS label.
@@ -279,7 +279,7 @@ async fn edit_rejects_invalid_rename() {
     assert_eq!(resp.status().as_u16(), 400);
     // The failed rename left the group untouched.
     let still = client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -295,7 +295,7 @@ async fn match_probe_page_shows_hit_and_near_miss() {
 
     // Empty form renders.
     let form = client
-        .get(url(&h, "/__ui/groups/stripe-mock/match"))
+        .get(url(&h, "/ui/groups/stripe-mock/match"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -309,7 +309,7 @@ async fn match_probe_page_shows_hit_and_near_miss() {
     let hit = client
         .get(url(
             &h,
-            "/__ui/groups/stripe-mock/match?method=POST&path=/v1/charges",
+            "/ui/groups/stripe-mock/match?method=POST&path=/v1/charges",
         ))
         .header("cookie", &cookie)
         .send()
@@ -320,7 +320,7 @@ async fn match_probe_page_shows_hit_and_near_miss() {
         .unwrap();
     assert!(hit.contains("<h2>Match</h2>"), "shows a match: {hit}");
     assert!(
-        hit.contains("/__ui/routes/stripe-mock"),
+        hit.contains("/ui/routes/stripe-mock"),
         "links the matched route: {hit}"
     );
 
@@ -328,7 +328,7 @@ async fn match_probe_page_shows_hit_and_near_miss() {
     let miss = client
         .get(url(
             &h,
-            "/__ui/groups/stripe-mock/match?method=GET&path=/v1/charges",
+            "/ui/groups/stripe-mock/match?method=GET&path=/v1/charges",
         ))
         .header("cookie", &cookie)
         .send()
@@ -352,7 +352,7 @@ async fn clear_journal_redirects_to_group_detail() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/journal/clear"))
+        .post(url(&h, "/ui/groups/stripe-mock/journal/clear"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -362,7 +362,7 @@ async fn clear_journal_redirects_to_group_detail() {
     assert!((300..400).contains(&resp.status().as_u16()));
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/__ui/groups/stripe-mock"
+        "/ui/groups/stripe-mock"
     );
 }
 
@@ -373,7 +373,7 @@ async fn edit_ttl_rejects_zero_or_garbage() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/edit"))
+        .post(url(&h, "/ui/groups/stripe-mock/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&ttl_seconds=not-a-number"))
@@ -390,7 +390,7 @@ async fn delete_group_cascade_removes_routes() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/delete"))
+        .post(url(&h, "/ui/groups/stripe-mock/delete"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -400,12 +400,12 @@ async fn delete_group_cascade_removes_routes() {
     assert!((300..400).contains(&resp.status().as_u16()));
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/__ui/groups"
+        "/ui/groups"
     );
 
     // The group is gone — visiting its detail page now 404s.
     let after = client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -420,7 +420,7 @@ async fn non_admin_cannot_delete_someone_elses_group() {
     let (cookie, csrf) = login_cookie(&h, &client, "alice").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/delete"))
+        .post(url(&h, "/ui/groups/stripe-mock/delete"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -433,7 +433,7 @@ async fn non_admin_cannot_delete_someone_elses_group() {
     let admin_client = no_redirect_client();
     let (admin_cookie, _) = login_cookie(&h, &admin_client, "admin").await;
     let after = admin_client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &admin_cookie)
         .send()
         .await
@@ -450,7 +450,7 @@ async fn delete_route_redirects_to_group_detail() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/routes/stripe-mock/1/delete"))
+        .post(url(&h, "/ui/routes/stripe-mock/1/delete"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -460,12 +460,12 @@ async fn delete_route_redirects_to_group_detail() {
     assert!((300..400).contains(&resp.status().as_u16()));
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/__ui/groups/stripe-mock"
+        "/ui/groups/stripe-mock"
     );
 
     // The route is gone from the registry.
     let after = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -480,7 +480,7 @@ async fn non_admin_cannot_delete_someone_elses_route() {
     let (cookie, csrf) = login_cookie(&h, &client, "alice").await;
 
     let resp = client
-        .post(url(&h, "/__ui/routes/stripe-mock/1/delete"))
+        .post(url(&h, "/ui/routes/stripe-mock/1/delete"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -497,7 +497,7 @@ async fn delete_without_csrf_is_403() {
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/groups/stripe-mock/delete"))
+        .post(url(&h, "/ui/groups/stripe-mock/delete"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body("")

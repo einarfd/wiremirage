@@ -102,12 +102,12 @@ async fn start() -> Harness {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf value");
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -147,7 +147,7 @@ async fn dry_run_form_renders_pre_filled_for_owner() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .get(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -175,7 +175,7 @@ async fn dry_run_non_owner_is_forbidden() {
     let client = no_redirect_client();
     let (cookie, _) = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .get(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -189,7 +189,7 @@ async fn dry_run_unknown_route_is_404() {
     let client = no_redirect_client();
     let (cookie, _) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/counter-demo/999/dry-run"))
+        .get(url(&h, "/ui/routes/counter-demo/999/dry-run"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -203,7 +203,7 @@ async fn dry_run_submit_runs_handler_and_renders_response() {
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .post(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -267,7 +267,7 @@ async fn dry_run_does_not_persist_state_or_write_journal() {
     // Now hit dry-run a couple of times.
     for _ in 0..3 {
         let resp = client
-            .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+            .post(url(&h, "/ui/routes/counter-demo/1/dry-run"))
             .header("cookie", &cookie)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(format!(
@@ -324,7 +324,7 @@ async fn dry_run_bad_headers_renders_inline_400_and_keeps_form_values() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     // Headers textarea without a `:` separator → parse error.
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .post(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -346,7 +346,7 @@ async fn dry_run_path_must_start_with_slash() {
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .post(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -369,7 +369,7 @@ async fn dry_run_kv_override_seeds_snapshot() {
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .post(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -404,7 +404,7 @@ async fn dry_run_bad_kv_override_renders_inline_400() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     // No `=` separator on the override line.
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .post(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -429,7 +429,7 @@ async fn dry_run_without_csrf_is_forbidden() {
     let client = no_redirect_client();
     let (cookie, _) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/dry-run"))
+        .post(url(&h, "/ui/routes/counter-demo/1/dry-run"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body("method=POST&path=/bump&headers=&query=&body=")

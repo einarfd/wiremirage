@@ -14,7 +14,7 @@
 (function () {
   if (typeof window === "undefined" || typeof ace === "undefined") return;
 
-  ace.config.set("basePath", "/__ui/static/ace");
+  ace.config.set("basePath", "/ui/static/ace");
 
   function themeFor() {
     return window.matchMedia &&

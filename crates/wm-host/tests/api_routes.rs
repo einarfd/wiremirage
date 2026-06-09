@@ -1,7 +1,7 @@
 //! Tier-2 end-to-end tests for the slice-3 REST API.
 //!
 //! Boots the host on a random port, drives it via reqwest, exercises
-//! POST/GET/DELETE on `/__api/routes`, and verifies that mock-traffic
+//! POST/GET/DELETE on `/api/routes`, and verifies that mock-traffic
 //! requests get routed to the registered components.
 
 use std::path::PathBuf;
@@ -239,7 +239,7 @@ impl Harness {
 
     async fn create_route_body(&self, body: serde_json::Value) -> reqwest::Response {
         self.client
-            .post(self.url("/__api/routes"))
+            .post(self.url("/api/routes"))
             .json(&body)
             .send()
             .await
@@ -281,7 +281,7 @@ async fn route_responses_carry_per_group_url() {
     // GET reflects the same URL.
     let show = h
         .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}")))
+        .get(h.url(&format!("/api/routes/{group}/{number}")))
         .send()
         .await
         .expect("get");
@@ -346,7 +346,7 @@ async fn create_then_call_then_delete_then_404() {
         .expect("group name")
         .to_string();
     let number = body["number"].as_u64().expect("number");
-    assert_eq!(location, format!("/__api/routes/{group}/{number}"));
+    assert_eq!(location, format!("/api/routes/{group}/{number}"));
 
     // Call the route — verifies the dispatcher sees it.
     let resp = h
@@ -405,7 +405,7 @@ async fn list_routes_returns_created() {
 
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes"))
+        .get(h.url("/api/routes"))
         .send()
         .await
         .expect("get")
@@ -456,7 +456,7 @@ async fn counter_state_persists_across_calls_in_memory() {
 async fn activity_fields_bump_on_dispatch() {
     let h = Harness::start().await;
     let (group, number) = h.seed_route(&["GET"], "/v1/activity", echo_wasm());
-    let location = format!("/__api/routes/{group}/{number}");
+    let location = format!("/api/routes/{group}/{number}");
 
     // Fresh route: never hit.
     let created: serde_json::Value = h
@@ -501,7 +501,7 @@ async fn activity_fields_bump_on_dispatch() {
     // The group should have a matching last_activity_at.
     let g_body: serde_json::Value = h
         .client
-        .get(h.url(&format!("/__api/groups/{group}")))
+        .get(h.url(&format!("/api/groups/{group}")))
         .send()
         .await
         .expect("get")
@@ -540,7 +540,7 @@ async fn list_routes_reflects_dispatch_hits() {
     // was always correct.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes"))
+        .get(h.url("/api/routes"))
         .send()
         .await
         .expect("list")
@@ -587,7 +587,7 @@ async fn typescript_source_path_creates_route_with_stored_source() {
     // transpile actually ran (types stripped, function body kept).
     let resp = h
         .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .get(h.url(&format!("/api/routes/{group}/{number}/source")))
         .send()
         .await
         .expect("get source");
@@ -618,7 +618,7 @@ async fn typescript_source_path_surfaces_transpile_errors() {
 
 // -- Source storage + GET /source ---------------------------------------------
 
-// JS round-trips verbatim through `/__api/routes` source storage (no
+// JS round-trips verbatim through `/api/routes` source storage (no
 // transpile, no whitespace munging). TS now goes through swc before
 // storage, so byte-for-byte assertions on TS belong in
 // `tests/ts_transpile.rs`; the source-storage assertions below use JS
@@ -644,7 +644,7 @@ async fn source_is_persisted_for_source_language_routes() {
 
     let resp = h
         .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .get(h.url(&format!("/api/routes/{group}/{number}/source")))
         .send()
         .await
         .expect("get source");
@@ -673,7 +673,7 @@ async fn source_updates_on_source_language_patch() {
     let new_src = "function handle(req, _r, _g) { /* v2 */ return { status: 200, headers: [], body: new Uint8Array() }; }";
     let resp = h
         .client
-        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .patch(h.url(&format!("/api/routes/{group}/{number}")))
         .json(&json!({ "language": "javascript", "source": new_src }))
         .send()
         .await
@@ -682,7 +682,7 @@ async fn source_updates_on_source_language_patch() {
 
     let resp = h
         .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .get(h.url(&format!("/api/routes/{group}/{number}/source")))
         .send()
         .await
         .expect("get source");
@@ -707,7 +707,7 @@ async fn source_endpoint_forbids_non_owner() {
 
     let (_id, other) = h.provision_user("nosey", false);
     let resp = other
-        .get(h.url(&format!("/__api/routes/{group}/{number}/source")))
+        .get(h.url(&format!("/api/routes/{group}/{number}/source")))
         .send()
         .await
         .expect("get source");
@@ -719,7 +719,7 @@ async fn source_endpoint_returns_404_for_unknown_route() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .get(h.url("/__api/routes/nope/99/source"))
+        .get(h.url("/api/routes/nope/99/source"))
         .send()
         .await
         .expect("get source");
@@ -733,7 +733,7 @@ async fn rejects_request_without_authorization_header() {
     let h = Harness::start().await;
     let resp = h
         .unauthenticated_client()
-        .post(h.url("/__api/routes"))
+        .post(h.url("/api/routes"))
         .json(&json!({
             "methods": ["GET"],
             "path": "/foo",
@@ -753,7 +753,7 @@ async fn rejects_request_with_bogus_token() {
     let h = Harness::start().await;
     let resp = h
         .unauthenticated_client()
-        .post(h.url("/__api/routes"))
+        .post(h.url("/api/routes"))
         .header("authorization", "Bearer wmt_not_a_real_token")
         .json(&json!({
             "methods": ["GET"],
@@ -772,7 +772,7 @@ async fn rejects_non_bearer_scheme() {
     let h = Harness::start().await;
     let resp = h
         .unauthenticated_client()
-        .get(h.url("/__api/routes"))
+        .get(h.url("/api/routes"))
         .header("authorization", format!("Basic {BOOTSTRAP_TOKEN}"))
         .send()
         .await
@@ -806,7 +806,7 @@ async fn routing_is_scoped_per_group_subdomain() {
     for name in ["alpha", "beta"] {
         let r = h
             .client
-            .post(h.url("/__api/groups"))
+            .post(h.url("/api/groups"))
             .json(&json!({ "name": name }))
             .send()
             .await
@@ -865,7 +865,7 @@ async fn rename_group_moves_routes_to_the_new_subdomain() {
     let h = Harness::start().await;
     let r = h
         .client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "before" }))
         .send()
         .await
@@ -884,7 +884,7 @@ async fn rename_group_moves_routes_to_the_new_subdomain() {
     // Rename via PATCH; the response reflects the new name.
     let patched: serde_json::Value = h
         .client
-        .patch(h.url("/__api/groups/before"))
+        .patch(h.url("/api/groups/before"))
         .json(&json!({ "name": "after" }))
         .send()
         .await
@@ -916,19 +916,33 @@ async fn rename_group_moves_routes_to_the_new_subdomain() {
 }
 
 #[tokio::test]
-async fn rejects_reserved_path() {
+async fn allows_formerly_reserved_path() {
+    // ADR-0033: there are no reserved paths any more. A route lives on its
+    // group's subdomain, which is pure mock space, so a path like `/health`
+    // (a control-plane path on the apex) is perfectly mockable here.
     let h = Harness::start().await;
     let resp = h
         .create_route_body(json!({
             "methods": ["GET"],
-            "path": "/__api/sneaky",
+            "path": "/health",
             "language": "javascript",
             "source": echo_source(),
         }))
         .await;
-    assert_eq!(resp.status().as_u16(), 400);
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "creating a route at /health should succeed now"
+    );
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["error"]["code"], "validation_failed");
+    assert!(
+        body["url"]
+            .as_str()
+            .expect("url field")
+            .ends_with("/health"),
+        "served URL ends with the formerly-reserved path: {}",
+        body["url"]
+    );
 }
 
 #[tokio::test]
@@ -1043,13 +1057,13 @@ async fn source_create_conflict_is_detected_before_transpile() {
     );
 }
 
-// -- PATCH /__api/routes (slice 15) -----------------------------------------
+// -- PATCH /api/routes (slice 15) -----------------------------------------
 
 #[tokio::test]
 async fn patch_route_swaps_path_and_evicts_old_dispatch() {
     let h = Harness::start().await;
     let (group, number) = h.seed_route(&["POST"], "/v1/charges", echo_wasm());
-    let location = format!("/__api/routes/{group}/{number}");
+    let location = format!("/api/routes/{group}/{number}");
 
     // Move the route to a new path.
     let patched = h
@@ -1124,7 +1138,7 @@ async fn streaming_response_journals_counts_and_disposition() {
     for _ in 0..40 {
         let listed: serde_json::Value = h
             .client
-            .get(h.url(&format!("/__api/journal/{group}")))
+            .get(h.url(&format!("/api/journal/{group}")))
             .send()
             .await
             .expect("journal get")
@@ -1191,7 +1205,7 @@ async fn dry_run_captures_streamed_chunks() {
 
     let resp = h
         .client
-        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .post(h.url(&format!("/api/routes/{group}/{number}/dry-run")))
         .json(&json!({ "method": "GET", "path": "/v1/dry-stream" }))
         .send()
         .await
@@ -1212,7 +1226,7 @@ async fn poll_first_journal_entry(h: &Harness, group: &str) -> serde_json::Value
     for _ in 0..80 {
         let listed: serde_json::Value = h
             .client
-            .get(h.url(&format!("/__api/journal/{group}")))
+            .get(h.url(&format!("/api/journal/{group}")))
             .send()
             .await
             .expect("journal get")
@@ -1362,7 +1376,7 @@ async fn patch_route_replaces_source() {
         .expect("json");
     let group = created["group"]["name"].as_str().unwrap();
     let number = created["number"].as_u64().unwrap();
-    let location = format!("/__api/routes/{group}/{number}");
+    let location = format!("/api/routes/{group}/{number}");
 
     // Sanity: the original handler is the echo handler.
     let echo_body = h
@@ -1434,7 +1448,7 @@ async fn patch_route_rejects_path_conflict() {
 
     let resp = h
         .client
-        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .patch(h.url(&format!("/api/routes/{group}/{number}")))
         .json(&json!({ "path": "/v1/a" }))
         .send()
         .await
@@ -1462,7 +1476,7 @@ async fn patch_route_with_empty_body_is_bad_request() {
     let number = created["number"].as_u64().unwrap();
     let resp = h
         .client
-        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .patch(h.url(&format!("/api/routes/{group}/{number}")))
         .json(&json!({}))
         .send()
         .await
@@ -1492,7 +1506,7 @@ async fn route_state_list_and_clear_round_trip() {
     // GET state lists the counter.
     let resp = h
         .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .get(h.url(&format!("/api/routes/{group}/{number}/state")))
         .send()
         .await
         .expect("get state");
@@ -1507,14 +1521,14 @@ async fn route_state_list_and_clear_round_trip() {
     // value on the next call; we just confirm the listing is empty.)
     let del = h
         .client
-        .delete(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .delete(h.url(&format!("/api/routes/{group}/{number}/state")))
         .send()
         .await
         .expect("delete state");
     assert_eq!(del.status().as_u16(), 204);
     let resp = h
         .client
-        .get(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .get(h.url(&format!("/api/routes/{group}/{number}/state")))
         .send()
         .await
         .expect("get state");
@@ -1540,13 +1554,13 @@ async fn route_state_endpoints_are_owner_or_admin() {
     let number = created["number"].as_u64().unwrap();
     let (_alice_id, alice) = h.provision_user("alice-state", false);
     let resp = alice
-        .get(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .get(h.url(&format!("/api/routes/{group}/{number}/state")))
         .send()
         .await
         .expect("get");
     assert_eq!(resp.status().as_u16(), 403);
     let del = alice
-        .delete(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .delete(h.url(&format!("/api/routes/{group}/{number}/state")))
         .send()
         .await
         .expect("delete");
@@ -1573,7 +1587,7 @@ async fn dry_run_does_not_journal_or_mutate_state() {
     // handler's incr returns 2 — but the *real* state still reads 1.
     let resp = h
         .client
-        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .post(h.url(&format!("/api/routes/{group}/{number}/dry-run")))
         .json(&json!({
             "method": "GET",
             "path": "/v1/dryrun-target",
@@ -1603,7 +1617,7 @@ async fn dry_run_does_not_journal_or_mutate_state() {
     // And no journal entry for the dry-run.
     let journal: serde_json::Value = h
         .client
-        .get(h.url(&format!("/__api/journal/{group}")))
+        .get(h.url(&format!("/api/journal/{group}")))
         .send()
         .await
         .expect("journal get")
@@ -1627,7 +1641,7 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
     // handler `incr`s it and should return `count=6`.
     let resp = h
         .client
-        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .post(h.url(&format!("/api/routes/{group}/{number}/dry-run")))
         .json(&json!({
             "method": "GET",
             "path": "/v1/dryrun-with-seed",
@@ -1645,7 +1659,7 @@ async fn dry_run_kv_overrides_seed_snapshot_state() {
     // disposable, so each run starts fresh.
     let resp = h
         .client
-        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .post(h.url(&format!("/api/routes/{group}/{number}/dry-run")))
         .json(&json!({
             "method": "GET",
             "path": "/v1/dryrun-with-seed",
@@ -1687,7 +1701,7 @@ async fn dry_run_non_owner_forbidden() {
     let number = created["number"].as_u64().unwrap();
     let (_alice_id, alice) = h.provision_user("alice-dry", false);
     let resp = alice
-        .post(h.url(&format!("/__api/routes/{group}/{number}/dry-run")))
+        .post(h.url(&format!("/api/routes/{group}/{number}/dry-run")))
         .json(&json!({"method": "POST", "path": "/v1/dryrun-locked"}))
         .send()
         .await
@@ -1720,7 +1734,7 @@ async fn seed_state_route(h: &Harness) -> (String, u64) {
 async fn put_route_state_seed_snapshot_round_trips() {
     let h = Harness::start().await;
     let (group, number) = seed_state_route(&h).await;
-    let url = h.url(&format!("/__api/routes/{group}/{number}/state"));
+    let url = h.url(&format!("/api/routes/{group}/{number}/state"));
 
     let put = h
         .client
@@ -1749,7 +1763,7 @@ async fn put_route_state_seed_snapshot_round_trips() {
 async fn put_route_state_upserts_then_reset_replaces() {
     let h = Harness::start().await;
     let (group, number) = seed_state_route(&h).await;
-    let url = h.url(&format!("/__api/routes/{group}/{number}/state"));
+    let url = h.url(&format!("/api/routes/{group}/{number}/state"));
     let snap_url = format!("{url}?format=snapshot");
 
     // Two upserts: both keys present (upsert, not replace).
@@ -1797,7 +1811,7 @@ async fn put_route_state_upserts_then_reset_replaces() {
 async fn put_route_state_binary_round_trips_as_base64() {
     let h = Harness::start().await;
     let (group, number) = seed_state_route(&h).await;
-    let url = h.url(&format!("/__api/routes/{group}/{number}/state"));
+    let url = h.url(&format!("/api/routes/{group}/{number}/state"));
     // 0xFF 0xFE is not valid UTF-8; base64 of those two bytes is "//4=".
     let put = h
         .client
@@ -1827,7 +1841,7 @@ async fn put_route_state_rejects_oversize_value() {
     let big = "x".repeat(1024 * 1024 + 1);
     let r = h
         .client
-        .put(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .put(h.url(&format!("/api/routes/{group}/{number}/state")))
         .json(&json!({"entries": {"big": big}}))
         .send()
         .await
@@ -1843,7 +1857,7 @@ async fn put_route_state_non_owner_forbidden() {
     let (group, number) = seed_state_route(&h).await;
     let (_id, alice) = h.provision_user("alice-state", false);
     let r = alice
-        .put(h.url(&format!("/__api/routes/{group}/{number}/state")))
+        .put(h.url(&format!("/api/routes/{group}/{number}/state")))
         .json(&json!({"entries": {"a": "1"}}))
         .send()
         .await
@@ -1855,7 +1869,7 @@ async fn put_route_state_non_owner_forbidden() {
 async fn put_group_state_seed_snapshot_round_trips() {
     let h = Harness::start().await;
     let (group, _number) = seed_state_route(&h).await;
-    let url = h.url(&format!("/__api/groups/{group}/state"));
+    let url = h.url(&format!("/api/groups/{group}/state"));
     let put = h
         .client
         .put(&url)
@@ -1894,7 +1908,7 @@ async fn patch_route_non_owner_non_admin_forbidden() {
     let number = created["number"].as_u64().unwrap();
     let (_alice_id, alice_client) = h.provision_user("alice-patch", false);
     let resp = alice_client
-        .patch(h.url(&format!("/__api/routes/{group}/{number}")))
+        .patch(h.url(&format!("/api/routes/{group}/{number}")))
         .json(&json!({ "path": "/v1/stolen" }))
         .send()
         .await
@@ -1902,14 +1916,14 @@ async fn patch_route_non_owner_non_admin_forbidden() {
     assert_eq!(resp.status().as_u16(), 403);
 }
 
-// -- /__api/tokens ------------------------------------------------------------
+// -- /api/tokens ------------------------------------------------------------
 
 #[tokio::test]
 async fn create_token_returns_plaintext_then_authenticates() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .post(h.url("/__api/tokens"))
+        .post(h.url("/api/tokens"))
         .json(&json!({ "name": "ci-runner" }))
         .send()
         .await
@@ -1924,7 +1938,7 @@ async fn create_token_returns_plaintext_then_authenticates() {
     // hits an authenticated endpoint with it.
     let client = Client::new();
     let listed = client
-        .get(h.url("/__api/tokens"))
+        .get(h.url("/api/tokens"))
         .header("Authorization", format!("Bearer {plaintext}"))
         .send()
         .await
@@ -1937,14 +1951,14 @@ async fn list_tokens_returns_callers_tokens() {
     let h = Harness::start().await;
     // Bootstrap created a token already; create one more.
     h.client
-        .post(h.url("/__api/tokens"))
+        .post(h.url("/api/tokens"))
         .json(&json!({ "name": "extra" }))
         .send()
         .await
         .expect("post");
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/tokens"))
+        .get(h.url("/api/tokens"))
         .send()
         .await
         .expect("get")
@@ -1969,14 +1983,14 @@ async fn list_tokens_returns_callers_tokens() {
 async fn get_token_by_name() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/tokens"))
+        .post(h.url("/api/tokens"))
         .json(&json!({ "name": "deploy-bot", "ttl_seconds": 3600 }))
         .send()
         .await
         .expect("post");
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/tokens/deploy-bot"))
+        .get(h.url("/api/tokens/deploy-bot"))
         .send()
         .await
         .expect("get")
@@ -1992,7 +2006,7 @@ async fn delete_token_revokes_it() {
     let h = Harness::start().await;
     let created: serde_json::Value = h
         .client
-        .post(h.url("/__api/tokens"))
+        .post(h.url("/api/tokens"))
         .json(&json!({ "name": "throwaway" }))
         .send()
         .await
@@ -2004,7 +2018,7 @@ async fn delete_token_revokes_it() {
 
     let del = h
         .client
-        .delete(h.url("/__api/tokens/throwaway"))
+        .delete(h.url("/api/tokens/throwaway"))
         .send()
         .await
         .expect("delete");
@@ -2013,7 +2027,7 @@ async fn delete_token_revokes_it() {
     // Subsequent uses of the revoked token are 401.
     let client = Client::new();
     let resp = client
-        .get(h.url("/__api/tokens"))
+        .get(h.url("/api/tokens"))
         .header("Authorization", format!("Bearer {plaintext}"))
         .send()
         .await
@@ -2023,7 +2037,7 @@ async fn delete_token_revokes_it() {
     // Second DELETE for the same name 404s.
     let again = h
         .client
-        .delete(h.url("/__api/tokens/throwaway"))
+        .delete(h.url("/api/tokens/throwaway"))
         .send()
         .await
         .expect("delete");
@@ -2034,14 +2048,14 @@ async fn delete_token_revokes_it() {
 async fn create_token_rejects_duplicate_name() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/tokens"))
+        .post(h.url("/api/tokens"))
         .json(&json!({ "name": "ci" }))
         .send()
         .await
         .expect("post");
     let resp = h
         .client
-        .post(h.url("/__api/tokens"))
+        .post(h.url("/api/tokens"))
         .json(&json!({ "name": "ci" }))
         .send()
         .await
@@ -2073,7 +2087,7 @@ async fn create_route_records_callers_user_id_as_owner() {
     // and checking the stored value is consistent.
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes"))
+        .get(h.url("/api/routes"))
         .send()
         .await
         .expect("get")
@@ -2100,7 +2114,7 @@ async fn non_owner_non_admin_cannot_delete_route() {
         .expect("json");
     let group = create["group"]["name"].as_str().unwrap();
     let number = create["number"].as_u64().unwrap();
-    let location = format!("/__api/routes/{group}/{number}");
+    let location = format!("/api/routes/{group}/{number}");
 
     // A different, non-admin user tries to delete it.
     let (_user_id, alice_client) = h.provision_user("alice", false);
@@ -2124,7 +2138,7 @@ async fn admin_can_delete_route_owned_by_someone_else() {
     // Alice (non-admin) creates a route.
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     let create: serde_json::Value = alice_client
-        .post(h.url("/__api/routes"))
+        .post(h.url("/api/routes"))
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing",
@@ -2139,7 +2153,7 @@ async fn admin_can_delete_route_owned_by_someone_else() {
         .expect("json");
     let group = create["group"]["name"].as_str().unwrap();
     let number = create["number"].as_u64().unwrap();
-    let location = format!("/__api/routes/{group}/{number}");
+    let location = format!("/api/routes/{group}/{number}");
 
     // Bootstrap (admin) deletes Alice's route.
     let resp = h
@@ -2156,7 +2170,7 @@ async fn owner_can_delete_their_own_route() {
     let h = Harness::start().await;
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     let create: serde_json::Value = alice_client
-        .post(h.url("/__api/routes"))
+        .post(h.url("/api/routes"))
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing-2",
@@ -2172,7 +2186,7 @@ async fn owner_can_delete_their_own_route() {
     let group = create["group"]["name"].as_str().unwrap();
     let number = create["number"].as_u64().unwrap();
     let resp = alice_client
-        .delete(h.url(&format!("/__api/routes/{group}/{number}")))
+        .delete(h.url(&format!("/api/routes/{group}/{number}")))
         .send()
         .await
         .expect("delete");
@@ -2183,14 +2197,10 @@ async fn owner_can_delete_their_own_route() {
 async fn token_endpoints_require_auth() {
     let h = Harness::start().await;
     let unauth = h.unauthenticated_client();
-    let resp = unauth
-        .get(h.url("/__api/tokens"))
-        .send()
-        .await
-        .expect("get");
+    let resp = unauth.get(h.url("/api/tokens")).send().await.expect("get");
     assert_eq!(resp.status().as_u16(), 401);
     let resp = unauth
-        .post(h.url("/__api/tokens"))
+        .post(h.url("/api/tokens"))
         .json(&json!({ "name": "x" }))
         .send()
         .await
@@ -2198,14 +2208,14 @@ async fn token_endpoints_require_auth() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
-// -- /__api/users -------------------------------------------------------------
+// -- /api/users -------------------------------------------------------------
 
 #[tokio::test]
 async fn admin_creates_lists_and_reads_user() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .post(h.url("/__api/users"))
+        .post(h.url("/api/users"))
         .json(&json!({ "name": "alice", "is_admin": false }))
         .send()
         .await
@@ -2218,7 +2228,7 @@ async fn admin_creates_lists_and_reads_user() {
     // List includes alice + bootstrap.
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/users"))
+        .get(h.url("/api/users"))
         .send()
         .await
         .expect("get")
@@ -2237,7 +2247,7 @@ async fn admin_creates_lists_and_reads_user() {
     // GET by name works too.
     let one: serde_json::Value = h
         .client
-        .get(h.url("/__api/users/alice"))
+        .get(h.url("/api/users/alice"))
         .send()
         .await
         .expect("get")
@@ -2253,7 +2263,7 @@ async fn non_admin_cannot_create_or_list_users() {
     let (_alice_id, alice_client) = h.provision_user("alice", false);
 
     let resp = alice_client
-        .post(h.url("/__api/users"))
+        .post(h.url("/api/users"))
         .json(&json!({ "name": "mallory" }))
         .send()
         .await
@@ -2261,7 +2271,7 @@ async fn non_admin_cannot_create_or_list_users() {
     assert_eq!(resp.status().as_u16(), 403);
 
     let resp = alice_client
-        .get(h.url("/__api/users"))
+        .get(h.url("/api/users"))
         .send()
         .await
         .expect("get");
@@ -2273,7 +2283,7 @@ async fn me_returns_caller_record() {
     let h = Harness::start().await;
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     let body: serde_json::Value = alice_client
-        .get(h.url("/__api/users/me"))
+        .get(h.url("/api/users/me"))
         .send()
         .await
         .expect("get")
@@ -2289,7 +2299,7 @@ async fn user_can_read_own_record_by_name() {
     let h = Harness::start().await;
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     let resp = alice_client
-        .get(h.url("/__api/users/alice"))
+        .get(h.url("/api/users/alice"))
         .send()
         .await
         .expect("get");
@@ -2302,7 +2312,7 @@ async fn user_cannot_read_another_users_record() {
     h.provision_user("bob", false);
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     let resp = alice_client
-        .get(h.url("/__api/users/bob"))
+        .get(h.url("/api/users/bob"))
         .send()
         .await
         .expect("get");
@@ -2315,7 +2325,7 @@ async fn admin_can_promote_user() {
     h.provision_user("alice", false);
     let resp = h
         .client
-        .patch(h.url("/__api/users/alice"))
+        .patch(h.url("/api/users/alice"))
         .json(&json!({ "is_admin": true }))
         .send()
         .await
@@ -2331,7 +2341,7 @@ async fn patch_rejects_demoting_last_admin() {
     // Bootstrap is the only admin.
     let resp = h
         .client
-        .patch(h.url("/__api/users/bootstrap"))
+        .patch(h.url("/api/users/bootstrap"))
         .json(&json!({ "is_admin": false }))
         .send()
         .await
@@ -2347,7 +2357,7 @@ async fn patch_with_no_recognised_fields_is_bad_request() {
     h.provision_user("alice", false);
     let resp = h
         .client
-        .patch(h.url("/__api/users/alice"))
+        .patch(h.url("/api/users/alice"))
         .json(&json!({}))
         .send()
         .await
@@ -2360,7 +2370,7 @@ async fn admin_cannot_delete_themselves() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .delete(h.url("/__api/users/bootstrap"))
+        .delete(h.url("/api/users/bootstrap"))
         .send()
         .await
         .expect("delete");
@@ -2378,7 +2388,7 @@ async fn cannot_delete_last_admin_via_another_admin() {
     // First delete bootstrap from `other`'s perspective — succeeds
     // because two admins exist.
     let resp = other
-        .delete(h.url("/__api/users/bootstrap"))
+        .delete(h.url("/api/users/bootstrap"))
         .send()
         .await
         .expect("delete");
@@ -2388,7 +2398,7 @@ async fn cannot_delete_last_admin_via_another_admin() {
     // last-admin guard via PATCH demotion below in another test. Here
     // we just check that bootstrap is gone.
     let listed: serde_json::Value = other
-        .get(h.url("/__api/users"))
+        .get(h.url("/api/users"))
         .send()
         .await
         .expect("get")
@@ -2411,7 +2421,7 @@ async fn delete_user_refused_when_user_owns_routes() {
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     // Alice creates a route.
     alice_client
-        .post(h.url("/__api/routes"))
+        .post(h.url("/api/routes"))
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing",
@@ -2423,7 +2433,7 @@ async fn delete_user_refused_when_user_owns_routes() {
         .expect("post");
     let resp = h
         .client
-        .delete(h.url("/__api/users/alice"))
+        .delete(h.url("/api/users/alice"))
         .send()
         .await
         .expect("delete");
@@ -2438,7 +2448,7 @@ async fn delete_user_cascades_tokens() {
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     // Sanity: alice can hit /me with her token before deletion.
     let pre = alice_client
-        .get(h.url("/__api/users/me"))
+        .get(h.url("/api/users/me"))
         .send()
         .await
         .expect("get");
@@ -2446,7 +2456,7 @@ async fn delete_user_cascades_tokens() {
 
     let resp = h
         .client
-        .delete(h.url("/__api/users/alice"))
+        .delete(h.url("/api/users/alice"))
         .send()
         .await
         .expect("delete");
@@ -2454,7 +2464,7 @@ async fn delete_user_cascades_tokens() {
 
     // Alice's token no longer authenticates.
     let post = alice_client
-        .get(h.url("/__api/users/me"))
+        .get(h.url("/api/users/me"))
         .send()
         .await
         .expect("get");
@@ -2465,13 +2475,13 @@ async fn delete_user_cascades_tokens() {
 async fn user_endpoints_require_auth() {
     let h = Harness::start().await;
     let unauth = h.unauthenticated_client();
-    for path in ["/__api/users", "/__api/users/me", "/__api/users/alice"] {
+    for path in ["/api/users", "/api/users/me", "/api/users/alice"] {
         let resp = unauth.get(h.url(path)).send().await.expect("get");
         assert_eq!(resp.status().as_u16(), 401, "GET {path}");
     }
 }
 
-// -- /__api/journal -----------------------------------------------------------
+// -- /api/journal -----------------------------------------------------------
 
 /// Create a route, hit it once with mock traffic, and return the route's
 /// group name so tests can inspect the journal that should now hold one
@@ -2496,7 +2506,7 @@ async fn dispatched_request_produces_journal_entry() {
     let group = seed_one_request(&h).await;
     let listed: serde_json::Value = h
         .client
-        .get(h.url(&format!("/__api/journal/{group}")))
+        .get(h.url(&format!("/api/journal/{group}")))
         .send()
         .await
         .expect("get")
@@ -2533,7 +2543,7 @@ async fn unmatched_request_produces_unmatched_record() {
 
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/unmatched"))
+        .get(h.url("/api/unmatched"))
         .send()
         .await
         .expect("get")
@@ -2575,7 +2585,7 @@ async fn unmatched_record_carries_near_misses_for_method_mismatch() {
 
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/unmatched"))
+        .get(h.url("/api/unmatched"))
         .send()
         .await
         .expect("get")
@@ -2621,7 +2631,7 @@ async fn unmatched_record_carries_near_misses_for_prefix_typo() {
 
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/unmatched"))
+        .get(h.url("/api/unmatched"))
         .send()
         .await
         .expect("get")
@@ -2639,21 +2649,18 @@ async fn unmatched_record_carries_near_misses_for_prefix_typo() {
 }
 
 #[tokio::test]
-async fn reserved_path_404_does_not_journal() {
+async fn unmatched_control_plane_path_404_does_not_journal() {
     let h = Harness::start().await;
-    // Hit a /__api/* path that doesn't exist — should be 404 (reserved
-    // prefix) and should NOT show up in unmatched.
-    let resp = h
-        .client
-        .get(h.url("/__api/typo"))
-        .send()
-        .await
-        .expect("get");
+    // Hit a /api/* path that doesn't exist. The harness client addresses the
+    // apex (direct, non-subdomain), so this is an unmatched control-plane path
+    // (ADR-0033) — a 404 that is NOT mock traffic and must not pollute the
+    // unmatched journal.
+    let resp = h.client.get(h.url("/api/typo")).send().await.expect("get");
     assert_eq!(resp.status().as_u16(), 404);
 
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/unmatched"))
+        .get(h.url("/api/unmatched"))
         .send()
         .await
         .expect("get")
@@ -2686,7 +2693,7 @@ async fn trace_id_is_stamped_from_inbound_traceparent() {
 
     let listed: serde_json::Value = h
         .client
-        .get(h.url(&format!("/__api/journal/{group}")))
+        .get(h.url(&format!("/api/journal/{group}")))
         .send()
         .await
         .expect("get")
@@ -2792,7 +2799,7 @@ async fn cursor_pagination_round_trips() {
 
     let first: serde_json::Value = h
         .client
-        .get(h.url(&format!("/__api/journal/{group}?limit=2")))
+        .get(h.url(&format!("/api/journal/{group}?limit=2")))
         .send()
         .await
         .expect("get")
@@ -2808,7 +2815,7 @@ async fn cursor_pagination_round_trips() {
     let next: serde_json::Value = h
         .client
         .get(h.url(&format!(
-            "/__api/journal/{group}?before={next_before}&limit=2"
+            "/api/journal/{group}?before={next_before}&limit=2"
         )))
         .send()
         .await
@@ -2821,7 +2828,7 @@ async fn cursor_pagination_round_trips() {
 
     let tail: serde_json::Value = h
         .client
-        .get(h.url(&format!("/__api/journal/{group}?before=2&limit=10")))
+        .get(h.url(&format!("/api/journal/{group}?before=2&limit=10")))
         .send()
         .await
         .expect("get")
@@ -2844,7 +2851,7 @@ async fn unmatched_endpoint_is_owner_scoped_not_admin_only() {
     let h = Harness::start().await;
     let (_alice_id, alice) = h.provision_user("alice", false);
     let resp = alice
-        .get(h.url("/__api/unmatched"))
+        .get(h.url("/api/unmatched"))
         .send()
         .await
         .expect("get");
@@ -2862,7 +2869,7 @@ async fn group_owner_can_read_journal_admin_can_too() {
     let h = Harness::start().await;
     let (_alice_id, alice) = h.provision_user("alice", false);
     let create: serde_json::Value = alice
-        .post(h.url("/__api/routes"))
+        .post(h.url("/api/routes"))
         .json(&json!({
             "methods": ["POST"],
             "path": "/v1/alice-thing",
@@ -2879,7 +2886,7 @@ async fn group_owner_can_read_journal_admin_can_too() {
 
     // Alice (owner of the only route in this group) can read it.
     let resp = alice
-        .get(h.url(&format!("/__api/journal/{group}")))
+        .get(h.url(&format!("/api/journal/{group}")))
         .send()
         .await
         .expect("get");
@@ -2888,7 +2895,7 @@ async fn group_owner_can_read_journal_admin_can_too() {
     // Bootstrap (admin) can read it too.
     let resp = h
         .client
-        .get(h.url(&format!("/__api/journal/{group}")))
+        .get(h.url(&format!("/api/journal/{group}")))
         .send()
         .await
         .expect("get");
@@ -2897,7 +2904,7 @@ async fn group_owner_can_read_journal_admin_can_too() {
     // A different non-admin who owns nothing in this group is rejected.
     let (_bob_id, bob) = h.provision_user("bob", false);
     let resp = bob
-        .get(h.url(&format!("/__api/journal/{group}")))
+        .get(h.url(&format!("/api/journal/{group}")))
         .send()
         .await
         .expect("get");
@@ -2908,20 +2915,20 @@ async fn group_owner_can_read_journal_admin_can_too() {
 async fn journal_endpoints_require_auth() {
     let h = Harness::start().await;
     let unauth = h.unauthenticated_client();
-    for path in ["/__api/journal/anything", "/__api/unmatched"] {
+    for path in ["/api/journal/anything", "/api/unmatched"] {
         let resp = unauth.get(h.url(path)).send().await.expect("get");
         assert_eq!(resp.status().as_u16(), 401, "GET {path}");
     }
 }
 
-// -- /__api/groups ------------------------------------------------------------
+// -- /api/groups ------------------------------------------------------------
 
 #[tokio::test]
 async fn create_then_get_group() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "stripe-mock", "ttl_seconds": 3600, "sliding_ttl": false }))
         .send()
         .await
@@ -2935,7 +2942,7 @@ async fn create_then_get_group() {
 
     let read: serde_json::Value = h
         .client
-        .get(h.url("/__api/groups/stripe-mock"))
+        .get(h.url("/api/groups/stripe-mock"))
         .send()
         .await
         .expect("get")
@@ -2950,7 +2957,7 @@ async fn create_group_defaults_to_24h_sliding_true() {
     let h = Harness::start().await;
     let body: serde_json::Value = h
         .client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "defaults" }))
         .send()
         .await
@@ -2966,14 +2973,14 @@ async fn create_group_defaults_to_24h_sliding_true() {
 async fn create_group_rejects_duplicate_name() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "dup" }))
         .send()
         .await
         .expect("post");
     let resp = h
         .client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "dup" }))
         .send()
         .await
@@ -2986,7 +2993,7 @@ async fn create_group_rejects_excessive_ttl() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "too-long", "ttl_seconds": 30u64 * 24 * 60 * 60 + 1 }))
         .send()
         .await
@@ -2999,14 +3006,14 @@ async fn list_groups_filters_by_owner_for_non_admin() {
     let h = Harness::start().await;
     // Bootstrap (admin) creates one; alice creates one.
     h.client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "admin-group" }))
         .send()
         .await
         .expect("post");
     let (_alice_id, alice) = h.provision_user("alice", false);
     alice
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "alice-group" }))
         .send()
         .await
@@ -3015,7 +3022,7 @@ async fn list_groups_filters_by_owner_for_non_admin() {
     // Admin sees both.
     let admin_view: serde_json::Value = h
         .client
-        .get(h.url("/__api/groups"))
+        .get(h.url("/api/groups"))
         .send()
         .await
         .expect("get")
@@ -3033,7 +3040,7 @@ async fn list_groups_filters_by_owner_for_non_admin() {
 
     // Alice sees only her own.
     let alice_view: serde_json::Value = alice
-        .get(h.url("/__api/groups"))
+        .get(h.url("/api/groups"))
         .send()
         .await
         .expect("get")
@@ -3053,14 +3060,14 @@ async fn list_groups_filters_by_owner_for_non_admin() {
 async fn patch_group_updates_ttl_and_sliding() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "patch-me" }))
         .send()
         .await
         .expect("post");
     let resp = h
         .client
-        .patch(h.url("/__api/groups/patch-me"))
+        .patch(h.url("/api/groups/patch-me"))
         .json(&json!({ "ttl_seconds": 7200, "sliding_ttl": false }))
         .send()
         .await
@@ -3075,14 +3082,14 @@ async fn patch_group_updates_ttl_and_sliding() {
 async fn patch_group_with_no_fields_is_validation_failure() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "empty-patch" }))
         .send()
         .await
         .expect("post");
     let resp = h
         .client
-        .patch(h.url("/__api/groups/empty-patch"))
+        .patch(h.url("/api/groups/empty-patch"))
         .json(&json!({}))
         .send()
         .await
@@ -3095,7 +3102,7 @@ async fn delete_group_cascades_routes_and_state() {
     let h = Harness::start().await;
     let group_create: serde_json::Value = h
         .client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "cascadable" }))
         .send()
         .await
@@ -3121,7 +3128,7 @@ async fn delete_group_cascades_routes_and_state() {
     // Delete the group.
     let del = h
         .client
-        .delete(h.url("/__api/groups/cascadable"))
+        .delete(h.url("/api/groups/cascadable"))
         .send()
         .await
         .expect("delete");
@@ -3130,7 +3137,7 @@ async fn delete_group_cascades_routes_and_state() {
     // Group, route, journal, and mock-traffic should all be gone.
     let resp = h
         .client
-        .get(h.url("/__api/groups/cascadable"))
+        .get(h.url("/api/groups/cascadable"))
         .send()
         .await
         .expect("get");
@@ -3150,7 +3157,7 @@ async fn delete_group_cascades_routes_and_state() {
 
     let resp = h
         .client
-        .get(h.url("/__api/journal/cascadable"))
+        .get(h.url("/api/journal/cascadable"))
         .send()
         .await
         .expect("get");
@@ -3162,7 +3169,7 @@ async fn group_endpoints_owner_or_admin_only() {
     let h = Harness::start().await;
     let (_alice_id, alice) = h.provision_user("alice", false);
     alice
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "alice-private" }))
         .send()
         .await
@@ -3171,12 +3178,12 @@ async fn group_endpoints_owner_or_admin_only() {
     // Bob (not admin, not owner) is rejected on every per-group action.
     let (_bob_id, bob) = h.provision_user("bob", false);
     for (method, path) in [
-        ("GET", "/__api/groups/alice-private"),
-        ("PATCH", "/__api/groups/alice-private"),
-        ("DELETE", "/__api/groups/alice-private"),
-        ("POST", "/__api/groups/alice-private/refresh"),
-        ("DELETE", "/__api/groups/alice-private/state"),
-        ("DELETE", "/__api/groups/alice-private/journal"),
+        ("GET", "/api/groups/alice-private"),
+        ("PATCH", "/api/groups/alice-private"),
+        ("DELETE", "/api/groups/alice-private"),
+        ("POST", "/api/groups/alice-private/refresh"),
+        ("DELETE", "/api/groups/alice-private/state"),
+        ("DELETE", "/api/groups/alice-private/journal"),
     ] {
         let req = match method {
             "GET" => bob.get(h.url(path)),
@@ -3192,7 +3199,7 @@ async fn group_endpoints_owner_or_admin_only() {
     // Admin (bootstrap) can hit them all.
     let resp = h
         .client
-        .get(h.url("/__api/groups/alice-private"))
+        .get(h.url("/api/groups/alice-private"))
         .send()
         .await
         .expect("get");
@@ -3203,14 +3210,14 @@ async fn group_endpoints_owner_or_admin_only() {
 async fn refresh_group_returns_updated_record() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "refreshable", "ttl_seconds": 3600 }))
         .send()
         .await
         .expect("post");
     let resp = h
         .client
-        .post(h.url("/__api/groups/refreshable/refresh"))
+        .post(h.url("/api/groups/refreshable/refresh"))
         .send()
         .await
         .expect("post");
@@ -3224,7 +3231,7 @@ async fn refresh_group_returns_updated_record() {
 async fn delete_group_state_clears_kv_but_leaves_routes() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "stateful" }))
         .send()
         .await
@@ -3233,7 +3240,7 @@ async fn delete_group_state_clears_kv_but_leaves_routes() {
 
     let resp = h
         .client
-        .delete(h.url("/__api/groups/stateful/state"))
+        .delete(h.url("/api/groups/stateful/state"))
         .send()
         .await
         .expect("delete");
@@ -3254,7 +3261,7 @@ async fn delete_group_state_clears_kv_but_leaves_routes() {
 async fn delete_group_journal_clears_entries_but_leaves_routes() {
     let h = Harness::start().await;
     h.client
-        .post(h.url("/__api/groups"))
+        .post(h.url("/api/groups"))
         .json(&json!({ "name": "journal-clear" }))
         .send()
         .await
@@ -3271,7 +3278,7 @@ async fn delete_group_journal_clears_entries_but_leaves_routes() {
     // One entry should be present.
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/journal/journal-clear"))
+        .get(h.url("/api/journal/journal-clear"))
         .send()
         .await
         .expect("get")
@@ -3283,7 +3290,7 @@ async fn delete_group_journal_clears_entries_but_leaves_routes() {
     // Clear journal.
     let resp = h
         .client
-        .delete(h.url("/__api/groups/journal-clear/journal"))
+        .delete(h.url("/api/groups/journal-clear/journal"))
         .send()
         .await
         .expect("delete");
@@ -3291,7 +3298,7 @@ async fn delete_group_journal_clears_entries_but_leaves_routes() {
 
     let listed: serde_json::Value = h
         .client
-        .get(h.url("/__api/journal/journal-clear"))
+        .get(h.url("/api/journal/journal-clear"))
         .send()
         .await
         .expect("get")
@@ -3314,13 +3321,13 @@ async fn delete_group_journal_clears_entries_but_leaves_routes() {
 async fn group_endpoints_require_auth() {
     let h = Harness::start().await;
     let unauth = h.unauthenticated_client();
-    for path in ["/__api/groups", "/__api/groups/anything"] {
+    for path in ["/api/groups", "/api/groups/anything"] {
         let resp = unauth.get(h.url(path)).send().await.expect("get");
         assert_eq!(resp.status().as_u16(), 401, "GET {path}");
     }
 }
 
-// -- /__api/groups spec import/export ---------------------------------------
+// -- /api/groups spec import/export ---------------------------------------
 
 #[tokio::test]
 async fn import_creates_group_and_routes() {
@@ -3335,7 +3342,7 @@ async fn import_creates_group_and_routes() {
     });
     let resp = h
         .client
-        .post(h.url("/__api/groups/import"))
+        .post(h.url("/api/groups/import"))
         .json(&spec)
         .send()
         .await
@@ -3347,7 +3354,7 @@ async fn import_creates_group_and_routes() {
 
     let routes: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes?group=imported"))
+        .get(h.url("/api/routes?group=imported"))
         .send()
         .await
         .expect("get")
@@ -3369,7 +3376,7 @@ async fn import_rolls_back_on_bad_route() {
     });
     let resp = h
         .client
-        .post(h.url("/__api/groups/import"))
+        .post(h.url("/api/groups/import"))
         .json(&spec)
         .send()
         .await
@@ -3378,7 +3385,7 @@ async fn import_rolls_back_on_bad_route() {
     // The whole group is rolled back — nothing left behind.
     let g = h
         .client
-        .get(h.url("/__api/groups/rollback-me"))
+        .get(h.url("/api/groups/rollback-me"))
         .send()
         .await
         .expect("get");
@@ -3401,7 +3408,7 @@ async fn export_round_trips_a_source_route() {
 
     let exp: serde_json::Value = h
         .client
-        .get(h.url(&format!("/__api/groups/{group}/export")))
+        .get(h.url(&format!("/api/groups/{group}/export")))
         .send()
         .await
         .expect("get")
@@ -3422,7 +3429,7 @@ async fn export_errors_on_wasm_only_route() {
     let (group, _n) = h.seed_route(&["GET"], "/x", b"FAKE".to_vec());
     let resp = h
         .client
-        .get(h.url(&format!("/__api/groups/{group}/export")))
+        .get(h.url(&format!("/api/groups/{group}/export")))
         .send()
         .await
         .expect("get");
@@ -3444,21 +3451,21 @@ async fn export_forbidden_for_non_owner() {
     let group = create["group"]["name"].as_str().unwrap().to_string();
     let (_alice_id, alice) = h.provision_user("alice", false);
     let resp = alice
-        .get(h.url(&format!("/__api/groups/{group}/export")))
+        .get(h.url(&format!("/api/groups/{group}/export")))
         .send()
         .await
         .expect("get");
     assert_eq!(resp.status().as_u16(), 403);
 }
 
-// -- /__api/match -----------------------------------------------------------
+// -- /api/match -----------------------------------------------------------
 
 #[tokio::test]
 async fn match_probe_requires_auth() {
     let h = Harness::start().await;
     let unauth = h.unauthenticated_client();
     let resp = unauth
-        .get(h.url("/__api/match?method=GET&path=/anything"))
+        .get(h.url("/api/match?method=GET&path=/anything"))
         .send()
         .await
         .expect("get");
@@ -3484,7 +3491,7 @@ async fn match_probe_returns_hit_for_matching_route() {
     let resp = h
         .client
         .get(h.url(&format!(
-            "/__api/match?group={group}&method=POST&path=/v1/charges/abc"
+            "/api/match?group={group}&method=POST&path=/v1/charges/abc"
         )))
         .send()
         .await
@@ -3517,7 +3524,7 @@ async fn match_probe_returns_method_mismatch_near_miss() {
     let resp = h
         .client
         .get(h.url(&format!(
-            "/__api/match?group={group}&method=GET&path=/v1/charges"
+            "/api/match?group={group}&method=GET&path=/v1/charges"
         )))
         .send()
         .await
@@ -3558,7 +3565,7 @@ async fn match_probe_returns_prefix_match_near_miss() {
     let resp = h
         .client
         .get(h.url(&format!(
-            "/__api/match?group={group}&method=GET&path=/v1/charge"
+            "/api/match?group={group}&method=GET&path=/v1/charge"
         )))
         .send()
         .await
@@ -3579,7 +3586,7 @@ async fn match_probe_requires_group() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .get(h.url("/__api/match?method=GET&path=/v1/charges"))
+        .get(h.url("/api/match?method=GET&path=/v1/charges"))
         .send()
         .await
         .expect("get");
@@ -3616,7 +3623,7 @@ async fn match_probe_is_group_scoped() {
     let in_a: serde_json::Value = h
         .client
         .get(h.url(&format!(
-            "/__api/match?group={group_a}&method=POST&path=/v1/charges"
+            "/api/match?group={group_a}&method=POST&path=/v1/charges"
         )))
         .send()
         .await
@@ -3629,7 +3636,7 @@ async fn match_probe_is_group_scoped() {
     let in_b: serde_json::Value = h
         .client
         .get(h.url(&format!(
-            "/__api/match?group={group_b}&method=POST&path=/v1/charges"
+            "/api/match?group={group_b}&method=POST&path=/v1/charges"
         )))
         .send()
         .await
@@ -3658,7 +3665,7 @@ async fn match_probe_forbidden_for_non_owner() {
     let (_alice_id, alice) = h.provision_user("alice", false);
     let resp = alice
         .get(h.url(&format!(
-            "/__api/match?group={group}&method=POST&path=/v1/charges"
+            "/api/match?group={group}&method=POST&path=/v1/charges"
         )))
         .send()
         .await
@@ -3671,7 +3678,7 @@ async fn match_probe_rejects_bad_method() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .get(h.url("/__api/match?method=get&path=/v1/charges"))
+        .get(h.url("/api/match?method=get&path=/v1/charges"))
         .send()
         .await
         .expect("get");
@@ -3683,7 +3690,7 @@ async fn match_probe_rejects_bad_path() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .get(h.url("/__api/match?method=GET&path=no-leading-slash"))
+        .get(h.url("/api/match?method=GET&path=no-leading-slash"))
         .send()
         .await
         .expect("get");
@@ -3701,7 +3708,7 @@ async fn make_three_routes(h: &Harness) {
     for name in ["alpha", "beta"] {
         let r = h
             .client
-            .post(h.url("/__api/groups"))
+            .post(h.url("/api/groups"))
             .json(&json!({ "name": name }))
             .send()
             .await
@@ -3722,7 +3729,7 @@ async fn list_routes_filters_by_group_and_method() {
     // Filter to group alpha only.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes?group=alpha"))
+        .get(h.url("/api/routes?group=alpha"))
         .send()
         .await
         .expect("get")
@@ -3737,7 +3744,7 @@ async fn list_routes_filters_by_group_and_method() {
     // the multi-method `beta` route.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes?method=POST"))
+        .get(h.url("/api/routes?method=POST"))
         .send()
         .await
         .expect("get")
@@ -3750,7 +3757,7 @@ async fn list_routes_filters_by_group_and_method() {
     // Combine: group=alpha + method=POST → one route.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes?group=alpha&method=POST"))
+        .get(h.url("/api/routes?group=alpha&method=POST"))
         .send()
         .await
         .expect("get")
@@ -3767,7 +3774,7 @@ async fn list_routes_glob_pattern() {
 
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes?path_pattern=/v1/*"))
+        .get(h.url("/api/routes?path_pattern=/v1/*"))
         .send()
         .await
         .expect("get")
@@ -3786,7 +3793,7 @@ async fn list_routes_pagination_returns_next_offset() {
     // Page 1: limit 2, expect next_offset=2 and total=3.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes?limit=2"))
+        .get(h.url("/api/routes?limit=2"))
         .send()
         .await
         .expect("get")
@@ -3800,7 +3807,7 @@ async fn list_routes_pagination_returns_next_offset() {
     // Page 2: starting at offset 2, one entry remains, no next_offset.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/routes?limit=2&offset=2"))
+        .get(h.url("/api/routes?limit=2&offset=2"))
         .send()
         .await
         .expect("get")
@@ -3817,7 +3824,7 @@ async fn list_routes_rejects_bad_sort_with_parameter_diagnostic() {
     let h = Harness::start().await;
     let resp = h
         .client
-        .get(h.url("/__api/routes?sort=bogus"))
+        .get(h.url("/api/routes?sort=bogus"))
         .send()
         .await
         .expect("get");
@@ -3838,7 +3845,7 @@ async fn list_routes_owner_id_filter_is_admin_only() {
 
     // Non-admin caller passing `owner_id` → 403 with parameter diagnostic.
     let resp = other_client
-        .get(h.url("/__api/routes?owner_id=somebody"))
+        .get(h.url("/api/routes?owner_id=somebody"))
         .send()
         .await
         .expect("get");
@@ -3856,7 +3863,7 @@ async fn list_routes_non_admin_only_sees_own() {
 
     // Eve owns nothing, so her list is empty.
     let body: serde_json::Value = other_client
-        .get(h.url("/__api/routes"))
+        .get(h.url("/api/routes"))
         .send()
         .await
         .expect("get")
@@ -3874,7 +3881,7 @@ async fn list_groups_filters_by_name_prefix() {
 
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/groups?name_prefix=alp"))
+        .get(h.url("/api/groups?name_prefix=alp"))
         .send()
         .await
         .expect("get")
@@ -3894,7 +3901,7 @@ async fn list_groups_sort_by_name_asc() {
 
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/groups?sort=name&dir=asc"))
+        .get(h.url("/api/groups?sort=name&dir=asc"))
         .send()
         .await
         .expect("get")
@@ -3933,7 +3940,7 @@ async fn list_journal_filters_by_method_and_status() {
     // Filter alpha's journal by GET method → just one entry.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/journal/alpha?method=GET"))
+        .get(h.url("/api/journal/alpha?method=GET"))
         .send()
         .await
         .expect("get")
@@ -3946,7 +3953,7 @@ async fn list_journal_filters_by_method_and_status() {
     // shows both entries.
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/journal/alpha?status=2xx"))
+        .get(h.url("/api/journal/alpha?status=2xx"))
         .send()
         .await
         .expect("get")
@@ -3958,7 +3965,7 @@ async fn list_journal_filters_by_method_and_status() {
     // Bad status filter surfaces with parameter diagnostic.
     let resp = h
         .client
-        .get(h.url("/__api/journal/alpha?status=bogus"))
+        .get(h.url("/api/journal/alpha?status=bogus"))
         .send()
         .await
         .expect("get");
@@ -3981,7 +3988,7 @@ async fn list_unmatched_filters_by_path_pattern() {
 
     let body: serde_json::Value = h
         .client
-        .get(h.url("/__api/unmatched?path_pattern=/v1/*"))
+        .get(h.url("/api/unmatched?path_pattern=/v1/*"))
         .send()
         .await
         .expect("get")

@@ -14,7 +14,7 @@ lifecycle units. Storage in Valkey (Redis wire protocol). See `README.md`.
 against it, storage is abstracted behind a `Storage` enum with both
 in-memory and Valkey backends, and routes are stored in a `Registry` +
 `RouteTable` keyed by `{group}/{n}` slugs per `route-model.md`. The
-REST API at `/__api/routes` supports POST/GET/PATCH/DELETE for
+REST API at `/api/routes` supports POST/GET/PATCH/DELETE for
 source-language handlers. The only public artifact input is `source`
 + `language` (`typescript` / `javascript`); pre-compiled wasm upload
 was retired from the public surface in ADR-0023 (routes still run as
@@ -36,16 +36,16 @@ Streaming handlers run up to ~5 min (vs the ~30s buffered engine
 epoch); journaled with a `[stream] N chunks, M bytes, <disposition>`
 summary; dry-run collects the chunks in-process. Per-route AOT
 components stay buffered (handler world unchanged). The
-`/__api/*` surface is gated by bearer-token auth (bootstrap via
+`/api/*` surface is gated by bearer-token auth (bootstrap via
 `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup); mock traffic to user
-routes stays open by design. Public probes: `GET /__health`,
-`GET /__ready`. Token CRUD lives at `/__api/tokens`; user CRUD lives
-at `/__api/users` (admin-only for cross-user actions, plus
-`GET /__api/users/me` for any authed caller). Routes carry `owner_id`
+routes stays open by design. Public probes: `GET /health`,
+`GET /ready`. Token CRUD lives at `/api/tokens`; user CRUD lives
+at `/api/users` (admin-only for cross-user actions, plus
+`GET /api/users/me` for any authed caller). Routes carry `owner_id`
 and PATCH/DELETE check owner-or-admin. Every dispatched mock request
-lands in a per-group journal (`/__api/journal/{group}`); unmatched
-requests land in `/__api/unmatched` (admin-only). Both default to a
-1h TTL. Groups are first-class lifecycle units (`/__api/groups`) with
+lands in a per-group journal (`/api/journal/{group}`); unmatched
+requests land in `/api/unmatched` (admin-only). Both default to a
+1h TTL. Groups are first-class lifecycle units (`/api/groups`) with
 configured TTL (default 24h, max 30d) and sliding-on-traffic by
 default; cascade-delete wipes routes, kv/gkv state, and journal
 entries together. A background sweeper reaps the children of any
@@ -54,13 +54,13 @@ REST surface end-to-end: groups, routes, journal, tokens, plus the
 public probes. Auth via `WM_TOKEN` / `--token`, host via `WM_HOST` /
 `--host`. `--json` switches to machine-parseable output for scripts
 and agents. The MCP server (slice 10) is part of `wm-host` and
-mounts at `/__api/mcp` over the streamable-HTTP transport (rmcp).
+mounts at `/api/mcp` over the streamable-HTTP transport (rmcp).
 20 tools now cover identity, discovery, group/route CRUD (with
 slice-15 `update_route`), group state, the slice-11 streaming pair
 (`wait_for_request`, `tail_journal`) backed by `GET
-/__api/journal/tail` SSE on the host and a single-host broadcast bus
+/api/journal/tail` SSE on the host and a single-host broadcast bus
 inside `Journal`, the slice-13 match probe (`find_route` MCP tool +
-`wm match` CLI + `GET /__api/match` host endpoint with
+`wm match` CLI + `GET /api/match` host endpoint with
 `method_mismatch` and `prefix_match` near-misses), and the slice-16
 route-state + dry-run trio (`show_route_state`, `clear_route_state`,
 `dry_run_route`). Same bearer-token auth throughout. Multi-host
@@ -71,7 +71,7 @@ ready-to-run scripts teaching the CLI workflow. Slice 14 added
 admin user CRUD to the CLI (`wm users
 list/show/me/create/update/delete`) and `wm completion <shell>` for
 bash/zsh/fish/powershell. Slice 15 added route update: `PATCH
-/__api/routes/{group}/{n}` plus the matching `wm routes update` CLI
+/api/routes/{group}/{n}` plus the matching `wm routes update` CLI
 subcommand and `update_route` MCP tool. Mutable fields are
 `methods`, `path`, and the artifact triple (`source`/`compiled_wasm`
 + `language` + `bindings_version`); path or method changes
@@ -79,7 +79,7 @@ re-validate pattern conflicts (excluding self) and swap the
 by-method-path index, and any wasm swap evicts the RouteTable's
 component cache for that route. MCP stays wasm-only on the
 artifact, matching `create_route`. Slice 16 added per-route state +
-dry-run: `GET/DELETE /__api/routes/{group}/{n}/state` for listing
+dry-run: `GET/DELETE /api/routes/{group}/{n}/state` for listing
 and clearing the route's private kv, plus `POST
 .../{n}/dry-run` for running the handler against a synthetic
 request. Dry-run snapshots `kv:` and `gkv:` to `dryrun:{run_id}:` so
@@ -94,8 +94,8 @@ Bumped by the dispatch path on every matched request (two `HSET`s
 The fields surface in REST / wm-core / MCP responses; sort-by-
 activity on list endpoints is the next slice (REST list-surface).
 Slice 18 added the REST list-surface: shared filter/sort/pagination
-across `GET /__api/routes`, `/__api/groups`, `/__api/journal/{group}`,
-and `/__api/unmatched`. Routes/groups use offset pagination
+across `GET /api/routes`, `/api/groups`, `/api/journal/{group}`,
+and `/api/unmatched`. Routes/groups use offset pagination
 (`?offset=&limit=`, response `{ ..., total, next_offset }`) with
 sort columns `created_at` / `last_hit_at` / `hits_total` for routes
 and `created_at` / `name` / `last_activity_at` for groups.
@@ -123,7 +123,7 @@ group sort comparators are promoted to `pub(crate)` in `api.rs`
 so both surfaces share them. Slice 20 added local auth + browser
 sessions per ADR-0018: `WM_LOCAL_AUTH=alice:hunter2:admin,bob:pw`
 declares users (argon2id-hashed at startup, never persisted),
-`POST /__auth/login/password` mints a `wm_session` cookie signed
+`POST /auth/login/password` mints a `wm_session` cookie signed
 by `SESSION_SECRET` (HMAC-SHA256, ≥32 bytes), and the auth
 extractor accepts the cookie as a fallback to bearer tokens.
 Sessions live at `session:{token}` in Valkey with 24h sliding TTL;
@@ -135,16 +135,16 @@ templates via `minijinja` (compile-time-embedded via
 `include_str!`), a CSS stylesheet implementing the design tokens
 from `web-ui-design.md` (light + dark mode), a base layout shell
 with primary nav, a login-page rewrite from inline HTML to the
-template, a real home page (`/__ui/`) showing the user's groups,
-and stub pages for every remaining `/__ui/*` route so navigation
-works end-to-end. Auth-redirect middleware on `/__ui/*` sends
-unauthenticated browsers to `/__auth/login?next=...`; the password
+template, a real home page (`/ui/`) showing the user's groups,
+and stub pages for every remaining `/ui/*` route so navigation
+works end-to-end. Auth-redirect middleware on `/ui/*` sends
+unauthenticated browsers to `/auth/login?next=...`; the password
 form already honoured `next`. `just run-web` boots the host with
 sensible dev creds (`admin/devpassword`) — visit
-`http://localhost:8080/__ui/` to dogfood. The 13 remaining
+`http://localhost:8080/ui/` to dogfood. The 13 remaining
 screens are the rest of the UI track (slices 22–26); OAuth lands
 in slice 27. Slice 22 added the Groups + Routes list pages
-(`/__ui/groups`, `/__ui/routes`) on top of the slice-18
+(`/ui/groups`, `/ui/routes`) on top of the slice-18
 filter/sort/paginate surface. The REST handlers `list_routes` and
 `list_groups` were refactored into thin wrappers over new
 `pub(crate)` helpers `list_routes_core` / `list_groups_core` so
@@ -159,7 +159,7 @@ slice-21 layout shell; CSS adds `.filter-form`, `.filter-field`,
 `.btn--ghost`, `.btn--disabled`, `.pagination`. Owner column
 resolves user ULIDs to usernames via a single batched lookup per
 page. Slice 23 added the Group + Route detail pages
-(`/__ui/groups/{group}`, `/__ui/routes/{group}/{n}`) — both are
+(`/ui/groups/{group}`, `/ui/routes/{group}/{n}`) — both are
 read-only reflections of the underlying records, with breadcrumb
 nav back to the list pages, an owner-or-admin authorization gate
 (403 for non-owners, 404 for unknown), and a "Manage from CLI"
@@ -167,14 +167,14 @@ panel listing the equivalent `wm` commands until the CSRF-enabled
 authed-action slice lands. Route detail surfaces a short tail of
 recent journal entries (≤10) filtered to this route. Slice 23
 also implemented the bare-`/` redirect from route-model.md: an
-unmatched `GET /` bounces to `/__ui/` (with a valid `wm_session`
-cookie) or `/__auth/login` (without), wired into `dispatch_inner`
+unmatched `GET /` bounces to `/ui/` (with a valid `wm_session`
+cookie) or `/auth/login` (without), wired into `dispatch_inner`
 so a user-registered `GET /` route still shadows it. The redirect
 does NOT write to the unmatched journal — a human pointing a
 browser at the host isn't a "missing mock" signal. Slice 24
-added the journal screens. `/__ui/journal/live` pre-fetches
+added the journal screens. `/ui/journal/live` pre-fetches
 ~25 most-recent entries server-side (when scoped to a group) and
-opens an `EventSource` against `GET /__api/journal/tail` — the
+opens an `EventSource` against `GET /api/journal/tail` — the
 slice-11 SSE endpoint — to prepend new rows as `handled` events
 arrive. Plain JS, no HTMX yet (single stream + append is not
 worth pulling in the runtime). Host-wide pre-fetch (admin
@@ -187,11 +187,11 @@ raw entries) so narrow filters still tend to have content
 after a reload. Group detail page (slice 23) now carries the
 same live pane scoped to that group via `?group=` — same
 EventSource pattern, ~10 most-recent entries pre-rendered.
-Slice 25 added the self-service tokens page (`/__ui/me/tokens`,
+Slice 25 added the self-service tokens page (`/ui/me/tokens`,
 list / create / revoke own tokens, plaintext shown exactly once
 on create) and the CSRF middleware that protects every authed UI
-form. CSRF uses double-submit cookies: middleware on `/__ui/*`
-and `/__auth/*` mints a `wm_csrf` cookie on safe methods (stored
+form. CSRF uses double-submit cookies: middleware on `/ui/*`
+and `/auth/*` mints a `wm_csrf` cookie on safe methods (stored
 HttpOnly, SameSite=Strict, 24 h) and validates `_csrf` form
 field against the cookie on POST/PUT/PATCH/DELETE. A
 `tokio::task_local!` carries the current token through the
@@ -204,16 +204,16 @@ through to the SSE URL via `build_sse_url`. Authorization
 mirrors the SSE endpoint: with `?group=` the caller must be
 admin or own a route in that group; without it, admin-only
 (non-admin renders a group-picker with no SSE connection).
-`/__ui/journal/{group}/{n}` renders the full journal record —
+`/ui/journal/{group}/{n}` renders the full journal record —
 request envelope, response envelope, handler logs, timing,
 trace ID — with the same owner-or-admin gate. Binary bodies
 render as `(binary, N bytes)`; text bodies render verbatim with
 a truncated-warning if the journal had to trim them. minijinja
 gains the `json` feature for the `tojson` filter used to embed
 the SSE URL in the inline script safely. Slice 26 wired action buttons onto the detail pages now that
-CSRF is online: `POST /__ui/groups/{group}/refresh|edit|delete`
+CSRF is online: `POST /ui/groups/{group}/refresh|edit|delete`
 for the group lifecycle (refresh TTL, edit TTL + sliding flag,
-cascade-delete) and `POST /__ui/routes/{group}/{n}/delete` for
+cascade-delete) and `POST /ui/routes/{group}/{n}/delete` for
 routes. All owner-or-admin-gated; the registry's
 `refresh_group`, `patch_group`, `cascade_delete_group`, and
 `delete_route` are called in-process. Templates' "Manage from
@@ -223,8 +223,8 @@ edit-TTL disclosure. New CSS: `.btn--danger`, `.action-row`,
 `.edit-disclosure`, `.filter-checkbox`. Route source editing,
 the "+ Add route" button, and the dry-run modal are still
 deferred. Slice 27 added the state inspection pages:
-`/__ui/routes/{group}/{n}/state` lists a route's private
-`kv:` namespace (key, kind, value or size) and `/__ui/groups/
+`/ui/routes/{group}/{n}/state` lists a route's private
+`kv:` namespace (key, kind, value or size) and `/ui/groups/
 {group}/state` lists the group's shared `gkv:` namespace; both
 POST to the same URL to clear (the group page wipes both `kv:`
 and `gkv:` for the group, matching `cascade_delete_group`'s
@@ -240,30 +240,30 @@ state" `.btn--ghost` on the matching detail page's
 exercises empty state, list-after-dispatch (driving the
 counter_handler fixture), clear-state redirect + wipe, 403
 non-owner, 404 unknown, plus the group-clear-also-wipes-route-
-state semantics. Slice 28 promoted the `/__ui/unmatched` stub
+state semantics. Slice 28 promoted the `/ui/unmatched` stub
 into the admin-only unmatched view: a list page with
 method + path-pattern filters and cursor pagination over
-`?before=`, plus `/__ui/unmatched/{number}` for the request
+`?before=`, plus `/ui/unmatched/{number}` for the request
 envelope (headers + body). Reuses
 `JournalFilter::matches_unmatched` for filtering so the UI
-agrees with `/__api/unmatched` semantics. Per-row links go to
-`/__ui/unmatched/{n}` for the detail and to
-`/__ui/routes/new?method=…&path=…` for create-from-request
+agrees with `/api/unmatched` semantics. Per-row links go to
+`/ui/unmatched/{n}` for the detail and to
+`/ui/routes/new?method=…&path=…` for create-from-request
 (target still stubbed). Tier-2: `tests/ui_unmatched_pages.rs`
 covers empty / lists / method-filter / path-glob-filter / bad
 method 400 / pagination cursor / detail body / detail 404 /
 non-admin 403 on both pages. Slice 29 added the
-`/__ui/routes/new` route-creation form. GET renders the form
+`/ui/routes/new` route-creation form. GET renders the form
 (method/path/group/language/source) and honours
 `?method=&path=&group=` prefill, so the unmatched-page deep
 link from slice 28 now lands somewhere real. POST shares the
-create pipeline with `POST /__api/routes` via a new
+create pipeline with `POST /api/routes` via a new
 `api::create_route_core` helper extracted from the REST
 handler — same validation, same compile-failure surface, same
 component-validation step. The UI form is source-only
 (TypeScript / JavaScript); pre-compiled wasm uploads stay on
 the REST surface where a bytes body makes sense. On success
-the user is 303'd to `/__ui/routes/{group}/{number}`; on
+the user is 303'd to `/ui/routes/{group}/{number}`; on
 failure the form re-renders with `error.title` / `message` /
 `diagnostics` from the `ApiError` and returns 400 with the
 submitted values preserved. CSRF on the POST. Tier-2:
@@ -274,7 +274,7 @@ drift the dogfood pass surfaced: group-detail had a separate
 "Manage" card at the bottom of the page (slice-26 layout)
 instead of the wireframe's inline header for Refresh/Edit TTL
 + footer for Full journal/Group state/Delete; and
-`/__ui/routes/new` was using `.filter-form`'s horizontal flex
+`/ui/routes/new` was using `.filter-form`'s horizontal flex
 row instead of the wireframe's 2-column label/input grid +
 dedicated "Handler source" section. Both pages were
 restructured to match the wireframe (modulo the slice-24 call
@@ -293,7 +293,7 @@ Route state · Run dry-run · Delete route, retiring the
 slice-26 "Manage" card); tokens page polish (TTL preset
 dropdown — Never/30d/90d/1y/Custom — plus sortable column
 headers); token rename end-to-end (new
-`Auth::rename_token`, REST `PATCH /__api/tokens/{name}`, UI
+`Auth::rename_token`, REST `PATCH /api/tokens/{name}`, UI
 form per row with a `prompt()` for the new name); journal-
 entry layout sync (breadcrumb walks Groups → group → route
 → #N, Status/Duration/Trace move into the header `<dl>`,
@@ -305,7 +305,7 @@ filter from a text input to a `<select>` of the caller's
 groups and added a `← Back to {group/route}` link in the
 state pages' footer to soften the destructive Clear
 button. Slice 32 added the dry-run UI page at
-`/__ui/routes/{group}/{n}/dry-run` — a real full page (not
+`/ui/routes/{group}/{n}/dry-run` — a real full page (not
 a JS modal) with a form for method/path/headers/query/body
 that calls `dry_run::dry_run` directly and re-renders with
 a Response card showing status pill, duration, snapshot
@@ -331,7 +331,7 @@ line. Real state is never touched — overrides land in the
 disposable `dryrun:{run_id}:` namespace. Bytes-only:
 list/set/hash seeding is deferred (the workaround is to
 seed via real traffic before dry-run). Slice 34 added
-Pause/Resume to `/__ui/journal/live` — pure client-side
+Pause/Resume to `/ui/journal/live` — pure client-side
 JS that buffers incoming SSE events (capped at 500) while
 paused and flushes them oldest-first on resume so the
 table order matches the un-paused stream. The status
@@ -348,13 +348,13 @@ got }` or `PrefixMatch { segment_index, expected, got }`.
 The UI's unmatched list page now shows a "Did you mean
 …?" hint per row (or "No close neighbours." when empty),
 and the detail page lists every near-miss with an
-explanation; REST `/__api/unmatched/{n}` and MCP both
+explanation; REST `/api/unmatched/{n}` and MCP both
 serialise the same shape. Slice 36 added source storage on
 the registry: the `Route` record gains
 `source: Option<String>` alongside `compiled_wasm`,
 populated for source-language uploads and `None` for
 pre-compiled wasm. New endpoint
-`GET /__api/routes/{group}/{n}/source` (owner-or-admin)
+`GET /api/routes/{group}/{n}/source` (owner-or-admin)
 returns `{ slug, language, source }`; MCP exposes the
 same as `show_route_source`; the CLI as
 `wm routes source <slug>`. Like `compiled_wasm`, the
@@ -362,7 +362,7 @@ source is never inlined on list/get responses — only the
 dedicated endpoint returns it. Wasm swaps via PATCH clear
 any stored source; source-language swaps overwrite it.
 Sets up the route-source viewer slice on the UI. Slice 37
-landed that viewer: `/__ui/routes/{group}/{n}` now renders a
+landed that viewer: `/ui/routes/{group}/{n}` now renders a
 "Handler source" card just above the footer. Source-language
 routes show the stored source in a read-only
 `<pre class="source-block">` block; wasm-uploaded routes show
@@ -377,7 +377,7 @@ entry, so agents see the "Did you mean…?" candidates
 without a second REST hop. Empty when no neighbour matched
 (present as `[]`, not omitted, so callers can rely on the
 field shape). Slice 40 added source editing on the
-route-detail UI: a new `/__ui/routes/{group}/{n}/source/edit`
+route-detail UI: a new `/ui/routes/{group}/{n}/source/edit`
 page renders a textarea pre-populated with the stored
 source; POST forwards to `api::patch_route_core`
 (extracted from the REST handler), which runs the in-host
@@ -395,7 +395,7 @@ renders read-only, `route_new.html` and
 numbers, indentation, and JS/TS syntax highlighting. Ace
 is vendored under `src/ui/static/ace/` (core + JS + TS
 modes + light/dark themes) and served through the
-existing `/__ui/static/*` enum-match handler. A small
+existing `/ui/static/*` enum-match handler. A small
 `wm-ace.js` bootstrap finds `data-wm-ace` divs, syncs
 into a hidden `<textarea>` for form submit, and flips
 theme on `prefers-color-scheme` changes. No JS bundler;
@@ -432,9 +432,9 @@ covering the two flags plus bootstrap-token rotation, strong
 Slice 45 capped the mock-dispatch request body at the design value
 of 10 MiB (`storage-model.md::limits.request_body_size`). Above the
 cap returns 413 *before* the handler runs and *without* writing to
-the journal — junk floods don't pollute logs. The `/__api/*` JSON
+the journal — junk floods don't pollute logs. The `/api/*` JSON
 path got its axum default lifted from 2 MiB to 16 MiB so wasm
-uploads on `POST /__api/routes` + `PATCH /__api/routes/{g}/{n}`
+uploads on `POST /api/routes` + `PATCH /api/routes/{g}/{n}`
 fit comfortably. The auth-gated surface keeps the dispatch cap
 the only public-facing limit; the larger API limit only applies
 to authed callers. Slice 46 wired ADR-0002's wasm sandbox
@@ -470,7 +470,7 @@ wm.surface}` — `http.route` is the matched *template* (via
 `MatchedPath`, so path params never explode cardinality), and
 the internal route set is bounded by code so the route label
 is operator-safe. The MCP streamable endpoint + the
-`/__health` / `/__ready` probes are intentionally not
+`/health` / `/ready` probes are intentionally not
 recorded. Slice 2 also enriched the dispatch span with
 `handler.fuel_consumed` / `memory_peak_bytes` / `wall_ms`
 (buffered) and `streaming.head_latency_ms` (streaming) so
@@ -488,7 +488,7 @@ tool label bounded by `tool_router.has_route` (unknown →
 `http.server.request` span (method / route-template / surface /
 status) so API/UI/auth traffic appears in traces with per-route
 latency (the arkiv-parity piece that lets a trace backend answer
-"p95 for `/__api/groups/{group}`"), static assets excluded from
+"p95 for `/api/groups/{group}`"), static assets excluded from
 spans for volume. The histogram aggregation is explicit-bucket,
 not exponential (ADR-0024 amended): consumed for sum/count
 (rate/mean) only — Logfire stores no sum/count for exponential
@@ -515,7 +515,7 @@ release-image builds or no-Docker contributors. Nothing is checked
 in under `crates/wm-host/vendored/` (the directory is gitignored).
 ADR-0025 added a **writable handler-state API**, completing the
 external-state CRUD (was read + clear): `PUT
-/__api/routes/{group}/{n}/state` and `PUT /__api/groups/{group}/state`
+/api/routes/{group}/{n}/state` and `PUT /api/groups/{group}/state`
 upsert keys (listed keys written, others untouched); `GET
 .../state?format=snapshot` returns a round-trippable dump; reset is
 `clear + write`. State values cross the JSON boundary as a **UTF-8
@@ -546,9 +546,9 @@ journal JSON — pre-deploy records become unreadable for the rest of
 their ≤1h TTL, then self-heal. So bytes never cross JSON as array-of-ints
 anywhere on the public surface now. `Route.compiled_wasm` stays bytes
 (internal, genuinely binary, not a body).
-Agent onboarding: a `/__ui/connect` page ("Connect" in the nav + a home
+Agent onboarding: a `/ui/connect` page ("Connect" in the nav + a home
 quick-action) gives a logged-in user MCP setup — the live MCP endpoint
-(`{base}/__api/mcp`, derived from the request via
+(`{base}/api/mcp`, derived from the request via
 `auth_api::public_base_url`, honoring the forwarded headers so it shows
 the real public origin) plus paste-ready client configs (Claude Code
 `claude mcp add`, a `mcpServers` JSON block, Claude Desktop's custom-
@@ -561,10 +561,10 @@ the data/endpoint already existed on REST/CLI/UI but MCP didn't expose
 it. (1) `show_group_state` — the read-back counterpart to the existing
 `set_group_state`/`clear_group_state` (mirrors `show_route_state`;
 owner-or-admin via `ensure_group_owner_or_admin`, same gate as REST `GET
-/__api/groups/{group}/state`). (2) `list_journal` — the after-the-fact
+/api/groups/{group}/state`). (2) `list_journal` — the after-the-fact
 matched-traffic query (counterpart to `list_recent_unmatched`), a thin
 wrapper over `Journal::list_for_group` with the same filter surface as
-REST `GET /__api/journal/{group}` (`route`/`method`/`path_pattern`/
+REST `GET /api/journal/{group}` (`route`/`method`/`path_pattern`/
 `status`/`since`/`until`, cursor `before`/`limit`); owner-or-admin of
 the group (admin, or owns a route in it). Fills the gap that
 `wait_for_request`/`tail_journal` only catch *live* entries. (3)
@@ -575,17 +575,17 @@ from the API instead of inferred from the MCP config. A follow-up (4)
 added `show_unmatched` — `list_recent_unmatched` returns only a summary
 (method/path/near-misses), so an MCP agent couldn't read the full
 headers/body the SUT sent to an unknown path without dropping to REST
-`GET /__api/unmatched/{n}`; `show_unmatched` (admin-only) returns the
+`GET /api/unmatched/{n}`; `show_unmatched` (admin-only) returns the
 full `UnmatchedRecord`. This was the *actual* gap behind the first user's
 "#5 catch-all" ask — the unmatched journal already captures the request,
 MCP just couldn't read all of it; a catch-all route was deferred
 (ADR-0028 in Arkiv, Deferred) as too blunt a tool for what was a
 discovery gap. 28 tools total. A later cross-surface parity pass added
 `clear_journal` (MCP/UI counterpart to `wm groups journal --clear` /
-`DELETE /__api/groups/{group}/journal`) → 29 tools total. A follow-on
+`DELETE /api/groups/{group}/journal`) → 29 tools total. A follow-on
 spec-import/export parity slice (ADR-0030) added `import_group` /
-`export_group` (group-spec round-trip; REST `POST /__api/groups/import`
-+ `GET /__api/groups/{group}/export`) → 31 tools total.
+`export_group` (group-spec round-trip; REST `POST /api/groups/import`
++ `GET /api/groups/{group}/export`) → 31 tools total.
 Docs-only companion: a `get_capabilities` `gotchas` entry on simulating
 an upstream hang past the ~30s buffered budget via a streaming handler
 (`responseStream` head + `sleep`, ~5 min budget). The CLI already had
@@ -615,7 +615,7 @@ Cargo workspace with three crates under `crates/`:
 
 - `wm-core` — shared types, REST client, auth
 - `wm-host` — long-running Rust server (axum + wasmtime + Valkey).
-  MCP service is a `mcp/` module here, mounted at `/__api/mcp`.
+  MCP service is a `mcp/` module here, mounted at `/api/mcp`.
 - `wm-cli` — `wm` CLI binary
 
 Plus a non-Rust subdirectory used at build time only:
@@ -652,7 +652,7 @@ language/SDK toolchain, pinned), a `spec.json` (a **group spec**: a group name +
 routes referencing their handler by `source_file`), the mock handler(s), an
 optional `setup.sh` (post-import seeding), and the client test. The shared
 `conformance/run.sh` boots the host in-memory (native, cargo), inlines each
-lane's sources and **imports the group in one `POST /__api/groups/import` call**
+lane's sources and **imports the group in one `POST /api/groups/import` call**
 (jq/curl — the same spec round-trip the CLI/MCP/UI use), runs any `setup.sh`,
 and runs the lane's client **in Docker** (`--network host`) — so the host
 machine needs only Docker + jq + a buildable host, no per-language toolchain.
@@ -662,7 +662,7 @@ Mock traffic is addressed on the group subdomain `http://{group}.localhost:PORT`
 container — no client code change, the SDKs derive the right `Host` from
 `WM_BASE`. Run with `just conformance [lane]` or `conformance/run.sh [lane]`
 (no arg = all lanes). State the routes-only spec can't carry is seeded in
-`setup.sh` (the s3 lane `PUT`s its injection rules to `/__api/groups/{g}/state`,
+`setup.sh` (the s3 lane `PUT`s its injection rules to `/api/groups/{g}/state`,
 ADR-0025). CI lane is `.github/workflows/conformance.yml` (`workflow_dispatch`
 only — not gating, since it builds + boots the host and builds SDK images). Not
 in `just check`.
@@ -709,12 +709,12 @@ WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_STORAGE=memory cargo run -p wm-host
 
 Register a TypeScript route and call it. Mock traffic is served on the
 group's **subdomain** `{group}.{apex}` (ADR-0030 virtual-host routing); the
-apex (`localhost:8080` in dev) is control-plane only. The `/__api/*` calls
+apex (`localhost:8080` in dev) is control-plane only. The `/api/*` calls
 go to the apex; the mock request carries a `Host` of `{group}.localhost`
 (no DNS needed — the `Host` header alone drives group resolution):
 
 ```sh
-curl -X POST localhost:8080/__api/routes \
+curl -X POST localhost:8080/api/routes \
   -H 'authorization: Bearer wmt_dev_local' \
   -H content-type:application/json \
   -d '{

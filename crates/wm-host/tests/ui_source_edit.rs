@@ -122,12 +122,12 @@ async fn start_seeded() -> Harness {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf value");
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -168,7 +168,7 @@ async fn edit_form_renders_with_current_source_for_source_route() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .get(url(&h, "/ui/routes/stripe-mock/1/source/edit"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -211,7 +211,7 @@ async fn edit_submit_switches_language_javascript_to_typescript() {
         urlencoding::encode(UPDATED_SOURCE),
     );
     let resp = client
-        .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .post(url(&h, "/ui/routes/stripe-mock/1/source/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form_body)
@@ -222,7 +222,7 @@ async fn edit_submit_switches_language_javascript_to_typescript() {
 
     // Detail page should now report the language as TypeScript.
     let detail = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -251,7 +251,7 @@ async fn edit_submit_ignores_unsupported_language_values() {
         urlencoding::encode(UPDATED_SOURCE),
     );
     let resp = client
-        .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .post(url(&h, "/ui/routes/stripe-mock/1/source/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form_body)
@@ -260,7 +260,7 @@ async fn edit_submit_ignores_unsupported_language_values() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 303);
     let detail = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -281,7 +281,7 @@ async fn edit_form_404s_on_wasm_route_without_stored_source() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/stripe-mock/2/source/edit"))
+        .get(url(&h, "/ui/routes/stripe-mock/2/source/edit"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -296,7 +296,7 @@ async fn edit_form_403_for_non_owner_non_admin() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .get(url(&h, "/ui/routes/stripe-mock/1/source/edit"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -314,7 +314,7 @@ async fn edit_submit_with_new_source_updates_and_redirects() {
         urlencoding::encode(UPDATED_SOURCE),
     );
     let resp = client
-        .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .post(url(&h, "/ui/routes/stripe-mock/1/source/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form_body)
@@ -323,11 +323,11 @@ async fn edit_submit_with_new_source_updates_and_redirects() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 303, "303 redirect on success");
     let loc = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(loc, "/__ui/routes/stripe-mock/1");
+    assert_eq!(loc, "/ui/routes/stripe-mock/1");
 
     // Follow the redirect: the detail page should now show the new source.
     let detail = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -352,7 +352,7 @@ async fn edit_submit_without_csrf_is_forbidden() {
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     // Note: _csrf intentionally absent.
     let resp = client
-        .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .post(url(&h, "/ui/routes/stripe-mock/1/source/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("source={}", urlencoding::encode(UPDATED_SOURCE)))
@@ -375,7 +375,7 @@ async fn edit_submit_with_invalid_ts_source_reports_compile_failed() {
         urlencoding::encode(bad),
     );
     let resp = client
-        .post(url(&h, "/__ui/routes/stripe-mock/1/source/edit"))
+        .post(url(&h, "/ui/routes/stripe-mock/1/source/edit"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form_body)

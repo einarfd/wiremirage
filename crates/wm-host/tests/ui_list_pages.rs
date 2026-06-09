@@ -120,13 +120,13 @@ async fn start_seeded(
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
     // Slice-25 CSRF: GET login page first to mint cookie + read form
     // value, then POST with both.
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf form value");
 
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -157,7 +157,7 @@ fn extract_csrf_value(body: &str) -> Option<String> {
     Some(body[start..start + end].to_string())
 }
 
-// -- /__ui/groups -----------------------------------------------------------
+// -- /ui/groups -----------------------------------------------------------
 
 #[tokio::test]
 async fn groups_list_renders_all_groups_for_admin() {
@@ -170,7 +170,7 @@ async fn groups_list_renders_all_groups_for_admin() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/groups"))
+        .get(url(&h, "/ui/groups"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -199,7 +199,7 @@ async fn groups_list_scopes_non_admin_to_own_groups() {
     let cookie = login_cookie(&h, &client, "alice").await;
 
     let body = client
-        .get(url(&h, "/__ui/groups"))
+        .get(url(&h, "/ui/groups"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -228,7 +228,7 @@ async fn groups_list_admin_can_filter_to_just_mine() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/groups?owner_scope=mine"))
+        .get(url(&h, "/ui/groups?owner_scope=mine"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -248,7 +248,7 @@ async fn groups_list_name_search_echoes_back_in_form() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/groups?q=alpha"))
+        .get(url(&h, "/ui/groups?q=alpha"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -278,7 +278,7 @@ async fn groups_list_sort_link_toggles_direction() {
     // direction). Calling again with `?sort=name&dir=asc` should give
     // a header link to `?sort=name&dir=desc` for the next click.
     let body = client
-        .get(url(&h, "/__ui/groups?sort=name&dir=asc"))
+        .get(url(&h, "/ui/groups?sort=name&dir=asc"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -304,7 +304,7 @@ async fn groups_list_paginates_with_next_link() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/groups"))
+        .get(url(&h, "/ui/groups"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -320,7 +320,7 @@ async fn groups_list_paginates_with_next_link() {
     assert!(body.contains("30 groups"));
 }
 
-// -- /__ui/routes -----------------------------------------------------------
+// -- /ui/routes -----------------------------------------------------------
 
 #[tokio::test]
 async fn routes_list_renders_routes_with_filter() {
@@ -337,7 +337,7 @@ async fn routes_list_renders_routes_with_filter() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/routes"))
+        .get(url(&h, "/ui/routes"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -354,7 +354,7 @@ async fn routes_list_renders_routes_with_filter() {
 
     // Group filter narrows the list.
     let body = client
-        .get(url(&h, "/__ui/routes?group=g1"))
+        .get(url(&h, "/ui/routes?group=g1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -382,7 +382,7 @@ async fn routes_list_scopes_non_admin_to_own_routes() {
     let cookie = login_cookie(&h, &client, "alice").await;
 
     let body = client
-        .get(url(&h, "/__ui/routes"))
+        .get(url(&h, "/ui/routes"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -406,7 +406,7 @@ async fn bad_sort_renders_400_placeholder() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .get(url(&h, "/__ui/groups?sort=bogus"))
+        .get(url(&h, "/ui/groups?sort=bogus"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -429,7 +429,7 @@ async fn non_admin_cannot_pass_owner_id_via_unknown_field() {
     let cookie = login_cookie(&h, &client, "alice").await;
 
     let body = client
-        .get(url(&h, &format!("/__ui/groups?owner_id={admin_id}")))
+        .get(url(&h, &format!("/ui/groups?owner_id={admin_id}")))
         .header("cookie", &cookie)
         .send()
         .await

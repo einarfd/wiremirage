@@ -1,6 +1,6 @@
-//! Filters shared between `GET /__api/journal/tail` (SSE), the MCP
+//! Filters shared between `GET /api/journal/tail` (SSE), the MCP
 //! streaming tools, and the paginated list endpoints
-//! `GET /__api/journal/{group}` + `GET /__api/unmatched`. Keeps
+//! `GET /api/journal/{group}` + `GET /api/unmatched`. Keeps
 //! filter parsing + matching in one place so the SSE handler, the
 //! MCP tools, and the list endpoints agree on semantics.
 //!
@@ -193,7 +193,7 @@ impl JournalFilter {
         }
         // `path_pattern` on unmatched events matches against the
         // request path (there's no route pattern to compare against).
-        // Documented in rest-api.md's `GET /__api/unmatched` section.
+        // Documented in rest-api.md's `GET /api/unmatched` section.
         if let Some(pat) = &self.path_pattern
             && !glob_match(pat, &u.request.path)
         {

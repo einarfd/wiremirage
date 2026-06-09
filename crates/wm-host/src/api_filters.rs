@@ -1,6 +1,6 @@
 //! Shared filter, sort, and pagination primitives for the REST list
-//! endpoints (`GET /__api/groups`, `/__api/routes`, `/__api/journal/{group}`,
-//! `/__api/unmatched`). The vocabulary is described in
+//! endpoints (`GET /api/groups`, `/api/routes`, `/api/journal/{group}`,
+//! `/api/unmatched`). The vocabulary is described in
 //! `rest-api.md`'s "List filtering, sorting, pagination" section;
 //! this module is the implementation.
 //!

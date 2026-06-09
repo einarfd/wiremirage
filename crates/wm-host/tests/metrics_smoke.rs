@@ -10,7 +10,7 @@
 //!   route-shaped label (the unbounded-route invariant), while the
 //!   `http.server.*` family may carry `http.route` + `wm.surface`
 //!   (bounded internal route set).
-//! - `http.route` is the matched route *template* (`/__api/groups/{group}`),
+//! - `http.route` is the matched route *template* (`/api/groups/{group}`),
 //!   never the resolved path — the property that keeps internal-metric
 //!   cardinality bounded.
 //!
@@ -215,12 +215,12 @@ async fn metrics_cover_mock_and_internal_surfaces_within_cardinality_rules() {
 
     // --- Internal surface: an authed API call against a param route, so
     // we can verify `http.route` is the *template* not the resolved
-    // path. `GET /__api/groups/{group}` resolves a group name into the
-    // path; the recorded `http.route` must stay `/__api/groups/{group}`.
+    // path. `GET /api/groups/{group}` resolves a group name into the
+    // path; the recorded `http.route` must stay `/api/groups/{group}`.
     // (The group doesn't exist → 404, which is fine; the route still
     // matched and the metric still records the template.) ---
     let resp = client
-        .get(format!("http://{addr}/__api/groups/nonexistent-group"))
+        .get(format!("http://{addr}/api/groups/nonexistent-group"))
         .header("authorization", "Bearer wmt_test")
         .send()
         .await
@@ -279,7 +279,7 @@ async fn metrics_cover_mock_and_internal_surfaces_within_cardinality_rules() {
 
     // The cardinality-critical property: `http.route` is the route
     // TEMPLATE, never the resolved path. If MatchedPath weren't used,
-    // we'd see `/__api/groups/nonexistent-group` here and the series
+    // we'd see `/api/groups/nonexistent-group` here and the series
     // space would scale with group count.
     let internal_routes: Vec<String> = collected
         .iter()
@@ -290,8 +290,8 @@ async fn metrics_cover_mock_and_internal_surfaces_within_cardinality_rules() {
         .map(|(_, v)| v.clone())
         .collect();
     assert!(
-        internal_routes.iter().any(|r| r == "/__api/groups/{group}"),
-        "expected templated http.route `/__api/groups/{{group}}`, got {internal_routes:?}"
+        internal_routes.iter().any(|r| r == "/api/groups/{group}"),
+        "expected templated http.route `/api/groups/{{group}}`, got {internal_routes:?}"
     );
     assert!(
         !internal_routes

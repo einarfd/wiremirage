@@ -3,18 +3,18 @@
 //! Exercises the full authorization-code-with-PKCE flow against a
 //! real in-process host:
 //!
-//!   1. POST /__auth/oauth/register     → client_id + client_secret
-//!   2. POST /__auth/login/password     → wm_session cookie
-//!   3. GET  /__auth/oauth/authorize    → 303 to consent (session present)
-//!   4. POST /__ui/oauth/consent        → 303 to client redirect_uri w/ code
-//!   5. POST /__auth/oauth/token        → access_token + refresh_token
-//!   6. GET  /__api/users/me            → 200 (token authenticates)
+//!   1. POST /auth/oauth/register     → client_id + client_secret
+//!   2. POST /auth/login/password     → wm_session cookie
+//!   3. GET  /auth/oauth/authorize    → 303 to consent (session present)
+//!   4. POST /ui/oauth/consent        → 303 to client redirect_uri w/ code
+//!   5. POST /auth/oauth/token        → access_token + refresh_token
+//!   6. GET  /api/users/me            → 200 (token authenticates)
 //!
 //! Negative-path coverage:
 //!   * bad client_secret → 401 invalid_client
 //!   * unsupported grant_type → 400 unsupported_grant_type
 //!   * wrong PKCE verifier → 400 invalid_grant
-//!   * authorize without session → 303 to /__auth/login
+//!   * authorize without session → 303 to /auth/login
 
 use std::sync::Arc;
 
@@ -142,7 +142,7 @@ async fn login_as_alice(h: &Harness, client: &Client) -> String {
     // GET the login page to mint the csrf cookie + pull the form
     // token. Same pattern as local_auth_e2e.rs's post_login helper.
     let get = client
-        .get(url(h, "/__auth/login"))
+        .get(url(h, "/auth/login"))
         .send()
         .await
         .expect("get login");
@@ -157,7 +157,7 @@ async fn login_as_alice(h: &Harness, client: &Client) -> String {
         urlencode("hunter2"),
     );
     let post = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(body)
@@ -189,7 +189,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
         "redirect_uris": ["http://127.0.0.1:54321/cb"],
     });
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&reg_body)
         .send()
         .await
@@ -204,7 +204,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
     // 2. Log in as alice to mint a session cookie.
     let session_cookie = login_as_alice(&h, &client).await;
 
-    // 3. Hit /__auth/oauth/authorize as if Claude Desktop opened the
+    // 3. Hit /auth/oauth/authorize as if Claude Desktop opened the
     //    browser to it. The session cookie is present, so we should
     //    303 to the consent page.
     let (verifier, challenge) = pkce_pair();
@@ -216,7 +216,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
         urlencode(&challenge),
     );
     let authz = client
-        .get(url(&h, &format!("/__auth/oauth/authorize?{auth_query}")))
+        .get(url(&h, &format!("/auth/oauth/authorize?{auth_query}")))
         .header("cookie", format!("wm_session={session_cookie}"))
         .send()
         .await
@@ -230,7 +230,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
         .unwrap()
         .to_string();
     assert!(
-        consent_path.starts_with("/__ui/oauth/consent?state="),
+        consent_path.starts_with("/ui/oauth/consent?state="),
         "Location was {consent_path}"
     );
     let internal_state = consent_path.split('=').nth(1).unwrap().to_string();
@@ -255,7 +255,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
         urlencode(&internal_state),
     );
     let approve = client
-        .post(url(&h, "/__ui/oauth/consent"))
+        .post(url(&h, "/ui/oauth/consent"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header(
             "cookie",
@@ -299,7 +299,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
         urlencode(&client_secret),
     );
     let tok = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(token_body)
         .send()
@@ -314,9 +314,9 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
     assert!(refresh_token.starts_with("wmr_"));
     assert_eq!(tok_json["expires_in"], 3600);
 
-    // 6. Use the access token on a /__api/ endpoint.
+    // 6. Use the access token on a /api/ endpoint.
     let me = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("authorization", format!("Bearer {access_token}"))
         .send()
         .await
@@ -324,7 +324,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
     assert_eq!(
         me.status(),
         200,
-        "wmm_ access token should authenticate /__api/*"
+        "wmm_ access token should authenticate /api/*"
     );
     let me_json: Value = me.json().await.expect("me json");
     assert_eq!(me_json["name"], "alice");
@@ -336,7 +336,7 @@ async fn token_endpoint_rejects_wrong_client_secret() {
     let client = no_redirect_client();
 
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "test",
             "redirect_uris": ["http://127.0.0.1:0/cb"],
@@ -353,7 +353,7 @@ async fn token_endpoint_rejects_wrong_client_secret() {
         urlencode(client_id),
     );
     let resp = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -370,7 +370,7 @@ async fn token_endpoint_rejects_unknown_grant_type() {
     let client = no_redirect_client();
 
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "test",
             "redirect_uris": ["http://127.0.0.1:0/cb"],
@@ -388,7 +388,7 @@ async fn token_endpoint_rejects_unknown_grant_type() {
         urlencode(client_secret),
     );
     let resp = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -406,7 +406,7 @@ async fn authorize_without_session_redirects_to_login() {
 
     // Register so the authorize endpoint accepts the client_id.
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "test",
             "redirect_uris": ["http://127.0.0.1:0/cb"],
@@ -424,13 +424,13 @@ async fn authorize_without_session_redirects_to_login() {
         urlencode(&challenge),
     );
     let resp = client
-        .get(url(&h, &format!("/__auth/oauth/authorize?{q}")))
+        .get(url(&h, &format!("/auth/oauth/authorize?{q}")))
         .send()
         .await
         .expect("authorize");
     assert_eq!(resp.status(), 303, "should bounce to login without session");
     let loc = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(loc.starts_with("/__auth/login?next="), "Location was {loc}");
+    assert!(loc.starts_with("/auth/login?next="), "Location was {loc}");
 }
 
 #[tokio::test]
@@ -439,7 +439,7 @@ async fn redirect_uri_must_match_registered_set() {
     let client = no_redirect_client();
 
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "test",
             "redirect_uris": ["http://127.0.0.1:54321/cb"],
@@ -458,7 +458,7 @@ async fn redirect_uri_must_match_registered_set() {
         urlencode(&challenge),
     );
     let resp = client
-        .get(url(&h, &format!("/__auth/oauth/authorize?{q}")))
+        .get(url(&h, &format!("/auth/oauth/authorize?{q}")))
         .send()
         .await
         .expect("authorize");
@@ -475,7 +475,7 @@ async fn loopback_port_wildcard_matches_registered_uri() {
     let client = no_redirect_client();
 
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "test",
             "redirect_uris": ["http://127.0.0.1:54321/cb"],
@@ -494,7 +494,7 @@ async fn loopback_port_wildcard_matches_registered_uri() {
         urlencode(&challenge),
     );
     let resp = client
-        .get(url(&h, &format!("/__auth/oauth/authorize?{q}")))
+        .get(url(&h, &format!("/auth/oauth/authorize?{q}")))
         .header("cookie", format!("wm_session={session_cookie}"))
         .send()
         .await
@@ -521,7 +521,7 @@ async fn tokens_page_lists_active_mcp_grant_after_authorization() {
     // mint a fresh one for the tokens-page GET.
     let session = login_as_alice(&h, &client).await;
     let resp = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", format!("wm_session={session}"))
         .send()
         .await
@@ -538,7 +538,7 @@ async fn tokens_page_lists_active_mcp_grant_after_authorization() {
         "tokens page lists the granted application's name"
     );
     assert!(
-        body.contains("/__ui/me/tokens/oauth/"),
+        body.contains("/ui/me/tokens/oauth/"),
         "tokens page carries a per-grant revoke form"
     );
 }
@@ -552,7 +552,7 @@ async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
     // Get a session + the csrf cookie/form value for the revoke POST.
     let session = login_as_alice(&h, &client).await;
     let get = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", format!("wm_session={session}"))
         .send()
         .await
@@ -565,7 +565,7 @@ async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
     let revoke = client
         .post(url(
             &h,
-            &format!("/__ui/me/tokens/oauth/{}/revoke", pair.client_id),
+            &format!("/ui/me/tokens/oauth/{}/revoke", pair.client_id),
         ))
         .header("content-type", "application/x-www-form-urlencoded")
         .header(
@@ -580,7 +580,7 @@ async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
 
     // The grant row is gone.
     let after = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", format!("wm_session={session}"))
         .send()
         .await
@@ -599,7 +599,7 @@ async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
         urlencode(&pair.client_secret),
     );
     let resp = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -615,7 +615,7 @@ async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
 /// the refresh/revoke tests so they don't all re-implement steps 1-5.
 async fn obtain_token_pair(h: &Harness, client: &Client) -> TokenPair {
     let reg = client
-        .post(url(h, "/__auth/oauth/register"))
+        .post(url(h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "tester",
             "redirect_uris": ["http://127.0.0.1:54321/cb"],
@@ -636,7 +636,7 @@ async fn obtain_token_pair(h: &Harness, client: &Client) -> TokenPair {
         urlencode(&challenge),
     );
     let authz = client
-        .get(url(h, &format!("/__auth/oauth/authorize?{auth_query}")))
+        .get(url(h, &format!("/auth/oauth/authorize?{auth_query}")))
         .header("cookie", format!("wm_session={session_cookie}"))
         .send()
         .await
@@ -660,7 +660,7 @@ async fn obtain_token_pair(h: &Harness, client: &Client) -> TokenPair {
     let html = consent_get.text().await.unwrap();
     let csrf_form = extract_csrf_form_value(&html).expect("csrf form");
     let approve = client
-        .post(url(h, "/__ui/oauth/consent"))
+        .post(url(h, "/ui/oauth/consent"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header(
             "cookie",
@@ -688,7 +688,7 @@ async fn obtain_token_pair(h: &Harness, client: &Client) -> TokenPair {
         .expect("code");
 
     let tok = client
-        .post(url(h, "/__auth/oauth/token"))
+        .post(url(h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
             "grant_type=authorization_code&code={}&redirect_uri={}&code_verifier={}&client_id={}&client_secret={}",
@@ -730,7 +730,7 @@ async fn refresh_token_grant_rotates_and_yields_a_working_access_token() {
         urlencode(&pair.client_secret),
     );
     let resp = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -744,9 +744,9 @@ async fn refresh_token_grant_rotates_and_yields_a_working_access_token() {
     assert!(new_refresh.starts_with("wmr_"));
     assert_ne!(new_refresh, pair.refresh_token, "refresh must rotate");
 
-    // The new access token authenticates /__api/*.
+    // The new access token authenticates /api/*.
     let me = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("authorization", format!("Bearer {new_access}"))
         .send()
         .await
@@ -769,7 +769,7 @@ async fn refresh_token_replay_is_rejected() {
 
     // First exchange succeeds.
     let r1 = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body.clone())
         .send()
@@ -779,7 +779,7 @@ async fn refresh_token_replay_is_rejected() {
 
     // Replay with the same refresh_token rejects.
     let r2 = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -798,7 +798,7 @@ async fn revoke_invalidates_an_access_token() {
 
     // Confirm it works first.
     let me_before = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("authorization", format!("Bearer {}", pair.access_token))
         .send()
         .await
@@ -813,7 +813,7 @@ async fn revoke_invalidates_an_access_token() {
         urlencode(&pair.client_secret),
     );
     let rv = client
-        .post(url(&h, "/__auth/oauth/revoke"))
+        .post(url(&h, "/auth/oauth/revoke"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -823,7 +823,7 @@ async fn revoke_invalidates_an_access_token() {
 
     // Token no longer authenticates.
     let me_after = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("authorization", format!("Bearer {}", pair.access_token))
         .send()
         .await
@@ -844,7 +844,7 @@ async fn revoke_marks_refresh_token_as_revoked() {
         urlencode(&pair.client_secret),
     );
     let rv = client
-        .post(url(&h, "/__auth/oauth/revoke"))
+        .post(url(&h, "/auth/oauth/revoke"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -860,7 +860,7 @@ async fn revoke_marks_refresh_token_as_revoked() {
         urlencode(&pair.client_secret),
     );
     let resp = client
-        .post(url(&h, "/__auth/oauth/token"))
+        .post(url(&h, "/auth/oauth/token"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(refresh_body)
         .send()
@@ -880,7 +880,7 @@ async fn revoke_with_unknown_token_still_returns_200() {
     let client = no_redirect_client();
 
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "t",
             "redirect_uris": ["http://127.0.0.1:0/cb"],
@@ -898,7 +898,7 @@ async fn revoke_with_unknown_token_still_returns_200() {
         urlencode(csec),
     );
     let resp = client
-        .post(url(&h, "/__auth/oauth/revoke"))
+        .post(url(&h, "/auth/oauth/revoke"))
         .header("content-type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -910,7 +910,7 @@ async fn revoke_with_unknown_token_still_returns_200() {
 #[tokio::test]
 async fn authorize_rejects_wrong_resource_with_actionable_error() {
     // Client misconfigured to point at the host root rather than the
-    // MCP endpoint at /__api/mcp. The fix that made this catchable:
+    // MCP endpoint at /api/mcp. The fix that made this catchable:
     // we validate `resource` (RFC 8707) at authorize time, before the
     // consent dialog, so the user sees a fixable error instead of
     // going through OAuth and then failing opaquely at the MCP
@@ -919,7 +919,7 @@ async fn authorize_rejects_wrong_resource_with_actionable_error() {
     let client = no_redirect_client();
 
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "test",
             "redirect_uris": ["http://127.0.0.1:0/cb"],
@@ -932,7 +932,7 @@ async fn authorize_rejects_wrong_resource_with_actionable_error() {
 
     let (_, challenge) = pkce_pair();
 
-    // resource= names the host root, NOT /__api/mcp.
+    // resource= names the host root, NOT /api/mcp.
     let wrong_resource = format!("http://{}", h.addr);
     let q = format!(
         "response_type=code&client_id={}&redirect_uri=http://127.0.0.1:0/cb&code_challenge={}&code_challenge_method=S256&resource={}",
@@ -941,14 +941,14 @@ async fn authorize_rejects_wrong_resource_with_actionable_error() {
         urlencode(&wrong_resource),
     );
     let resp = client
-        .get(url(&h, &format!("/__auth/oauth/authorize?{q}")))
+        .get(url(&h, &format!("/auth/oauth/authorize?{q}")))
         .send()
         .await
         .expect("authorize");
 
     assert_eq!(resp.status(), 400);
     let body = resp.text().await.expect("text");
-    let expected = format!("http://{}/__api/mcp", h.addr);
+    let expected = format!("http://{}/api/mcp", h.addr);
     assert!(
         body.contains(&expected),
         "error should name the correct MCP endpoint: {body}"
@@ -965,7 +965,7 @@ async fn authorize_rejects_wrong_resource_with_actionable_error() {
 
 #[tokio::test]
 async fn authorize_accepts_correct_resource() {
-    // resource= exactly matches /__api/mcp → request proceeds (and
+    // resource= exactly matches /api/mcp → request proceeds (and
     // returns the usual 303-to-login since this test client has no
     // session cookie; the point is that the resource check didn't
     // reject it with 400).
@@ -973,7 +973,7 @@ async fn authorize_accepts_correct_resource() {
     let client = no_redirect_client();
 
     let reg = client
-        .post(url(&h, "/__auth/oauth/register"))
+        .post(url(&h, "/auth/oauth/register"))
         .json(&json!({
             "client_name": "test",
             "redirect_uris": ["http://127.0.0.1:0/cb"],
@@ -985,7 +985,7 @@ async fn authorize_accepts_correct_resource() {
     let client_id = reg_json["client_id"].as_str().unwrap();
 
     let (_, challenge) = pkce_pair();
-    let correct_resource = format!("http://{}/__api/mcp", h.addr);
+    let correct_resource = format!("http://{}/api/mcp", h.addr);
     let q = format!(
         "response_type=code&client_id={}&redirect_uri=http://127.0.0.1:0/cb&code_challenge={}&code_challenge_method=S256&resource={}",
         urlencode(client_id),
@@ -993,7 +993,7 @@ async fn authorize_accepts_correct_resource() {
         urlencode(&correct_resource),
     );
     let resp = client
-        .get(url(&h, &format!("/__auth/oauth/authorize?{q}")))
+        .get(url(&h, &format!("/auth/oauth/authorize?{q}")))
         .send()
         .await
         .expect("authorize");

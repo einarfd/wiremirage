@@ -1,4 +1,4 @@
-//! Tier-2 SSE tests for `GET /__api/journal/tail`. Spins up a live
+//! Tier-2 SSE tests for `GET /api/journal/tail`. Spins up a live
 //! wm-host on a random port, opens the SSE endpoint as a reqwest
 //! streaming response, drives writes via `Journal::record_handled` /
 //! `record_unmatched` directly (cheaper than firing real mock
@@ -91,7 +91,7 @@ fn sample_handled(group_id: &str, group_name: &str, method: &str, status: u16) -
 /// `event:` and `data:` lines is enough.
 async fn open_tail(base_url: &str, token: &str, query: &str) -> reqwest::Response {
     reqwest::Client::new()
-        .get(format!("{base_url}/__api/journal/tail{query}"))
+        .get(format!("{base_url}/api/journal/tail{query}"))
         .header("Accept", "text/event-stream")
         .header("Authorization", format!("Bearer {token}"))
         .send()
@@ -134,7 +134,7 @@ async fn read_one_event(body: &mut reqwest::Response, timeout: Duration) -> Opti
 async fn tail_requires_auth() {
     let h = start().await;
     let resp = reqwest::Client::new()
-        .get(format!("{}/__api/journal/tail", h.base_url))
+        .get(format!("{}/api/journal/tail", h.base_url))
         .header("Accept", "text/event-stream")
         .send()
         .await

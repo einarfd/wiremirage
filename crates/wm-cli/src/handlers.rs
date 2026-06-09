@@ -152,7 +152,7 @@ async fn handle_health(client: &Client, format: Format) -> Result<(), ClientErro
 
 async fn handle_version(client: &Client, format: Format) -> Result<(), ClientError> {
     // CLI version is the build's own; host version comes from
-    // /__health when reachable. Best-effort: a network failure
+    // /health when reachable. Best-effort: a network failure
     // shouldn't block printing the CLI version.
     let cli_version = env!("CARGO_PKG_VERSION");
     let host_version = client.health().await.ok().map(|h| h.version);

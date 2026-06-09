@@ -6,8 +6,8 @@
 //! dep. ADR-0015 left this open as an implementation question; we
 //! settle it as "module of the host" here.
 //!
-//! Mounted onto the host's axum router at `/__api/mcp` via
-//! [`router`]. Same bearer-token auth as the rest of `/__api/*` —
+//! Mounted onto the host's axum router at `/api/mcp` via
+//! [`router`]. Same bearer-token auth as the rest of `/api/*` —
 //! the auth middleware authenticates, then injects an `Arc<AppState>`
 //! plus the resolved `AuthContext` into the request extensions where
 //! per-tool handlers can pull them out.
@@ -30,11 +30,11 @@ mod tools;
 pub use server::WmMcpServer;
 
 /// Build the axum sub-router that exposes the MCP service at
-/// `/__api/mcp` with bearer-token auth applied.
+/// `/api/mcp` with bearer-token auth applied.
 ///
 /// The returned router is intended to be `.merge`d into the host's
 /// main router. Each request is authenticated by the same
-/// `/__api/*` middleware before reaching the rmcp tower service.
+/// `/api/*` middleware before reaching the rmcp tower service.
 pub fn router(state: AppState) -> Router {
     let config = mcp_server_config(state.mcp_allowed_hosts());
     let state = Arc::new(state);
@@ -47,7 +47,7 @@ pub fn router(state: AppState) -> Router {
 
     // Apply our auth layer before rmcp gets the request.
     Router::new()
-        .nest_service("/__api/mcp", service)
+        .nest_service("/api/mcp", service)
         .layer(axum::middleware::from_fn_with_state(
             state,
             auth::require_bearer,

@@ -131,11 +131,11 @@ If the symptoms don't fit any of the above, two things to try:
 
 1. **Check the host's operational logs.** Bigger problems (Valkey unreachable, the embedded `js-engine.wasm` failing to instantiate, OTel pipeline broken) show up there before they show up in any of the user-facing surfaces. Ask the operator running WireMirage to share the relevant host logs.
 
-2. **Check `/__health` and `/__ready`.** The readiness probe reports per-dependency status. If `valkey: unreachable: ...` shows up there, no amount of journal inspection will help — the host can't write to its backing store.
+2. **Check `/health` and `/ready`.** The readiness probe reports per-dependency status. If `valkey: unreachable: ...` shows up there, no amount of journal inspection will help — the host can't write to its backing store.
 
 ```sh
-curl $WM_HOST/__health
-curl $WM_HOST/__ready
+curl $WM_HOST/health
+curl $WM_HOST/ready
 ```
 
 If neither of those is the issue and the diagnostic patterns above don't help, the failure mode is novel and worth surfacing to the WireMirage team — please file an issue with the relevant journal entries (sanitized) and the symptoms.

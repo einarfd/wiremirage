@@ -4,7 +4,7 @@
 <section class="page-header">
   <div class="page-header__row">
     <h1>Routes</h1>
-    <a class="btn btn--primary" href="/__ui/routes/new">+ New route</a>
+    <a class="btn btn--primary" href="/ui/routes/new">+ New route</a>
   </div>
   <p class="text-muted">
     {%- if user.is_admin and filters.owner_scope == "everyone" -%}
@@ -18,7 +18,7 @@
 </section>
 
 <section class="card">
-  <form method="get" action="/__ui/routes" class="filter-form">
+  <form method="get" action="/ui/routes" class="filter-form">
     <label class="filter-field">
       <span class="filter-field__label">Group</span>
       <select name="group">
@@ -51,7 +51,7 @@
     </label>
     {% endif %}
     <button type="submit" class="btn btn--primary">Apply</button>
-    {% if filters.any_active %}<a href="/__ui/routes" class="btn btn--ghost">Reset</a>{% endif %}
+    {% if filters.any_active %}<a href="/ui/routes" class="btn btn--ghost">Reset</a>{% endif %}
   </form>
 </section>
 
@@ -61,7 +61,7 @@
     <span class="text-muted">Showing {{ showing }} of {{ total }}</span>
   </header>
   {% if routes | length == 0 %}
-  <p class="empty-state">No routes match this filter. {% if filters.any_active %}Try <a href="/__ui/routes">resetting</a>.{% endif %}</p>
+  <p class="empty-state">No routes match this filter. {% if filters.any_active %}Try <a href="/ui/routes">resetting</a>.{% endif %}</p>
   {% else %}
   <table class="data-table">
     <thead>
@@ -79,8 +79,8 @@
     {%- for r in routes %}
       <tr>
         <td>{{ r.methods }}</td>
-        <td><a href="/__ui/routes/{{ r.group_name }}/{{ r.number }}"><code>{{ r.path }}</code></a></td>
-        <td><a href="/__ui/groups/{{ r.group_name }}">{{ r.group_name }}</a></td>
+        <td><a href="/ui/routes/{{ r.group_name }}/{{ r.number }}"><code>{{ r.path }}</code></a></td>
+        <td><a href="/ui/groups/{{ r.group_name }}">{{ r.group_name }}</a></td>
         <td class="text-muted">{{ r.owner_name }}</td>
         <td class="text-muted">{{ r.language }}</td>
         <td>{{ r.hits_total }}</td>

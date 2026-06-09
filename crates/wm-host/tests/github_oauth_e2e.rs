@@ -6,13 +6,13 @@
 //! host points its endpoints at the mock so no network is involved.
 //!
 //! What this exercises:
-//!   * `/__auth/start/github` → 302 to authorize URL carrying our
+//!   * `/auth/start/github` → 302 to authorize URL carrying our
 //!     state nonce; the state record lands in the admin bucket.
-//!   * `/__auth/callback` with a valid state + code →
+//!   * `/auth/callback` with a valid state + code →
 //!     mock-GitHub-token-exchange → mock-GitHub-identity-fetch →
 //!     allow-rule pass → user upsert → session cookie minted →
-//!     302 to `/__ui/`.
-//!   * `/__auth/callback` with a missing state → 400.
+//!     302 to `/ui/`.
+//!   * `/auth/callback` with a missing state → 400.
 //!
 //! Allow-rule denial is unit-tested in `github_oauth::tests`; we
 //! don't re-walk the whole HTTP flow for it here.
@@ -184,7 +184,7 @@ async fn start_github_redirects_to_authorize_url_with_state() {
     let h = start(vec![MOCK_LOGIN.to_string()], vec![]).await;
     let client = no_redirect_client();
     let resp = client
-        .get(url(&h, "/__auth/start/github"))
+        .get(url(&h, "/auth/start/github"))
         .send()
         .await
         .expect("send");
@@ -216,9 +216,9 @@ async fn full_callback_flow_mints_session_and_creates_user() {
     let h = start(vec![MOCK_LOGIN.to_string()], vec![MOCK_LOGIN.to_string()]).await;
     let client = no_redirect_client();
 
-    // Step 1: hit /__auth/start/github to mint and persist a state.
+    // Step 1: hit /auth/start/github to mint and persist a state.
     let start_resp = client
-        .get(url(&h, "/__auth/start/github?next=/__ui/groups"))
+        .get(url(&h, "/auth/start/github?next=/ui/groups"))
         .send()
         .await
         .expect("send start");
@@ -237,13 +237,13 @@ async fn full_callback_flow_mints_session_and_creates_user() {
         .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
         .expect("state in authorize URL");
 
-    // Step 2: invoke /__auth/callback as GitHub would, with a code
+    // Step 2: invoke /auth/callback as GitHub would, with a code
     // and the captured state. The mock-GitHub server returns a fixed
     // identity that's on the allow-list.
     let cb = client
         .get(url(
             &h,
-            &format!("/__auth/callback?code=fakecode&state={state}"),
+            &format!("/auth/callback?code=fakecode&state={state}"),
         ))
         .send()
         .await
@@ -261,7 +261,7 @@ async fn full_callback_flow_mints_session_and_creates_user() {
         .expect("redirect Location")
         .to_str()
         .unwrap();
-    assert_eq!(location, "/__ui/groups", "post-login redirect honours next");
+    assert_eq!(location, "/ui/groups", "post-login redirect honours next");
     let cookie = pick_cookie_value(&cb, COOKIE_NAME).expect("session cookie set");
     assert!(
         !cookie.is_empty(),
@@ -275,7 +275,7 @@ async fn callback_with_missing_state_is_rejected() {
     let client = no_redirect_client();
     // No state was registered, so the state lookup misses.
     let cb = client
-        .get(url(&h, "/__auth/callback?code=x&state=nonsense"))
+        .get(url(&h, "/auth/callback?code=x&state=nonsense"))
         .send()
         .await
         .expect("send");
@@ -289,7 +289,7 @@ async fn login_page_shows_github_button_when_configured() {
     let h = start(vec![MOCK_LOGIN.to_string()], vec![]).await;
     let client = no_redirect_client();
     let resp = client
-        .get(url(&h, "/__auth/login"))
+        .get(url(&h, "/auth/login"))
         .send()
         .await
         .expect("send");
@@ -301,7 +301,7 @@ async fn login_page_shows_github_button_when_configured() {
         &body[..body.len().min(400)]
     );
     assert!(
-        body.contains("/__auth/start/github"),
+        body.contains("/auth/start/github"),
         "GitHub button links to start endpoint"
     );
 }

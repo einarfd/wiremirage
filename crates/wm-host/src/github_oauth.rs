@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn authorize_url_includes_required_params() {
-        let url = cfg().authorize_url("http://localhost:8080/__auth/callback", "abc123");
+        let url = cfg().authorize_url("http://localhost:8080/auth/callback", "abc123");
         assert!(url.contains("client_id=cid"));
         assert!(url.contains("redirect_uri=http"));
         assert!(url.contains("state=abc123"));

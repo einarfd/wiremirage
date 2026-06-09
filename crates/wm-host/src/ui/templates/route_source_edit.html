@@ -2,11 +2,11 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/groups/{{ route_group_name }}">{{ route_group_name }}</a>
+  <a href="/ui/groups/{{ route_group_name }}">{{ route_group_name }}</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}"><code>{{ route_methods }} {{ route_path }}</code></a>
+  <a href="/ui/routes/{{ route_group_name }}/{{ route_number }}"><code>{{ route_methods }} {{ route_path }}</code></a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">Edit source</span>
 </nav>
@@ -34,7 +34,7 @@
 </section>
 {% endif %}
 
-<form method="post" action="/__ui/routes/{{ route_group_name }}/{{ route_number }}/source/edit">
+<form method="post" action="/ui/routes/{{ route_group_name }}/{{ route_number }}/source/edit">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
   <section class="card">
@@ -54,16 +54,16 @@
 
   <footer class="page-footer">
     <button type="submit" class="btn btn--primary">Save</button>
-    <a href="/__ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Cancel</a>
+    <a href="/ui/routes/{{ route_group_name }}/{{ route_number }}" class="btn btn--ghost">Cancel</a>
   </footer>
 </form>
 
-<script src="/__ui/static/ace/ace.js"></script>
-<script src="/__ui/static/ace/mode-javascript.js"></script>
-<script src="/__ui/static/ace/mode-typescript.js"></script>
-<script src="/__ui/static/ace/theme-github_light_default.js"></script>
-<script src="/__ui/static/ace/theme-github_dark.js"></script>
-<script src="/__ui/static/wm-ace.js"></script>
+<script src="/ui/static/ace/ace.js"></script>
+<script src="/ui/static/ace/mode-javascript.js"></script>
+<script src="/ui/static/ace/mode-typescript.js"></script>
+<script src="/ui/static/ace/theme-github_light_default.js"></script>
+<script src="/ui/static/ace/theme-github_dark.js"></script>
+<script src="/ui/static/wm-ace.js"></script>
 <script>
   document.addEventListener("DOMContentLoaded", () => {
     const sel = document.querySelector("select[name='language']");

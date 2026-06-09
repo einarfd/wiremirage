@@ -134,7 +134,7 @@ pub struct CreateRouteBody {
     pub source: Option<String>,
 }
 
-/// Partial-update payload for `PATCH /__api/routes/{group}/{n}`. Send
+/// Partial-update payload for `PATCH /api/routes/{group}/{n}`. Send
 /// only the fields you want to change. `language` is required when
 /// replacing the handler `source`.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -203,7 +203,7 @@ pub mod bytes_field {
     }
 }
 
-/// Write payload for `PUT /__api/{routes,groups}/.../state`.
+/// Write payload for `PUT /api/{routes,groups}/.../state`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetStateBody {
     pub entries: std::collections::HashMap<String, WireBytes>,
@@ -233,7 +233,7 @@ pub struct ListRouteStateResponse {
     pub entries: Vec<RouteStateEntry>,
 }
 
-/// Response shape for `GET /__api/routes/{group}/{n}/source`. `source`
+/// Response shape for `GET /api/routes/{group}/{n}/source`. `source`
 /// is `None` for pre-compiled `wasm` uploads (no source ever existed)
 /// and for records that pre-date the source-storage slice.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -629,7 +629,7 @@ pub struct PatchUserBody {
 
 // -- Match probe -------------------------------------------------------------
 
-/// Response from `GET /__api/match`. Either a hit (with the matched
+/// Response from `GET /api/match`. Either a hit (with the matched
 /// route) or a miss (with the list of near-misses).
 ///
 /// Both variants are boxed so the enum doesn't lopsidedly pay for
@@ -695,7 +695,7 @@ pub struct ApiErrorDetail {
 
 // -- Capabilities ------------------------------------------------------------
 
-/// Response from `GET /__api/capabilities[/{topic}]`. Markdown
+/// Response from `GET /api/capabilities[/{topic}]`. Markdown
 /// documentation for the WireMirage handler API; same content the
 /// MCP `get_capabilities` tool returns.
 #[derive(Debug, Clone, Deserialize, Serialize)]

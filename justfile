@@ -52,7 +52,7 @@ run-host:
 
 # Run wm-host with the full realistic stack: Valkey (Docker) for
 # persistence + the host locally via cargo with local auth + browser
-# sessions. After it starts, open http://localhost:8080/__ui/ and log
+# sessions. After it starts, open http://localhost:8080/ui/ and log
 # in as `admin` / `devpassword`. Data persists across restarts in the
 # Valkey volume — `docker compose down -v` to wipe. The `WM_LOCAL_AUTH`
 # setting is for local dev only — never use these credentials on a
@@ -68,7 +68,7 @@ run-web:
       sleep 0.2
     done
     echo "Valkey ready. Starting host ..."
-    echo "  Control plane (UI/API/MCP): http://localhost:8080/__ui/  (log in admin / devpassword)"
+    echo "  Control plane (UI/API/MCP): http://localhost:8080/ui/  (log in admin / devpassword)"
     echo "  Mock traffic is per-group (ADR-0030): http://{group}.localhost:8080/...  "
     echo "    e.g. curl -H 'Host: my-group.localhost' http://localhost:8080/v1/charges"
     WM_STORAGE=redis://localhost:6379 \
@@ -94,7 +94,7 @@ run-web-fast:
 # code, use `run-web` — cargo's incremental compile is ~5-15s versus
 # the ~30-60s warm Docker rebuild this triggers.
 #
-# After it starts, open http://localhost:8080/__ui/ and log in as
+# After it starts, open http://localhost:8080/ui/ and log in as
 # `admin` / `devpassword`. Stop with `just stop-web-docker` (keeps
 # Valkey volume) or `just wipe-dev` (wipes it).
 run-web-docker:
@@ -109,11 +109,11 @@ run-web-docker:
       'SESSION_SECRET=dev-only-session-secret-do-not-use-in-prod-32b' \
       > .env
     docker compose --profile full up -d --build
-    echo "Waiting for wm-host to respond on http://localhost:8080/__health ..."
-    until curl -fsS http://localhost:8080/__health >/dev/null 2>&1; do
+    echo "Waiting for wm-host to respond on http://localhost:8080/health ..."
+    until curl -fsS http://localhost:8080/health >/dev/null 2>&1; do
       sleep 0.5
     done
-    echo "Ready. Open http://localhost:8080/__ui/ — log in as admin / devpassword."
+    echo "Ready. Open http://localhost:8080/ui/ — log in as admin / devpassword."
     echo "Tail logs:  docker compose logs -f wm-host"
     echo "Stop:       just stop-web-docker  (or  just wipe-dev  to also wipe Valkey)"
 

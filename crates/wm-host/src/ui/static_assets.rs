@@ -1,4 +1,4 @@
-//! Static CSS/JS asset serving under `/__ui/static/*`.
+//! Static CSS/JS asset serving under `/ui/static/*`.
 //!
 //! Assets are embedded at compile time via `include_bytes!` so the
 //! binary stays self-contained. Cache headers are conservative:

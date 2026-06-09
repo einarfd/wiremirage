@@ -10,7 +10,7 @@
 </section>
 
 <section class="card">
-  <form method="get" action="/__ui/unmatched" class="filter-form">
+  <form method="get" action="/ui/unmatched" class="filter-form">
     <label class="filter-field">
       <span class="filter-field__label">Method</span>
       <select name="method">
@@ -25,7 +25,7 @@
       <input type="text" name="path_pattern" value="{{ filters.path_pattern }}" placeholder="/v1/*">
     </label>
     <button type="submit" class="btn btn--primary">Apply</button>
-    {% if filters.any_active %}<a href="/__ui/unmatched" class="btn btn--ghost">Reset</a>{% endif %}
+    {% if filters.any_active %}<a href="/ui/unmatched" class="btn btn--ghost">Reset</a>{% endif %}
   </form>
 </section>
 
@@ -37,7 +37,7 @@
   {% if entries | length == 0 %}
   <p class="empty-state">
     {%- if filters.any_active -%}
-    No unmatched requests match this filter. Try <a href="/__ui/unmatched">resetting</a>.
+    No unmatched requests match this filter. Try <a href="/ui/unmatched">resetting</a>.
     {%- else -%}
     No unmatched requests in the last hour. Either every call hit a route, or nothing's been called yet.
     {%- endif -%}
@@ -55,15 +55,15 @@
       {% if e.primary_hint %}
       <p class="text-muted">
         Did you mean
-        <a class="link" href="/__ui/routes/{{ e.primary_hint.route }}"><code>{{ e.primary_hint.route_methods }} {{ e.primary_hint.route_path }}</code></a>?
+        <a class="link" href="/ui/routes/{{ e.primary_hint.route }}"><code>{{ e.primary_hint.route_methods }} {{ e.primary_hint.route_path }}</code></a>?
       </p>
       {% else %}
       <p class="text-muted">No close neighbours.</p>
       {% endif %}
       <div class="inline">
-        <a class="link" href="/__ui/unmatched/{{ e.number }}">View request</a>
+        <a class="link" href="/ui/unmatched/{{ e.number }}">View request</a>
         <span class="text-muted">·</span>
-        <a class="link" href="/__ui/routes/new?method={{ e.method_q }}&amp;path={{ e.path_q }}">Create route from request</a>
+        <a class="link" href="/ui/routes/new?method={{ e.method_q }}&amp;path={{ e.path_q }}">Create route from request</a>
       </div>
     </li>
   {%- endfor %}

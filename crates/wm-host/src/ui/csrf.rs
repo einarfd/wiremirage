@@ -47,7 +47,7 @@ tokio::task_local! {
 /// Max body size for the CSRF body-parse step. Authed UI forms ship a
 /// tiny amount of data (`_csrf` + a few name/value pairs); anything
 /// larger is either an upload-shaped request (file uploads aren't
-/// CSRF-relevant — they go via /__api/) or a malformed body. 64 KiB
+/// CSRF-relevant — they go via /api/) or a malformed body. 64 KiB
 /// is comfortably above any legitimate authed form.
 const MAX_FORM_BYTES: usize = 64 * 1024;
 

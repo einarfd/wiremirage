@@ -1,4 +1,4 @@
-//! Web UI routes under `/__ui/*` (slice 21).
+//! Web UI routes under `/ui/*` (slice 21).
 //!
 //! The UI is for inspection + token management + a small set of
 //! admin actions — handlers are deliberately *not* the primary place
@@ -8,8 +8,8 @@
 //! `cargo build` produces a single binary. minijinja parses them once
 //! at startup; rendering is cheap.
 //!
-//! Auth on `/__ui/*`: a middleware (`require_session`) redirects
-//! unauthenticated browsers to `/__auth/login?next=...`. Inside the
+//! Auth on `/ui/*`: a middleware (`require_session`) redirects
+//! unauthenticated browsers to `/auth/login?next=...`. Inside the
 //! handler we reuse the standard `AuthContext` extractor since the
 //! middleware has already established a valid session.
 
@@ -97,97 +97,91 @@ impl Default for UiTemplates {
     }
 }
 
-/// Build the `/__ui/*` sub-router. Mounted from `server::router`.
+/// Build the `/ui/*` sub-router. Mounted from `server::router`.
 /// Takes state by value so the auth-redirect middleware can hold a
 /// clone — the merged router from `server::router` provides the same
 /// state to inner handlers separately.
 pub fn router(state: AppState) -> Router {
     let authed: Router<AppState> = Router::new()
-        .route("/__ui/", get(home))
-        .route("/__ui/connect", get(connect))
-        .route("/__ui/groups", get(groups_list_page))
-        // Register before `/__ui/groups/{group}` — matchit prefers the
+        .route("/ui/", get(home))
+        .route("/ui/connect", get(connect))
+        .route("/ui/groups", get(groups_list_page))
+        // Register before `/ui/groups/{group}` — matchit prefers the
         // static segment, but keep them adjacent for clarity.
+        .route("/ui/groups/new", get(group_new_form).post(group_new_submit))
         .route(
-            "/__ui/groups/new",
-            get(group_new_form).post(group_new_submit),
-        )
-        .route(
-            "/__ui/groups/import",
+            "/ui/groups/import",
             get(group_import_form).post(group_import_submit),
         )
-        .route("/__ui/groups/{group}", get(group_detail_page))
-        .route("/__ui/groups/{group}/export", get(group_export_download))
+        .route("/ui/groups/{group}", get(group_detail_page))
+        .route("/ui/groups/{group}/export", get(group_export_download))
         .route(
-            "/__ui/groups/{group}/refresh",
+            "/ui/groups/{group}/refresh",
             axum::routing::post(group_refresh_form),
         )
         .route(
-            "/__ui/groups/{group}/edit",
+            "/ui/groups/{group}/edit",
             axum::routing::post(group_edit_form),
         )
         .route(
-            "/__ui/groups/{group}/delete",
+            "/ui/groups/{group}/delete",
             axum::routing::post(group_delete_form),
         )
         .route(
-            "/__ui/groups/{group}/state",
+            "/ui/groups/{group}/state",
             get(group_state_page).post(group_state_clear_form),
         )
         .route(
-            "/__ui/groups/{group}/state/set",
+            "/ui/groups/{group}/state/set",
             axum::routing::post(group_state_set_form),
         )
         .route(
-            "/__ui/groups/{group}/journal/clear",
+            "/ui/groups/{group}/journal/clear",
             axum::routing::post(group_journal_clear_form),
         )
-        .route("/__ui/groups/{group}/match", get(group_match_page))
-        .route("/__ui/routes", get(routes_list_page))
+        .route("/ui/groups/{group}/match", get(group_match_page))
+        .route("/ui/routes", get(routes_list_page))
+        .route("/ui/routes/new", get(route_new_form).post(route_new_submit))
+        .route("/ui/routes/{group}/{number}", get(route_detail_page))
         .route(
-            "/__ui/routes/new",
-            get(route_new_form).post(route_new_submit),
-        )
-        .route("/__ui/routes/{group}/{number}", get(route_detail_page))
-        .route(
-            "/__ui/routes/{group}/{number}/delete",
+            "/ui/routes/{group}/{number}/delete",
             axum::routing::post(route_delete_form),
         )
         .route(
-            "/__ui/routes/{group}/{number}/state",
+            "/ui/routes/{group}/{number}/state",
             get(route_state_page).post(route_state_clear_form),
         )
         .route(
-            "/__ui/routes/{group}/{number}/state/set",
+            "/ui/routes/{group}/{number}/state/set",
             axum::routing::post(route_state_set_form),
         )
         .route(
-            "/__ui/routes/{group}/{number}/dry-run",
+            "/ui/routes/{group}/{number}/dry-run",
             get(route_dry_run_page).post(route_dry_run_submit),
         )
         .route(
-            "/__ui/routes/{group}/{number}/source/edit",
+            "/ui/routes/{group}/{number}/source/edit",
             get(route_source_edit_page).post(route_source_edit_submit),
         )
-        .route("/__ui/journal/live", get(live_journal_page))
-        .route("/__ui/journal/{group}/{number}", get(journal_entry_page))
-        .route("/__ui/unmatched", get(unmatched_index_page))
-        .route("/__ui/unmatched/{number}", get(unmatched_detail_page))
-        .route("/__ui/me/tokens", get(tokens_page).post(create_token_form))
+        .route("/ui/journal/live", get(live_journal_page))
+        .route("/ui/journal/{group}/{number}", get(journal_entry_page))
+        .route("/ui/unmatched", get(unmatched_index_page))
+        .route("/ui/unmatched/{number}", get(unmatched_detail_page))
+        .route("/ui/me/tokens", get(tokens_page).post(create_token_form))
         .route(
-            "/__ui/me/tokens/{name}/revoke",
+            "/ui/me/tokens/{name}/revoke",
             axum::routing::post(revoke_token_form),
         )
         .route(
-            "/__ui/me/tokens/{name}/rename",
+            "/ui/me/tokens/{name}/rename",
             axum::routing::post(rename_token_form),
         )
         .route(
-            "/__ui/me/tokens/oauth/{client_id}/revoke",
+            "/ui/me/tokens/oauth/{client_id}/revoke",
             axum::routing::post(revoke_oauth_grant_form),
         )
-        .route("/__ui/settings", get(stub_settings))
-        .route("/__ui/admin/health", get(stub_admin_health))
+        .route("/ui/settings", get(stub_settings))
+        .route("/ui/admin/health", get(stub_admin_health))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             csrf::csrf_middleware,
@@ -200,7 +194,7 @@ pub fn router(state: AppState) -> Router {
     let public: Router<AppState> = Router::new()
         // Static assets are deliberately *not* behind auth — CSS for
         // the login page would chicken-and-egg otherwise.
-        .route("/__ui/static/{*path}", get(static_assets::serve));
+        .route("/ui/static/{*path}", get(static_assets::serve));
 
     authed.merge(public).with_state(state)
 }
@@ -213,7 +207,7 @@ pub fn router(state: AppState) -> Router {
 /// is a placeholder with a link to the tokens page.
 async fn connect(State(state): State<AppState>, auth: AuthContext, headers: HeaderMap) -> Response {
     let base = crate::auth_api::public_base_url(&headers, state.trust_forwarded_headers());
-    let mcp_url = format!("{base}/__api/mcp");
+    let mcp_url = format!("{base}/api/mcp");
     render(
         &state,
         "connect.html",
@@ -229,7 +223,7 @@ async fn connect(State(state): State<AppState>, auth: AuthContext, headers: Head
 
 async fn home(State(state): State<AppState>, auth: AuthContext) -> Response {
     // List groups visible to the caller. Admin sees all; non-admin
-    // sees their own. Same rule as the REST /__api/groups endpoint.
+    // sees their own. Same rule as the REST /api/groups endpoint.
     let groups = if auth.is_admin {
         state.routes().registry().list_groups()
     } else {
@@ -279,9 +273,9 @@ struct HomeGroupRow {
     ttl_seconds: u64,
 }
 
-// -- /__ui/groups -----------------------------------------------------------
+// -- /ui/groups -----------------------------------------------------------
 //
-// Mirrors `GET /__api/groups` from slice 18, with two UI affordances on top:
+// Mirrors `GET /api/groups` from slice 18, with two UI affordances on top:
 //
 // * `owner_scope=mine|everyone` instead of raw `owner_id`. Admins flip
 //   between "just my groups" and "all owners"; non-admins can't see other
@@ -366,7 +360,7 @@ async fn groups_list_page(
     };
     let sort_links = GroupsSortLinks::build(&q, &sort, &dir);
     let pagination = pagination_for(
-        "/__ui/groups",
+        "/ui/groups",
         &q.serialize_for_paging(),
         q.offset,
         paged.total,
@@ -458,7 +452,7 @@ impl GroupsSortLinks {
             let mut parts = base.clone();
             parts.push(("sort".to_string(), col.to_string()));
             parts.push(("dir".to_string(), dir.to_string()));
-            format!("/__ui/groups?{}", encode_query(&parts))
+            format!("/ui/groups?{}", encode_query(&parts))
         };
         Self {
             name: mk("name", "asc"),
@@ -491,7 +485,7 @@ impl UiGroupsQuery {
     }
 }
 
-// -- /__ui/routes -----------------------------------------------------------
+// -- /ui/routes -----------------------------------------------------------
 
 #[derive(Debug, Deserialize, Default)]
 struct UiRoutesQuery {
@@ -553,7 +547,7 @@ async fn routes_list_page(
     };
     let sort_links = RoutesSortLinks::build(&q, &sort, &dir);
     let pagination = pagination_for(
-        "/__ui/routes",
+        "/ui/routes",
         &q.serialize_for_paging(),
         q.offset,
         paged.total,
@@ -658,7 +652,7 @@ impl RoutesSortLinks {
             let mut parts = base.clone();
             parts.push(("sort".to_string(), col.to_string()));
             parts.push(("dir".to_string(), dir.to_string()));
-            format!("/__ui/routes?{}", encode_query(&parts))
+            format!("/ui/routes?{}", encode_query(&parts))
         };
         Self {
             last_hit_at: mk("last_hit_at", "desc"),
@@ -848,7 +842,7 @@ impl UserBadge {
     }
 }
 
-// -- /__ui/groups/{group} ---------------------------------------------------
+// -- /ui/groups/{group} ---------------------------------------------------
 //
 // Detail page for a single group. Renders metadata, the group's
 // routes (link-through to per-route detail), and a "Manage from CLI"
@@ -915,7 +909,7 @@ async fn group_detail_page(
             .map(|(r, name)| LiveJournalRow::from_record(&r, &name))
             .collect();
     let sse_url = format!(
-        "/__api/journal/tail?group={}",
+        "/api/journal/tail?group={}",
         urlencoding::encode(&group.name)
     );
 
@@ -990,7 +984,7 @@ async fn group_refresh_form(
     if let Err(e) = state.routes().registry().refresh_group(&group.id) {
         return ui_error_500(&state, &auth, format!("refresh: {e}"));
     }
-    axum::response::Redirect::to(&format!("/__ui/groups/{}", group.name)).into_response()
+    axum::response::Redirect::to(&format!("/ui/groups/{}", group.name)).into_response()
 }
 
 async fn group_edit_form(
@@ -1059,7 +1053,7 @@ async fn group_edit_form(
     {
         return ui_error_500(&state, &auth, format!("edit: {e}"));
     }
-    axum::response::Redirect::to(&format!("/__ui/groups/{final_name}")).into_response()
+    axum::response::Redirect::to(&format!("/ui/groups/{final_name}")).into_response()
 }
 
 async fn group_delete_form(
@@ -1076,7 +1070,7 @@ async fn group_delete_form(
         return ui_error_500(&state, &auth, format!("delete: {e}"));
     }
     state.routes().refresh_after_group_cascade(&group.id);
-    axum::response::Redirect::to("/__ui/groups").into_response()
+    axum::response::Redirect::to("/ui/groups").into_response()
 }
 
 async fn group_journal_clear_form(
@@ -1092,7 +1086,7 @@ async fn group_journal_clear_form(
     if let Err(e) = state.routes().registry().clear_group_journal(&group.id) {
         return ui_error_500(&state, &auth, format!("clear journal: {e}"));
     }
-    axum::response::Redirect::to(&format!("/__ui/groups/{}", group.name)).into_response()
+    axum::response::Redirect::to(&format!("/ui/groups/{}", group.name)).into_response()
 }
 
 // -- Match-probe page -------------------------------------------------------
@@ -1269,7 +1263,7 @@ fn ui_error_400_text(state: &AppState, auth: &AuthContext, msg: &str) -> Respons
     resp
 }
 
-// -- /__ui/routes/{group}/{number} ------------------------------------------
+// -- /ui/routes/{group}/{number} ------------------------------------------
 //
 // Detail page for a single route. Metadata + a short tail of recent
 // journal entries for this route (read from the group's journal,
@@ -1444,9 +1438,9 @@ fn ui_not_found(state: &AppState, auth: &AuthContext, what: &str) -> Response {
     resp
 }
 
-// -- /__ui/journal/live -----------------------------------------------------
+// -- /ui/journal/live -----------------------------------------------------
 //
-// Streaming view backed by `GET /__api/journal/tail` (slice 11 SSE).
+// Streaming view backed by `GET /api/journal/tail` (slice 11 SSE).
 // The page pre-renders the most recent N entries server-side so the
 // table is populated on first paint; a small inline EventSource script
 // then prepends rows as the SSE delivers new `handled` events. No
@@ -1706,9 +1700,9 @@ fn build_sse_url(group: Option<&str>, q: &UiLiveJournalQuery) -> String {
         parts.push(("status".into(), s.to_string()));
     }
     if parts.is_empty() {
-        "/__api/journal/tail".into()
+        "/api/journal/tail".into()
     } else {
-        format!("/__api/journal/tail?{}", encode_query(&parts))
+        format!("/api/journal/tail?{}", encode_query(&parts))
     }
 }
 
@@ -1747,7 +1741,7 @@ impl LiveJournalRow {
     }
 }
 
-// -- /__ui/journal/{group}/{n} ----------------------------------------------
+// -- /ui/journal/{group}/{n} ----------------------------------------------
 //
 // Full record for one journal entry: request envelope, response
 // envelope, handler logs, timing. Read-only; deletion happens via
@@ -1930,7 +1924,7 @@ async fn group_state_clear_form(
     if let Err(e) = state.routes().registry().clear_group_state(&group.id) {
         return ui_error_500(&state, &auth, format!("clear: {e}"));
     }
-    axum::response::Redirect::to(&format!("/__ui/groups/{}/state", group.name)).into_response()
+    axum::response::Redirect::to(&format!("/ui/groups/{}/state", group.name)).into_response()
 }
 
 async fn route_state_page(
@@ -2001,11 +1995,8 @@ async fn route_state_clear_form(
     {
         return ui_error_500(&state, &auth, format!("clear: {e}"));
     }
-    axum::response::Redirect::to(&format!(
-        "/__ui/routes/{}/{}/state",
-        route.group_name, number
-    ))
-    .into_response()
+    axum::response::Redirect::to(&format!("/ui/routes/{}/{}/state", route.group_name, number))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -2062,7 +2053,7 @@ async fn group_state_set_form(
     {
         return ui_error_500(&state, &auth, format!("set: {e}"));
     }
-    axum::response::Redirect::to(&format!("/__ui/groups/{}/state", group.name)).into_response()
+    axum::response::Redirect::to(&format!("/ui/groups/{}/state", group.name)).into_response()
 }
 
 async fn route_state_set_form(
@@ -2093,16 +2084,13 @@ async fn route_state_set_form(
     {
         return ui_error_500(&state, &auth, format!("set: {e}"));
     }
-    axum::response::Redirect::to(&format!(
-        "/__ui/routes/{}/{}/state",
-        route.group_name, number
-    ))
-    .into_response()
+    axum::response::Redirect::to(&format!("/ui/routes/{}/{}/state", route.group_name, number))
+        .into_response()
 }
 
 // -- Dry-run page -----------------------------------------------------------
 //
-// UI wrapper around `POST /__api/routes/{group}/{n}/dry-run`. GET renders
+// UI wrapper around `POST /api/routes/{group}/{n}/dry-run`. GET renders
 // an empty form (method/path/headers/body); POST calls `dry_run::dry_run`
 // directly and re-renders the same page with the response card filled in.
 // Owner-or-admin gated, same rule as the REST surface. CSRF on the POST.
@@ -2363,7 +2351,7 @@ fn render_dry_run(
 
 // -- Source editor (slice 40) ------------------------------------------------
 //
-// GET /__ui/routes/{group}/{n}/source/edit renders a textarea pre-
+// GET /ui/routes/{group}/{n}/source/edit renders a textarea pre-
 // populated with the route's stored source. POST submits the new
 // source through `api::patch_route_core`, which recompiles via the
 // sidecar and swaps the artifact atomically. On success we redirect
@@ -2464,7 +2452,7 @@ async fn route_source_edit_submit(
     };
     match crate::api::patch_route_core(&state, &auth, &group_ref, number, body).await {
         Ok(_updated) => {
-            let location = format!("/__ui/routes/{group_ref}/{number}");
+            let location = format!("/ui/routes/{group_ref}/{number}");
             let mut resp = Response::default();
             *resp.status_mut() = StatusCode::SEE_OTHER;
             resp.headers_mut().insert(
@@ -2634,14 +2622,14 @@ async fn route_delete_form(
         .read_group_by_ref(&group_ref)
         .is_ok()
     {
-        format!("/__ui/groups/{group_ref}")
+        format!("/ui/groups/{group_ref}")
     } else {
-        "/__ui/groups".to_string()
+        "/ui/groups".to_string()
     };
     axum::response::Redirect::to(&landing).into_response()
 }
 
-// -- /__ui/me/tokens --------------------------------------------------------
+// -- /ui/me/tokens --------------------------------------------------------
 //
 // Self-service API token management. Lists the caller's own tokens,
 // lets them create a new one (plaintext shown once on the response),
@@ -2803,7 +2791,7 @@ async fn revoke_token_form(
     }
     // 303 See Other so a browser refresh after revoke doesn't replay
     // the POST.
-    axum::response::Redirect::to("/__ui/me/tokens").into_response()
+    axum::response::Redirect::to("/ui/me/tokens").into_response()
 }
 
 /// Revoke every active OAuth grant for `(caller, client_id)`. Marks
@@ -2825,7 +2813,7 @@ async fn revoke_oauth_grant_form(
         Ok(_n) => {}
         Err(e) => return ui_error_500(&state, &auth, format!("revoke oauth grant: {e}")),
     }
-    axum::response::Redirect::to("/__ui/me/tokens").into_response()
+    axum::response::Redirect::to("/ui/me/tokens").into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2849,7 +2837,7 @@ async fn rename_token_form(
         .auth()
         .rename_token(&auth.user_id, &old_name, new_name)
     {
-        Ok(_) => axum::response::Redirect::to("/__ui/me/tokens").into_response(),
+        Ok(_) => axum::response::Redirect::to("/ui/me/tokens").into_response(),
         Err(crate::auth::AuthError::NotFound) => {
             tokens_page_with_error(&state, &auth, &format!("Token {old_name:?} not found."))
         }
@@ -2972,7 +2960,7 @@ impl TokensSortLinks {
             } else {
                 default_dir
             };
-            format!("/__ui/me/tokens?sort={col}&dir={dir}")
+            format!("/ui/me/tokens?sort={col}&dir={dir}")
         };
         Self {
             name: mk("name", "asc"),
@@ -3028,11 +3016,11 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
 
 // -- Unmatched pages (slice 28) ---------------------------------------------
 //
-// The unmatched-request log surfaced at /__ui/unmatched, plus a
-// per-entry detail page at /__ui/unmatched/{number}. Owner-visible
+// The unmatched-request log surfaced at /ui/unmatched, plus a
+// per-entry detail page at /ui/unmatched/{number}. Owner-visible
 // under ADR-0030: an admin sees every group's unmatched, a non-admin
 // sees only their own groups' (scoped in the handler below), mirroring
-// the REST surface at /__api/unmatched. Reuses the
+// the REST surface at /api/unmatched. Reuses the
 // `JournalFilter::matches_unmatched` matcher for method + path_pattern
 // filtering so the UI agrees with the REST shape.
 
@@ -3113,7 +3101,7 @@ async fn unmatched_index_page(
                 parts.push(("path_pattern".into(), p.clone()));
             }
             parts.push(("before".into(), e.number.to_string()));
-            format!("/__ui/unmatched?{}", encode_query(&parts))
+            format!("/ui/unmatched?{}", encode_query(&parts))
         })
     } else {
         None
@@ -3314,7 +3302,7 @@ impl From<&crate::journal::UnmatchedNearMiss> for UnmatchedDetailNearMiss {
 // -- Route creation form (slice 29) -----------------------------------------
 //
 // A minimal browser-driven create-route flow. Shares the create
-// pipeline with `POST /__api/routes` via `api::create_route_core` so
+// pipeline with `POST /api/routes` via `api::create_route_core` so
 // validation + compile semantics stay identical. UI form is
 // source-only (TypeScript / JavaScript) — pre-compiled wasm uploads
 // stay on the REST surface where a file-bytes body makes sense.
@@ -3408,7 +3396,7 @@ async fn route_new_submit(
 
     match crate::api::create_route_core(&state, &auth, body).await {
         Ok(route) => {
-            let location = format!("/__ui/routes/{}/{}", route.group_name, route.number);
+            let location = format!("/ui/routes/{}/{}", route.group_name, route.number);
             let mut resp = Response::default();
             *resp.status_mut() = StatusCode::SEE_OTHER;
             resp.headers_mut().insert(
@@ -3566,7 +3554,7 @@ async fn group_new_submit(
             sliding_ttl: Some(sliding),
         }) {
         Ok(group) => {
-            let location = format!("/__ui/groups/{}", group.name);
+            let location = format!("/ui/groups/{}", group.name);
             let mut resp = Response::default();
             *resp.status_mut() = StatusCode::SEE_OTHER;
             resp.headers_mut().insert(
@@ -3670,7 +3658,7 @@ async fn group_import_submit(
     };
     match crate::api::import_group_core(&state, &auth, parsed).await {
         Ok(summary) => {
-            axum::response::Redirect::to(&format!("/__ui/groups/{}", summary.group)).into_response()
+            axum::response::Redirect::to(&format!("/ui/groups/{}", summary.group)).into_response()
         }
         Err(e) => render_group_import(&state, &auth, form_state, Some(e.message().to_string())),
     }
@@ -3753,19 +3741,14 @@ async fn stub_settings(State(state): State<AppState>, auth: AuthContext) -> Resp
     if !auth.is_admin {
         return forbidden_page(&state, &auth);
     }
-    stub(
-        &state,
-        &auth,
-        "Settings",
-        "GET /__api/users + /__api/tokens",
-    )
+    stub(&state, &auth, "Settings", "GET /api/users + /api/tokens")
 }
 
 async fn stub_admin_health(State(state): State<AppState>, auth: AuthContext) -> Response {
     if !auth.is_admin {
         return forbidden_page(&state, &auth);
     }
-    stub(&state, &auth, "Admin health", "GET /__health and /__ready")
+    stub(&state, &auth, "Admin health", "GET /health and /ready")
 }
 
 fn stub(state: &AppState, auth: &AuthContext, title: &str, api_hint: &str) -> Response {
@@ -3806,7 +3789,7 @@ fn forbidden_page(state: &AppState, auth: &AuthContext) -> Response {
 /// syntax (`..ctx_value`) to merge the page context with the CSRF
 /// field — the macro's special-case for spread handles tuple-struct
 /// inputs natively.
-/// Render the branded UI 404 page for a path under `/__ui/*` that
+/// Render the branded UI 404 page for a path under `/ui/*` that
 /// didn't match a real route. Called from `dispatch_inner`'s
 /// reserved-path branch so a human pointing a browser at a typo
 /// lands on the app shell rather than a JSON error blob. The

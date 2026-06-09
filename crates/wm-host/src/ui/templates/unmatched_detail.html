@@ -2,7 +2,7 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/unmatched">Unmatched</a>
+  <a href="/ui/unmatched">Unmatched</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">#{{ entry.number }}</span>
 </nav>
@@ -19,14 +19,14 @@
   <header class="card__header"><h2>Summary</h2></header>
   <dl class="meta-grid">
     <dt>Group</dt>
-    <dd><a class="link" href="/__ui/groups/{{ entry.group }}"><code>{{ entry.group }}</code></a></dd>
+    <dd><a class="link" href="/ui/groups/{{ entry.group }}"><code>{{ entry.group }}</code></a></dd>
     <dt>Entry ID</dt>
     <dd><code>{{ entry.id }}</code></dd>
     <dt>Trace ID</dt>
     <dd>{% if entry.trace_id %}<code>{{ entry.trace_id }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</dd>
   </dl>
   <p>
-    <a class="btn btn--primary" href="/__ui/routes/new?method={{ entry.method_q }}&amp;path={{ entry.path_q }}">Create route from this request</a>
+    <a class="btn btn--primary" href="/ui/routes/new?method={{ entry.method_q }}&amp;path={{ entry.path_q }}">Create route from this request</a>
   </p>
 </section>
 
@@ -38,7 +38,7 @@
   <ul class="action-list">
   {%- for nm in entry.near_misses %}
     <li class="stack">
-      <a class="link" href="/__ui/routes/{{ nm.route }}"><code>{{ nm.route_methods }} {{ nm.route_path }}</code></a>
+      <a class="link" href="/ui/routes/{{ nm.route }}"><code>{{ nm.route_methods }} {{ nm.route_path }}</code></a>
       <span class="text-muted">— {{ nm.explanation }}</span>
     </li>
   {%- endfor %}

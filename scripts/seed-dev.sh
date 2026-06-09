@@ -47,8 +47,8 @@ CLI=(cargo run -p wm-cli --quiet --)
 say() { printf '\n\033[1;36m== %s\033[0m\n' "$1"; }
 
 # Probe — fail fast with a clear message if the host isn't up.
-if ! curl -fsS -o /dev/null "$HOST/__health"; then
-  echo "error: can't reach $HOST/__health." >&2
+if ! curl -fsS -o /dev/null "$HOST/health"; then
+  echo "error: can't reach $HOST/health." >&2
   echo "  Start the host first with: just run-web" >&2
   exit 1
 fi
@@ -153,14 +153,14 @@ fire POST /v1/chat/completions    8
 fire POST /webhooks/stripe        2
 
 # -- Unmatched + near-miss traffic ----------------------------------------
-# Populates the slice-28 /__ui/unmatched view + the slice-35 "Did you
+# Populates the slice-28 /ui/unmatched view + the slice-35 "Did you
 # mean…?" near-miss hints. Each request below is intentionally off so
 # the dispatcher writes to the unmatched journal instead of dispatching:
 #  * method mismatch — POST /v1/charges exists but we hit it as GET
 #  * prefix typo     — /v1/refunds exists, /v1/refund is one char off
 #  * fully unmatched — nothing close at all
 
-say "Unmatched traffic (so /__ui/unmatched + near-misses have data)"
+say "Unmatched traffic (so /ui/unmatched + near-misses have data)"
 
 fire GET  /v1/charges            2  # method mismatch with the POST route
 fire POST /v1/refund             2  # prefix typo of /v1/refunds
@@ -171,7 +171,7 @@ fire GET  /completely/unknown    1  # no close neighbours
 say "Summary"
 "${CLI[@]}" groups list || true
 echo
-echo "Done. Visit $HOST/__ui/ and log in as admin / devpassword."
+echo "Done. Visit $HOST/ui/ and log in as admin / devpassword."
 echo "The seeded routes are owned by the bootstrap user, so the admin's"
 echo "'Just mine' filter will show nothing until you create routes from"
 echo "the UI yourself (those land with admin as owner)."

@@ -103,12 +103,12 @@ async fn start() -> Harness {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf value");
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -150,7 +150,7 @@ async fn route_state_empty_on_a_route_that_never_ran() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .get(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -170,7 +170,7 @@ async fn set_group_state_via_form_persists() {
 
     // `mode=slow\nrate=10`, URL-encoded.
     let resp = client
-        .post(url(&h, "/__ui/groups/counter-demo/state/set"))
+        .post(url(&h, "/ui/groups/counter-demo/state/set"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&keys=mode%3Dslow%0Arate%3D10"))
@@ -180,7 +180,7 @@ async fn set_group_state_via_form_persists() {
     assert!((300..400).contains(&resp.status().as_u16()));
 
     let body = client
-        .get(url(&h, "/__ui/groups/counter-demo/state"))
+        .get(url(&h, "/ui/groups/counter-demo/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -202,7 +202,7 @@ async fn set_route_state_via_form_persists() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/state/set"))
+        .post(url(&h, "/ui/routes/counter-demo/1/state/set"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&keys=seeded%3Dyes"))
@@ -212,7 +212,7 @@ async fn set_route_state_via_form_persists() {
     assert!((300..400).contains(&resp.status().as_u16()));
 
     let body = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .get(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -232,7 +232,7 @@ async fn set_state_rejects_form_without_kv() {
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/groups/counter-demo/state/set"))
+        .post(url(&h, "/ui/groups/counter-demo/state/set"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&keys=not-a-kv-line"))
@@ -259,7 +259,7 @@ async fn route_state_lists_entries_after_dispatch() {
     }
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .get(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -295,7 +295,7 @@ async fn route_state_clear_wipes_entries() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .post(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .post(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -305,7 +305,7 @@ async fn route_state_clear_wipes_entries() {
     assert!((300..400).contains(&resp.status().as_u16()));
 
     let body = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .get(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -322,7 +322,7 @@ async fn route_state_403_for_non_owner() {
     let client = no_redirect_client();
     let (cookie, _) = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .get(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -336,7 +336,7 @@ async fn route_state_404_when_unknown() {
     let client = no_redirect_client();
     let (cookie, _) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/counter-demo/999/state"))
+        .get(url(&h, "/ui/routes/counter-demo/999/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -352,7 +352,7 @@ async fn group_state_empty_when_nothing_written_yet() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/groups/counter-demo/state"))
+        .get(url(&h, "/ui/groups/counter-demo/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -381,7 +381,7 @@ async fn group_state_clear_wipes_per_route_state_too() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     // Confirm there's per-route state present.
     let before = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .get(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -396,7 +396,7 @@ async fn group_state_clear_wipes_per_route_state_too() {
 
     // Clear group state from the group state page.
     let resp = client
-        .post(url(&h, "/__ui/groups/counter-demo/state"))
+        .post(url(&h, "/ui/groups/counter-demo/state"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -408,7 +408,7 @@ async fn group_state_clear_wipes_per_route_state_too() {
     // Per-route state is wiped too (clear_group_state deletes both
     // kv: and gkv: prefixes for the group).
     let after = client
-        .get(url(&h, "/__ui/routes/counter-demo/1/state"))
+        .get(url(&h, "/ui/routes/counter-demo/1/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -425,7 +425,7 @@ async fn group_state_403_for_non_owner() {
     let client = no_redirect_client();
     let (cookie, _) = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/groups/counter-demo/state"))
+        .get(url(&h, "/ui/groups/counter-demo/state"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -439,7 +439,7 @@ async fn group_state_404_when_unknown() {
     let client = no_redirect_client();
     let (cookie, _) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/groups/no-such/state"))
+        .get(url(&h, "/ui/groups/no-such/state"))
         .header("cookie", &cookie)
         .send()
         .await

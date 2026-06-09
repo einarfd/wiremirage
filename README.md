@@ -21,38 +21,38 @@ in-memory and Valkey backends, routes are stored in a registry keyed by
 wasm upload from the public surface). JS and TS both dispatch through an
 embedded shared js-engine.wasm component (ADR-0020), with TypeScript
 transpiled to JS in-host via pure-Rust swc. No external compiler. Routes are mutable via `PATCH
-/__api/routes/{group}/{n}` (slice 15): `methods`, `path`, and the
+/api/routes/{group}/{n}` (slice 15): `methods`, `path`, and the
 handler artifact swap together; path/method changes re-run pattern
 conflict detection, and any wasm swap evicts the in-memory component
 cache. Per-route state can be inspected and cleared via `GET/DELETE
-/__api/routes/{group}/{n}/state`, and a route's handler can be run
+/api/routes/{group}/{n}/state`, and a route's handler can be run
 against a synthetic request via `POST .../{n}/dry-run` — dry-run
 snapshots route + group kv into a `dryrun:{run_id}:` namespace so
 writes are isolated and discarded on completion, no journal entry
-created (slice 16). Bearer-token auth gates the `/__api/*` surface;
+created (slice 16). Bearer-token auth gates the `/api/*` surface;
 mock traffic to user routes stays open by design (SUTs don't have
 tokens).
 Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup. Token
-and user management live at `/__api/tokens` and `/__api/users`
-(admin-only for cross-user actions; `GET /__api/users/me` for self).
+and user management live at `/api/tokens` and `/api/users`
+(admin-only for cross-user actions; `GET /api/users/me` for self).
 For browser login on testing or private deployments, set
 `WM_LOCAL_AUTH=alice:hunter2:admin,bob:pw` + `SESSION_SECRET`; the
-`/__auth/login/password` endpoint then mints an `wm_session` cookie
-that authenticates `/__api/*` alongside the bearer-token path
+`/auth/login/password` endpoint then mints an `wm_session` cookie
+that authenticates `/api/*` alongside the bearer-token path
 (slice 20, per ADR-0018 — not for public exposure). The web UI
 landed in slice 21 — run `just run-web` and open
-`http://localhost:8080/__ui/` in a browser. Today the home page +
+`http://localhost:8080/ui/` in a browser. Today the home page +
 login + navigation are real; detail pages land in slices 22–26.
 Every dispatched mock request and every unmatched request is journaled
-in Valkey (default 1h TTL); fetch via `GET /__api/journal/{group}` and
-`GET /__api/unmatched` (admin-only). Groups are first-class lifecycle
+in Valkey (default 1h TTL); fetch via `GET /api/journal/{group}` and
+`GET /api/unmatched` (admin-only). Groups are first-class lifecycle
 units with TTL (default 24h, sliding-on-traffic by default); explicit
 DELETE cascades routes, kv/gkv state, and journal entries together,
 and a background sweeper reaps groups that hit their TTL. The `wm` CLI
 wraps the REST surface end-to-end: groups, routes (including `wm
 routes update`, `wm routes state`, `wm routes test`), journal,
 tokens, and the public probes — see "Using the CLI" below. The MCP
-server is part of the host and mounts at `/__api/mcp` over the
+server is part of the host and mounts at `/api/mcp` over the
 streamable-HTTP transport; 31 tools cover identity, discovery,
 group/route CRUD (now including `update_route`), route + group state
 (`show_route_state`, `show_group_state`, `set_route_state`,
@@ -62,9 +62,9 @@ the after-the-fact journal-history query (`list_journal`), the
 unmatched-request inspectors (`list_recent_unmatched` +
 `show_unmatched` for the full captured envelope), and the
 match probe (`find_route`, mirrored by `wm match` and `GET
-/__api/match`). `who_am_i` / `summarize_workspace` also surface the
+/api/match`). `who_am_i` / `summarize_workspace` also surface the
 public `base_url` the host serves mock routes at. All behind the same
-bearer-token auth. Live tail also exposes `GET /__api/journal/tail`
+bearer-token auth. Live tail also exposes `GET /api/journal/tail`
 as an SSE endpoint for non-MCP consumers.
 
 ## Layout
@@ -124,8 +124,8 @@ WM_BOOTSTRAP_TOKEN=wmt_dev_local \
   cargo run -p wm-host
 # In another shell. Mock traffic is served on the group's subdomain
 # `{group}.{apex}` (ADR-0030); the apex (localhost:8080 in dev) is
-# control-plane only. /__api/* goes to the apex:
-curl -X POST localhost:8080/__api/routes \
+# control-plane only. /api/* goes to the apex:
+curl -X POST localhost:8080/api/routes \
   -H 'authorization: Bearer wmt_dev_local' \
   -H content-type:application/json \
   -d '{"group":"demo","methods":["POST"],"path":"/v1/charges","language":"typescript",
@@ -140,7 +140,7 @@ swc and dispatched through an embedded `js-engine.wasm` component (see
 ADR-0020). No Node sidecar.
 
 The host exposes two unauthenticated probe endpoints for orchestrators:
-`GET /__health` (liveness, always 200) and `GET /__ready` (readiness;
+`GET /health` (liveness, always 200) and `GET /ready` (readiness;
 checks the configured backends).
 
 Tier-3 tests require Docker:
@@ -167,7 +167,7 @@ in any combination:
 
 API tokens always work. GitHub OAuth and local password are independent —
 enable either, both, or neither. Mock traffic (everything not under a
-reserved `/__api/`, `/__ui/`, `/__auth/` prefix) is always unauthenticated by
+reserved `/api/`, `/ui/`, `/auth/` prefix) is always unauthenticated by
 design — SUTs don't have credentials.
 
 ### Storage (required)
@@ -254,7 +254,7 @@ Steps:
      "more info" link.
    - **Application description** (optional): a sentence visible on the
      consent screen. Empty is fine.
-   - **Authorization callback URL**: `https://wm.example.com/__auth/callback`
+   - **Authorization callback URL**: `https://wm.example.com/auth/callback`
      — exact match, including the path. The host computes this URL itself
      from the inbound request's `X-Forwarded-*` headers (Caddy or
      whichever reverse proxy you run populates them), so it must agree
@@ -392,7 +392,7 @@ high-cardinality dimensions; metrics aren't. The at-a-glance "did it fire
 
 - `http.server.request.duration` (histogram, **seconds** — OTel HTTP
   semconv) — by `http.request.method`, `http.response.status_code`,
-  `http.route` (the route *template*, e.g. `/__api/groups/{group}`), and
+  `http.route` (the route *template*, e.g. `/api/groups/{group}`), and
   `wm.surface` ∈ `api` / `auth` / `ui`. **Is the control plane itself
   healthy?** Slice by `wm.surface` for an API-vs-UI breakdown, by
   `http.route` to find a slow endpoint.
@@ -402,9 +402,9 @@ high-cardinality dimensions; metrics aren't. The at-a-glance "did it fire
   `http.request.method`, `wm.surface`. From `Content-Length`; absent
   for chunked bodies.
 
-The `/__health` and `/__ready` probes are deliberately **not** recorded
+The `/health` and `/ready` probes are deliberately **not** recorded
 (high frequency, low value). The MCP streamable endpoint
-(`/__api/mcp`) isn't HTTP-instrumented yet — per-tool MCP metrics are a
+(`/api/mcp`) isn't HTTP-instrumented yet — per-tool MCP metrics are a
 separate slice.
 
 ### MCP transport (DNS-rebinding allowlist)
@@ -466,7 +466,7 @@ Both can also be passed inline as `--host` / `--token`. Health and
 version probes work without a token; everything else requires one.
 
 ```
-wm health                                  # probes /__health
+wm health                                  # probes /health
 wm groups create stripe-mock               # default 24h sliding TTL
 wm routes add --group stripe-mock --method POST --path /v1/charges \
   --source-file handler.ts                 # transpiled in-host
@@ -498,7 +498,7 @@ The early deferrals have since landed — `wm match`, route `update` /
 (`wm users`), and `--from-file` group specs are all wired up. Group
 specs (`wm groups create --from-file` / `wm groups export`) are no
 longer CLI-only: import/export is available on every surface — REST
-(`POST /__api/groups/import`, `GET /__api/groups/{group}/export`), the
+(`POST /api/groups/import`, `GET /api/groups/{group}/export`), the
 MCP `import_group` / `export_group` tools, and the web UI — all routed
 through one host-side core (the CLI now wraps the same endpoints).
 **Live
@@ -511,24 +511,24 @@ journal page. The CLI stays request/response (`wm journal list` /
 ## Using the MCP server
 
 The host exposes an MCP (Model Context Protocol) service at
-`/__api/mcp` using the streamable-HTTP transport. Authentication is
+`/api/mcp` using the streamable-HTTP transport. Authentication is
 the same bearer token used for the REST API and the CLI.
 
-> **The MCP URL is `https://<host>/__api/mcp`, not the host root.**
+> **The MCP URL is `https://<host>/api/mcp`, not the host root.**
 > WireMirage serves the OAuth discovery metadata at the host root
 > (RFC 9728 / 8414), so a native MCP client (Claude Desktop, Cursor,
 > MCP Inspector) given just `https://wm.example.com` will successfully
 > walk through the OAuth consent flow and receive a token — but then
 > fail to actually use the integration, because the root URL doesn't
 > speak MCP. The user-visible symptom is "OAuth approved, then
-> connection failed." Always use the full `/__api/mcp` path when
+> connection failed." Always use the full `/api/mcp` path when
 > configuring an MCP client.
 
 Add the server to Claude Code:
 
 ```sh
 claude mcp add --transport http wiremirage \
-  https://wm.example.com/__api/mcp \
+  https://wm.example.com/api/mcp \
   --header "Authorization: Bearer wmt_..."
 ```
 
@@ -544,7 +544,7 @@ The current surface is 31 tools — identity (`who_am_i`), discovery
 slice-11 streaming pair (`wait_for_request`, `tail_journal`).
 `list_journal` is the after-the-fact counterpart to the live streaming
 pair — it pages a group's stored journal (same filters as `GET
-/__api/journal/{group}`) so a completed request can be pulled without
+/api/journal/{group}`) so a completed request can be pulled without
 having waited live. `who_am_i` and `summarize_workspace` also report
 the public `base_url` the host serves mock routes at, derived from the
 request (honoring `X-Forwarded-*` behind a trusted proxy). The streaming tools
@@ -552,7 +552,7 @@ subscribe to a single-host broadcast bus inside the host and return
 accumulated entries when their stop condition fires (count + timeout
 for `wait_for_request`; max_entries + idle timeout for
 `tail_journal`). `find_route` mirrors the `wm match` CLI and `GET
-/__api/match` REST endpoint shipped in slice 13. `update_route`
+/api/match` REST endpoint shipped in slice 13. `update_route`
 (slice 15) is wasm-only at the MCP layer, matching `create_route`;
 source-based updates go through REST or `wm routes update
 --source-file`. `dry_run_route` (slice 16) snapshots route + group
@@ -594,7 +594,7 @@ In addition, the first-deploy checklist:
   design — so keep it stable unless you intend a global logout.
 - **At the TLS edge**: turn on HSTS (`Strict-Transport-Security`), set
   `X-Content-Type-Options: nosniff`, and consider a strict CSP — the UI only
-  loads same-origin scripts (Ace is vendored under `/__ui/static/ace/`).
+  loads same-origin scripts (Ace is vendored under `/ui/static/ace/`).
 - **Bind the host to `127.0.0.1`** in the deployment compose / systemd unit so
   the only ingress is through the reverse proxy. Combined with `WM_TRUSTED_PROXY`
   (which turns on forwarded-header trust), the throttle keys to the

@@ -5,8 +5,8 @@
   <div class="page-header__row">
     <h1>Groups</h1>
     <span>
-      <a class="btn btn--ghost" href="/__ui/groups/import">Import spec</a>
-      <a class="btn btn--primary" href="/__ui/groups/new">+ New group</a>
+      <a class="btn btn--ghost" href="/ui/groups/import">Import spec</a>
+      <a class="btn btn--primary" href="/ui/groups/new">+ New group</a>
     </span>
   </div>
   <p class="text-muted">
@@ -21,7 +21,7 @@
 </section>
 
 <section class="card">
-  <form method="get" action="/__ui/groups" class="filter-form">
+  <form method="get" action="/ui/groups" class="filter-form">
     <label class="filter-field">
       <span class="filter-field__label">Name contains</span>
       <input type="text" name="q" value="{{ filters.q }}" placeholder="e.g. stripe">
@@ -44,7 +44,7 @@
       </select>
     </label>
     <button type="submit" class="btn btn--primary">Apply</button>
-    {% if filters.any_active %}<a href="/__ui/groups" class="btn btn--ghost">Reset</a>{% endif %}
+    {% if filters.any_active %}<a href="/ui/groups" class="btn btn--ghost">Reset</a>{% endif %}
   </form>
 </section>
 
@@ -54,7 +54,7 @@
     <span class="text-muted">Showing {{ showing }} of {{ total }}</span>
   </header>
   {% if groups | length == 0 %}
-  <p class="empty-state">No groups match this filter. {% if filters.any_active %}Try <a href="/__ui/groups">resetting</a>.{% endif %}</p>
+  <p class="empty-state">No groups match this filter. {% if filters.any_active %}Try <a href="/ui/groups">resetting</a>.{% endif %}</p>
   {% else %}
   <table class="data-table">
     <thead>
@@ -70,7 +70,7 @@
     <tbody>
     {%- for g in groups %}
       <tr>
-        <td><a href="/__ui/groups/{{ g.name }}">{{ g.name }}</a>{% if g.implicit %} <span class="badge">implicit</span>{% endif %}<br><code class="text-muted">{{ g.base_url }}</code></td>
+        <td><a href="/ui/groups/{{ g.name }}">{{ g.name }}</a>{% if g.implicit %} <span class="badge">implicit</span>{% endif %}<br><code class="text-muted">{{ g.base_url }}</code></td>
         <td class="text-muted">{{ g.owner_name }}</td>
         <td>{{ g.route_count }}</td>
         <td>{{ g.ttl_seconds }}</td>

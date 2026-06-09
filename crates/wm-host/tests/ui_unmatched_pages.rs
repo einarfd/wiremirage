@@ -6,7 +6,7 @@
 //!   * Filter by method narrows the list
 //!   * Filter by path_pattern (glob) narrows the list
 //!   * Cursor pagination via `?before=` exposes the next page
-//!   * Detail page at /__ui/unmatched/{n} renders the request envelope
+//!   * Detail page at /ui/unmatched/{n} renders the request envelope
 //!   * ADR-0030 SemFLIP visibility: the index is owner-scoped (a tenant
 //!     sees only their own groups' unmatched; admin sees all), and the
 //!     detail page is owner-or-admin (non-owner → 403)
@@ -94,12 +94,12 @@ async fn start() -> Harness {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf value");
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -162,7 +162,7 @@ async fn unmatched_index_empty_when_no_traffic() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched"))
+        .get(url(&h, "/ui/unmatched"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -183,7 +183,7 @@ async fn unmatched_index_lists_recorded_entries() {
 
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched"))
+        .get(url(&h, "/ui/unmatched"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -211,7 +211,7 @@ async fn unmatched_index_filter_by_method() {
 
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched?method=POST"))
+        .get(url(&h, "/ui/unmatched?method=POST"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -235,7 +235,7 @@ async fn unmatched_index_filter_by_path_pattern() {
 
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched?path_pattern=/v1/*"))
+        .get(url(&h, "/ui/unmatched?path_pattern=/v1/*"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -253,7 +253,7 @@ async fn unmatched_index_invalid_method_returns_400() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/unmatched?method=lowercase"))
+        .get(url(&h, "/ui/unmatched?method=lowercase"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -271,7 +271,7 @@ async fn unmatched_index_pagination_exposes_next_page() {
     }
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched"))
+        .get(url(&h, "/ui/unmatched"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -297,7 +297,7 @@ async fn unmatched_index_scoped_to_owned_groups() {
 
     let cookie = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/unmatched"))
+        .get(url(&h, "/ui/unmatched"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -342,7 +342,7 @@ async fn unmatched_index_owner_sees_their_group() {
 
     let cookie = login_cookie(&h, &client, "alice").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched"))
+        .get(url(&h, "/ui/unmatched"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -369,7 +369,7 @@ async fn unmatched_detail_renders_request_envelope() {
     let cookie = login_cookie(&h, &client, "admin").await;
     // First number is 1 — unmatched:counter starts there.
     let body = client
-        .get(url(&h, "/__ui/unmatched/1"))
+        .get(url(&h, "/ui/unmatched/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -390,7 +390,7 @@ async fn unmatched_detail_404_for_unknown_number() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/unmatched/999"))
+        .get(url(&h, "/ui/unmatched/999"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -405,7 +405,7 @@ async fn unmatched_detail_non_admin_is_forbidden() {
     record_unmatched(&h, &client, "GET", "/missing").await;
     let cookie = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/unmatched/1"))
+        .get(url(&h, "/ui/unmatched/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -454,7 +454,7 @@ async fn unmatched_list_renders_did_you_mean_hint() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched"))
+        .get(url(&h, "/ui/unmatched"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -466,7 +466,7 @@ async fn unmatched_list_renders_did_you_mean_hint() {
     // minijinja HTML-escapes `/` to `&#x2f;` in href attrs. Browsers
     // decode it back, but the rendered string carries the entity.
     assert!(
-        body.contains("/__ui/routes/stripe-mock&#x2f;3"),
+        body.contains("/ui/routes/stripe-mock&#x2f;3"),
         "hint links to suggested route: {body}"
     );
 }
@@ -478,7 +478,7 @@ async fn unmatched_list_shows_no_close_neighbours_when_empty() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched"))
+        .get(url(&h, "/ui/unmatched"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -499,7 +499,7 @@ async fn unmatched_detail_lists_near_misses_with_explanation() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/unmatched/1"))
+        .get(url(&h, "/ui/unmatched/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -508,7 +508,7 @@ async fn unmatched_detail_lists_near_misses_with_explanation() {
         .await
         .unwrap();
     assert!(body.contains("Did you mean"));
-    assert!(body.contains("/__ui/routes/stripe-mock&#x2f;3"));
+    assert!(body.contains("/ui/routes/stripe-mock&#x2f;3"));
     // The explanation includes the reason + expected method.
     assert!(
         body.contains("Pattern matched") && body.contains("POST"),

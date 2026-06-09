@@ -2,11 +2,11 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/groups/{{ entry.group_name }}">{{ entry.group_name }}</a>
+  <a href="/ui/groups/{{ entry.group_name }}">{{ entry.group_name }}</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/routes/{{ entry.group_name }}/{{ entry.route_number }}">{{ entry.method }} {{ entry.matched_pattern }}</a>
+  <a href="/ui/routes/{{ entry.group_name }}/{{ entry.route_number }}">{{ entry.method }} {{ entry.matched_pattern }}</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">journal #{{ entry.number }}</span>
 </nav>
@@ -16,8 +16,8 @@
   <p class="text-muted">
     <time datetime="{{ entry.created_at }}">{{ entry.created_at }}</time>
     · matched
-    <a href="/__ui/routes/{{ entry.group_name }}/{{ entry.route_number }}"><code>{{ entry.method }} {{ entry.matched_pattern }}</code></a>
-    in <a href="/__ui/groups/{{ entry.group_name }}">{{ entry.group_name }}</a>
+    <a href="/ui/routes/{{ entry.group_name }}/{{ entry.route_number }}"><code>{{ entry.method }} {{ entry.matched_pattern }}</code></a>
+    in <a href="/ui/groups/{{ entry.group_name }}">{{ entry.group_name }}</a>
   </p>
   <dl class="meta-grid">
     <dt>Status</dt>

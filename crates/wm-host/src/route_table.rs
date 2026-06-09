@@ -2,8 +2,8 @@
 //! their compiled wasmtime `Component`s. The dispatch handler queries this
 //! on every incoming request rather than hitting the registry directly.
 //!
-//! Slice 3 is single-host: writes go through `POST /__api/routes` and
-//! `DELETE /__api/routes/...`, which call `refresh_*` on the table to keep
+//! Slice 3 is single-host: writes go through `POST /api/routes` and
+//! `DELETE /api/routes/...`, which call `refresh_*` on the table to keep
 //! it in sync with the registry. Multi-host coherence (Valkey keyspace
 //! notifications per `storage-model.md`) is a slice 4 concern.
 
@@ -175,7 +175,7 @@ impl RouteTable {
 
     /// Group-scoped match probe (ADR-0030): match + near-misses confined to
     /// a single group, the per-tenant counterpart to [`probe`]. Backs the
-    /// group-scoped `GET /__api/match` and the MCP `find_route` tool so a
+    /// group-scoped `GET /api/match` and the MCP `find_route` tool so a
     /// probe answers "would this match *in my group*?" without leaking other
     /// tenants' routes.
     pub fn probe_in_group(&self, group: &str, method: &str, path: &str) -> MatchProbe {

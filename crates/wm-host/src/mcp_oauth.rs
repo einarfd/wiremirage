@@ -1,7 +1,7 @@
 //! MCP-client OAuth Authorization Server — ADR-0019.
 //!
 //! WireMirage acts as its own OAuth 2.1 Authorization Server scoped to
-//! the `/__api/mcp` resource so native MCP clients (Claude Desktop,
+//! the `/api/mcp` resource so native MCP clients (Claude Desktop,
 //! Cursor's MCP integration, the MCP Inspector) can authenticate
 //! interactive users via the spec's authorization-code-with-PKCE flow.
 //!
@@ -327,7 +327,7 @@ pub fn consume_refresh_token(
 /// MCP-OAuth discovery + flow router. Mounted at the root from
 /// `server::router()` so the well-known paths land as
 /// `https://host/.well-known/...` and the flow endpoints as
-/// `/__auth/oauth/...` / `/__ui/oauth/...`.
+/// `/auth/oauth/...` / `/ui/oauth/...`.
 ///
 /// CSRF is layered onto the consent UI only — `/register` and
 /// `/token` are called by external MCP clients and can't carry a
@@ -344,16 +344,13 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/.well-known/oauth-authorization-server",
             get(authorization_server_metadata),
         )
-        .route("/__auth/oauth/register", post(register))
-        .route("/__auth/oauth/authorize", get(authorize))
-        .route("/__auth/oauth/token", post(token))
-        .route("/__auth/oauth/revoke", post(revoke));
+        .route("/auth/oauth/register", post(register))
+        .route("/auth/oauth/authorize", get(authorize))
+        .route("/auth/oauth/token", post(token))
+        .route("/auth/oauth/revoke", post(revoke));
 
     let consent = Router::new()
-        .route(
-            "/__ui/oauth/consent",
-            get(consent_page).post(consent_submit),
-        )
+        .route("/ui/oauth/consent", get(consent_page).post(consent_submit))
         .layer(axum::middleware::from_fn_with_state(
             state,
             crate::ui::csrf::csrf_middleware,
@@ -363,7 +360,7 @@ pub fn router(state: AppState) -> Router<AppState> {
 }
 
 /// RFC 9728 — Protected Resource Metadata. Names the AS and the
-/// resource URL. Clients hitting `/__api/mcp` without a valid token
+/// resource URL. Clients hitting `/api/mcp` without a valid token
 /// will (per slice D) get a `WWW-Authenticate: Bearer
 /// resource_metadata="..."` header pointing at this URL.
 async fn protected_resource_metadata(
@@ -372,7 +369,7 @@ async fn protected_resource_metadata(
 ) -> Json<serde_json::Value> {
     let base = derive_public_base(&headers, state.trust_forwarded_headers());
     Json(json!({
-        "resource": format!("{base}/__api/mcp"),
+        "resource": format!("{base}/api/mcp"),
         "authorization_servers": [base.clone()],
         "scopes_supported": ["*"],
         "bearer_methods_supported": ["header"],
@@ -392,10 +389,10 @@ async fn authorization_server_metadata(
     let base = derive_public_base(&headers, state.trust_forwarded_headers());
     Json(json!({
         "issuer": base.clone(),
-        "authorization_endpoint": format!("{base}/__auth/oauth/authorize"),
-        "token_endpoint": format!("{base}/__auth/oauth/token"),
-        "registration_endpoint": format!("{base}/__auth/oauth/register"),
-        "revocation_endpoint": format!("{base}/__auth/oauth/revoke"),
+        "authorization_endpoint": format!("{base}/auth/oauth/authorize"),
+        "token_endpoint": format!("{base}/auth/oauth/token"),
+        "registration_endpoint": format!("{base}/auth/oauth/register"),
+        "revocation_endpoint": format!("{base}/auth/oauth/revoke"),
         "scopes_supported": ["*"],
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -436,7 +433,7 @@ fn derive_public_base(headers: &HeaderMap, trust_forwarded: bool) -> String {
 
 /// Compare an RFC 8707 `resource` query value to the URL of this
 /// host's MCP endpoint. Trailing slashes are normalised so
-/// `…/__api/mcp` and `…/__api/mcp/` are treated as equivalent; everything
+/// `…/api/mcp` and `…/api/mcp/` are treated as equivalent; everything
 /// else (scheme, host, path) is compared byte-for-byte because URLs
 /// otherwise have meaningful case in path / query.
 fn resource_matches_mcp(requested: &str, expected: &str) -> bool {
@@ -723,7 +720,7 @@ fn loopback_normalize(uri: &str) -> Option<String> {
     Some(format!("http://{host}{path}"))
 }
 
-// -- DCR: POST /__auth/oauth/register -----------------------------------------
+// -- DCR: POST /auth/oauth/register -----------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct RegisterBody {
@@ -851,7 +848,7 @@ fn validate_redirect_uri_at_registration(uri: &str) -> Result<(), String> {
     }
 }
 
-// -- Authorize: GET /__auth/oauth/authorize -----------------------------------
+// -- Authorize: GET /auth/oauth/authorize -----------------------------------
 
 #[derive(Debug, Deserialize)]
 struct AuthorizeQuery {
@@ -921,7 +918,7 @@ async fn authorize(
     // the real problem before the consent dialog.
     if let Some(requested) = q.resource.as_deref().filter(|s| !s.is_empty()) {
         let expected = format!(
-            "{base}/__api/mcp",
+            "{base}/api/mcp",
             base = derive_public_base(&headers, state.trust_forwarded_headers())
         );
         if !resource_matches_mcp(requested, &expected) {
@@ -975,7 +972,7 @@ async fn authorize(
     // and resume after.
     if !session_is_valid(&state, &headers) {
         let next = raw_uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("");
-        let login_url = format!("/__auth/login?next={}", percent_encode(next));
+        let login_url = format!("/auth/login?next={}", percent_encode(next));
         return Redirect::to(&login_url).into_response();
     }
 
@@ -1000,7 +997,7 @@ async fn authorize(
     }
 
     let target = format!(
-        "/__ui/oauth/consent?state={state}",
+        "/ui/oauth/consent?state={state}",
         state = percent_encode(&internal_state)
     );
     Redirect::to(&target).into_response()
@@ -1051,7 +1048,7 @@ fn resolve_session_user(state: &AppState, headers: &HeaderMap) -> Option<String>
     Some(session.user_id)
 }
 
-// -- Consent: GET/POST /__ui/oauth/consent -----------------------------------
+// -- Consent: GET/POST /ui/oauth/consent -----------------------------------
 
 #[derive(Debug, Deserialize)]
 struct ConsentQuery {
@@ -1064,7 +1061,7 @@ async fn consent_page(
     Query(q): Query<ConsentQuery>,
 ) -> Response {
     if !session_is_valid(&state, &headers) {
-        return Redirect::to("/__auth/login?next=/__ui/").into_response();
+        return Redirect::to("/auth/login?next=/ui/").into_response();
     }
     let Some(internal_state) = q.state else {
         return (StatusCode::BAD_REQUEST, "missing state").into_response();
@@ -1124,7 +1121,7 @@ async fn consent_submit(
     Form(form): Form<ConsentForm>,
 ) -> Response {
     let Some(user_id) = resolve_session_user(&state, &headers) else {
-        return Redirect::to("/__auth/login?next=/__ui/").into_response();
+        return Redirect::to("/auth/login?next=/ui/").into_response();
     };
     let mut bucket = match state.auth().storage().admin_bucket() {
         Ok(b) => b,
@@ -1207,7 +1204,7 @@ fn build_redirect_with_params(base: &str, params: &[(&str, &str)]) -> String {
     url.into()
 }
 
-// -- Token: POST /__auth/oauth/token ------------------------------------------
+// -- Token: POST /auth/oauth/token ------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct TokenForm {
@@ -1557,7 +1554,7 @@ async fn handle_refresh_token_grant(
     response
 }
 
-// -- Revoke: POST /__auth/oauth/revoke ----------------------------------------
+// -- Revoke: POST /auth/oauth/revoke ----------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct RevokeForm {
@@ -1829,8 +1826,8 @@ mod tests {
     #[test]
     fn resource_matches_exact() {
         assert!(resource_matches_mcp(
-            "https://wm.example.com/__api/mcp",
-            "https://wm.example.com/__api/mcp"
+            "https://wm.example.com/api/mcp",
+            "https://wm.example.com/api/mcp"
         ));
     }
 
@@ -1841,42 +1838,42 @@ mod tests {
         // as equivalent so we don't reject a request the user can't
         // easily fix on their end.
         assert!(resource_matches_mcp(
-            "https://wm.example.com/__api/mcp/",
-            "https://wm.example.com/__api/mcp"
+            "https://wm.example.com/api/mcp/",
+            "https://wm.example.com/api/mcp"
         ));
         assert!(resource_matches_mcp(
-            "https://wm.example.com/__api/mcp",
-            "https://wm.example.com/__api/mcp/"
+            "https://wm.example.com/api/mcp",
+            "https://wm.example.com/api/mcp/"
         ));
     }
 
     #[test]
     fn resource_mismatch_on_root() {
         // The classic "client pointed at host root instead of
-        // /__api/mcp" case.
+        // /api/mcp" case.
         assert!(!resource_matches_mcp(
             "https://wm.example.com/",
-            "https://wm.example.com/__api/mcp"
+            "https://wm.example.com/api/mcp"
         ));
         assert!(!resource_matches_mcp(
             "https://wm.example.com",
-            "https://wm.example.com/__api/mcp"
+            "https://wm.example.com/api/mcp"
         ));
     }
 
     #[test]
     fn resource_mismatch_on_wrong_path() {
         assert!(!resource_matches_mcp(
-            "https://wm.example.com/__api/other",
-            "https://wm.example.com/__api/mcp"
+            "https://wm.example.com/api/other",
+            "https://wm.example.com/api/mcp"
         ));
     }
 
     #[test]
     fn resource_mismatch_on_different_host() {
         assert!(!resource_matches_mcp(
-            "https://imposter.example.com/__api/mcp",
-            "https://wm.example.com/__api/mcp"
+            "https://imposter.example.com/api/mcp",
+            "https://wm.example.com/api/mcp"
         ));
     }
 }
