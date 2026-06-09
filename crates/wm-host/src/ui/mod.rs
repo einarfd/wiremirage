@@ -307,6 +307,7 @@ struct UiGroupsQuery {
 async fn groups_list_page(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Query(q): Query<UiGroupsQuery>,
 ) -> Response {
     let owner_scope = effective_owner_scope(&auth, q.owner_scope.as_deref());
@@ -338,7 +339,15 @@ async fn groups_list_page(
     let rows: Vec<GroupsListRow> = paged
         .groups
         .iter()
-        .map(|g| GroupsListRow::from_group(g, &owner_names, &all_routes))
+        .map(|g| {
+            GroupsListRow::from_group(
+                g,
+                &owner_names,
+                &all_routes,
+                &headers,
+                state.trust_forwarded_headers(),
+            )
+        })
         .collect();
 
     let sort = q.sort.clone().unwrap_or_else(|| "last_activity_at".into());
@@ -385,6 +394,7 @@ async fn groups_list_page(
 #[derive(Serialize)]
 struct GroupsListRow {
     name: String,
+    base_url: String,
     implicit: bool,
     owner_name: String,
     route_count: usize,
@@ -394,10 +404,17 @@ struct GroupsListRow {
 }
 
 impl GroupsListRow {
-    fn from_group(g: &Group, owner_names: &HashMap<String, String>, routes: &[Route]) -> Self {
+    fn from_group(
+        g: &Group,
+        owner_names: &HashMap<String, String>,
+        routes: &[Route],
+        headers: &HeaderMap,
+        trust_forwarded: bool,
+    ) -> Self {
         let route_count = routes.iter().filter(|r| r.group_id == g.id).count();
         Self {
             name: g.name.clone(),
+            base_url: crate::auth_api::group_base_url(&g.name, headers, trust_forwarded),
             implicit: g.implicit,
             owner_name: owner_names
                 .get(&g.owner_id)
@@ -841,6 +858,7 @@ impl UserBadge {
 async fn group_detail_page(
     State(state): State<AppState>,
     auth: AuthContext,
+    headers: HeaderMap,
     Path(group_ref): Path<String>,
 ) -> Response {
     let group = match state.routes().registry().read_group_by_ref(&group_ref) {
@@ -872,6 +890,11 @@ async fn group_detail_page(
     let group_view = GroupDetailGroup {
         id: group.id.clone(),
         name: group.name.clone(),
+        base_url: crate::auth_api::group_base_url(
+            &group.name,
+            &headers,
+            state.trust_forwarded_headers(),
+        ),
         implicit: group.implicit,
         owner_name: owner_names
             .get(&group.owner_id)
@@ -915,6 +938,7 @@ async fn group_detail_page(
 struct GroupDetailGroup {
     id: String,
     name: String,
+    base_url: String,
     implicit: bool,
     owner_name: String,
     ttl_seconds: u64,
@@ -3005,8 +3029,10 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
 // -- Unmatched pages (slice 28) ---------------------------------------------
 //
 // The unmatched-request log surfaced at /__ui/unmatched, plus a
-// per-entry detail page at /__ui/unmatched/{number}. Both admin-only,
-// mirroring the REST surface at /__api/unmatched. Reuses the
+// per-entry detail page at /__ui/unmatched/{number}. Owner-visible
+// under ADR-0030: an admin sees every group's unmatched, a non-admin
+// sees only their own groups' (scoped in the handler below), mirroring
+// the REST surface at /__api/unmatched. Reuses the
 // `JournalFilter::matches_unmatched` matcher for method + path_pattern
 // filtering so the UI agrees with the REST shape.
 

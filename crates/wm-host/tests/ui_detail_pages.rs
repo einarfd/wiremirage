@@ -199,6 +199,12 @@ async fn group_detail_renders_metadata_and_routes_for_owner() {
             && body.contains("data-wm-save=\"stripe-mock.yaml\""),
         "export is a download button: {body}"
     );
+    // ADR-0030: the served subdomain base URL is surfaced so the user knows
+    // where to point their system-under-test.
+    assert!(
+        body.contains("Base URL") && body.contains("stripe-mock."),
+        "group detail shows the served subdomain base URL: {body}"
+    );
 }
 
 #[tokio::test]
