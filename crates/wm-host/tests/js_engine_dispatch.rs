@@ -540,3 +540,81 @@ async fn non_streaming_handler_still_traps_at_the_epoch() {
     );
     server.abort();
 }
+
+// -- Handler logging + network-global stubs (MCP field report) --------------
+
+#[tokio::test]
+async fn handler_logging_reaches_journal_and_fetch_is_catchable() {
+    // Two fixes from the 2026-06-09 MCP field report, proven end to end:
+    //   #1 the `log` host import is now surfaced to handlers as `log.*` and
+    //      `console.*`, and the lines land in the journal entry's
+    //      `handler_logs` (previously `log` was undefined → ReferenceError).
+    //   #2 unsupported network globals (`fetch`, …) throw a *catchable*
+    //      Error instead of hard-trapping the wasm instance.
+    let source = r#"
+        function handle(req, route, group) {
+          log.info("hello from handler");
+          console.log("via console");
+          let fetchMsg = "fetch did not throw";
+          try {
+            fetch("https://example.com/");
+          } catch (e) {
+            fetchMsg = "caught: " + e.message;
+          }
+          return {
+            status: 200,
+            headers: [],
+            body: new TextEncoder().encode(fetchMsg),
+          };
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        eprintln!("skipping: vendored js-engine.wasm not present");
+        return;
+    };
+
+    // Dispatch on the group subdomain — writes a journal entry whose
+    // handler_logs should now carry the emitted lines.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a handler using log/console and try/catch around fetch returns 200, not a trap"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.starts_with("caught:") && body.contains("network access"),
+        "fetch threw a catchable Error the handler could handle: {body}"
+    );
+
+    // Read the journal back via the control-plane API (bootstrap admin token,
+    // addressed at the apex / direct host) and confirm the log lines landed.
+    let listed: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://{addr}/api/journal/{group}"))
+        .header(reqwest::header::AUTHORIZATION, "Bearer wmt_test")
+        .send()
+        .await
+        .expect("get journal")
+        .json()
+        .await
+        .expect("json");
+    let entry = &listed["entries"].as_array().expect("entries")[0];
+    let logged = entry["handler_logs"]
+        .as_array()
+        .expect("handler_logs")
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        logged.contains("hello from handler") && logged.contains("via console"),
+        "log.info + console.log lines reached the journal's handler_logs: {logged}"
+    );
+    server.abort();
+}

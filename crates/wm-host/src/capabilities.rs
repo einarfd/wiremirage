@@ -269,15 +269,22 @@ structured lines to the request's journal entry.
 log.emit("info", "received request for /v1/charges");
 log.emit("warn", `unexpected field: ${field}`);
 log.emit("error", `panic: ${e.message}`);
+
+// Level-named conveniences and the familiar console.* methods work too —
+// both route to the same journal channel (console.log → info,
+// console.warn → warn, console.error → error, console.debug → debug):
+log.info("same as log.emit(\"info\", ...)");
+console.log("received", req.method, req.path);  // joined with spaces
 ```
 
 Logs attach to the journal record for this request and show up in:
 
 - `wm journal show <group>/<n>` (CLI)
 - the `/ui/journal/{group}/{n}` page (web UI)
+- the `handler_logs` array in a `dry_run_route` result
 
-Logs do NOT go to stdout; the wasm sandbox doesn't expose stdio. Use
-this interface for anything you'd otherwise `console.log`.
+Logs do NOT go to stdout; the wasm sandbox doesn't expose stdio. `log.*`
+and `console.*` are the only way to surface anything from a handler.
 "#;
 
 const CLOCK: &str = r#"# Clock — host.sleep, wall-time, monotonic time
@@ -508,4 +515,14 @@ caches, module-level computations) resets between requests. The fresh
 wasmtime instance per call is by design — it gives clean isolation as
 a property of the architecture. Use `routeStore` / `groupStore` for
 any continuity.
+
+## No network access — `fetch` and friends throw
+
+Handlers have no outbound network: the sandbox imports are store / log /
+clock / response-stream only. The JS engine still *exposes* web globals
+like `fetch`, `WebSocket`, `EventSource`, and `XMLHttpRequest`, but calling
+them throws a catchable `Error` ("network access is not available in
+WireMirage handlers") rather than doing anything. Don't try to reach a real
+upstream from a handler — mock that upstream as another route and point your
+system-under-test at it.
 "#;
