@@ -8,7 +8,7 @@
 // and the rule format, and swap just those two functions + the rules.
 //
 // Rules live in GROUP state under "inject:rules", seeded via the writable-state
-// API (ADR-0025: `PUT /__api/groups/{group}/state`). Each rule:
+// API (ADR-0025: `PUT /api/groups/{group}/state`). Each rule:
 //
 //   { "match": { "path_prefix"?, "method"?, "query"?: {k:v}, "header"?: {k:v} },
 //     "delay_ms"?: number, "throttle_first"?: number }
