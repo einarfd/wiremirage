@@ -260,6 +260,25 @@ pub fn parse_duration(s: &str) -> Result<u64> {
     Ok(total)
 }
 
+/// Format whole seconds as the most compact exact duration string that
+/// [`parse_duration`] accepts: `86400` → `"1d"`, `3600` → `"1h"`, `90` →
+/// `"90s"`. Used by `export_group` so an exported TTL stays human/agent-
+/// friendly and round-trips back through `parse_duration` on import.
+pub fn format_duration(seconds: u64) -> String {
+    const DAY: u64 = 86_400;
+    const HOUR: u64 = 3_600;
+    const MIN: u64 = 60;
+    if seconds != 0 && seconds.is_multiple_of(DAY) {
+        format!("{}d", seconds / DAY)
+    } else if seconds != 0 && seconds.is_multiple_of(HOUR) {
+        format!("{}h", seconds / HOUR)
+    } else if seconds != 0 && seconds.is_multiple_of(MIN) {
+        format!("{}m", seconds / MIN)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +409,19 @@ mod tests {
     fn duration_parses_compound_units() {
         assert_eq!(parse_duration("1h30m").unwrap(), 5400);
         assert_eq!(parse_duration("2d12h").unwrap(), 216_000);
+    }
+
+    #[test]
+    fn format_duration_picks_compact_unit_and_round_trips() {
+        assert_eq!(super::format_duration(86_400), "1d");
+        assert_eq!(super::format_duration(3_600), "1h");
+        assert_eq!(super::format_duration(90), "90s");
+        assert_eq!(super::format_duration(120), "2m");
+        assert_eq!(super::format_duration(0), "0s");
+        // Round-trips back through parse_duration (export → import).
+        for secs in [1u64, 59, 60, 3_600, 5_400, 86_400, 172_800] {
+            assert_eq!(parse_duration(&super::format_duration(secs)).unwrap(), secs);
+        }
     }
 
     #[test]
