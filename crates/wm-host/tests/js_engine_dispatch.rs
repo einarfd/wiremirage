@@ -618,3 +618,73 @@ async fn handler_logging_reaches_journal_and_fetch_is_catchable() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn request_convenience_accessors_resolve_header_pathparam_queryparam() {
+    // Field-report nit: req.header() / req.pathParam() / req.queryParam() over
+    // the tuple arrays. header() is case-insensitive (HTTP); the others exact.
+    let Some(engine_path) = vendored_engine_path() else {
+        eprintln!("skipping: vendored js-engine.wasm not present");
+        return;
+    };
+    let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    auth.bootstrap_admin("bootstrap", "wmt_test")
+        .expect("bootstrap");
+    let runtime = Arc::new(
+        Runtime::new(storage.clone())
+            .expect("runtime")
+            .with_js_engine(&engine_path)
+            .expect("engine"),
+    );
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let source = r#"
+        function handle(req, route, group) {
+          const parts = [
+            req.header("X-Test") || "no-header",
+            req.pathParam("id") || "no-param",
+            req.queryParam("page") || "no-query",
+          ];
+          return { status: 200, headers: [], body: new TextEncoder().encode(parts.join("/")) };
+        }
+    "#;
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/widgets/{id}".into(),
+            language: "javascript".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: Vec::new(),
+            source: Some(source.into()),
+            owner_id: "test-owner".into(),
+        })
+        .expect("route");
+    let group = route.group_name.clone();
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    routes.refresh_after_create(route);
+    let journal = Journal::new(storage);
+    let app = router(AppState::new(runtime, routes, auth, journal));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let body = reqwest::Client::new()
+        .get(format!("http://{addr}/widgets/42?page=3"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        // Sent lowercase on the wire; the handler asks for "X-Test".
+        .header("x-test", "hi")
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .expect("body");
+    assert_eq!(
+        body, "hi/42/3",
+        "header (case-insensitive) + pathParam + queryParam all resolved"
+    );
+    server.abort();
+}

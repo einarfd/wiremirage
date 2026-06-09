@@ -1262,18 +1262,40 @@ fn build_wit_request(
         })
         .collect();
 
+    // Parse the URL query string into (name, value) pairs. Names are
+    // lowercased to match the WIT contract (`request.query` doc); both halves
+    // are form-decoded (`+` → space, then percent-decoding).
+    let query: Vec<Header> = uri
+        .query()
+        .map(|q| {
+            q.split('&')
+                .filter(|pair| !pair.is_empty())
+                .map(|pair| {
+                    let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                    (form_decode(k).to_lowercase(), form_decode(v))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     WitRequest {
         method: method.as_str().to_uppercase(),
         path,
         matched_pattern: matched_pattern.to_string(),
         path_params: path_params.to_vec(),
-        // Query parsing arrives with the request-body / debug surface
-        // work later in the project; the WIT contract permits an empty
-        // list when the host doesn't parse it.
-        query: vec![],
+        query,
         headers: headers_vec,
         body,
     }
+}
+
+/// Decode one application/x-www-form-urlencoded component: `+` is a space,
+/// then percent-decode. Falls back to the raw input on malformed escapes.
+fn form_decode(s: &str) -> String {
+    let plus_decoded = s.replace('+', " ");
+    urlencoding::decode(&plus_decoded)
+        .map(|c| c.into_owned())
+        .unwrap_or(plus_decoded)
 }
 
 fn build_axum_response_owned(resp: &WitResponse) -> Response {
