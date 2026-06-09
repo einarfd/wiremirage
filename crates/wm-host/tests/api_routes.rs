@@ -3429,6 +3429,18 @@ async fn export_round_trips_a_source_route() {
         !exp["routes"][0]["source"].as_str().unwrap().is_empty(),
         "source is inline in the export"
     );
+    // Canonical export (field-report #6): methods is always the plural array
+    // form (never singular `method`), and the TTL is a humane duration string.
+    assert_eq!(exp["routes"][0]["methods"], json!(["POST"]));
+    assert!(
+        exp["routes"][0].get("method").is_none() || exp["routes"][0]["method"].is_null(),
+        "singular `method` is not emitted: {exp}"
+    );
+    let ttl = exp["ttl"].as_str().expect("ttl string");
+    assert!(
+        ttl.ends_with(['d', 'h', 'm', 's']) && ttl.parse::<u64>().is_err(),
+        "TTL exports as a humane duration string, not bare seconds: {ttl}"
+    );
 }
 
 #[tokio::test]

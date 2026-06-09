@@ -530,6 +530,36 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     }
 }
 
+/// Message for a failed handler call (500 body + journal `error`). A clean JS
+/// exception from the engine is already a readable one-liner, so pass it
+/// through. A wasm-level *trap* otherwise dumps an opaque backtrace that's
+/// useless to the handler author — replace it with a short, actionable line.
+/// The raw error is still emitted to the host trace for operators.
+fn friendly_handler_error(e: &wasmtime::Error) -> String {
+    let raw = format!("{e:#}");
+    let lower = raw.to_ascii_lowercase();
+    // Only intercept genuine wasm traps (the cases that dump a backtrace);
+    // a JS error that merely mentions "unreachable" must pass through.
+    let is_wasm_trap = lower.contains("wasm trap")
+        || lower.contains("wasm backtrace")
+        || (lower.contains("unreachable") && lower.contains("wasm"));
+    if !is_wasm_trap {
+        return raw;
+    }
+    if lower.contains("epoch") || lower.contains("interrupt") {
+        "handler exceeded its time budget (epoch deadline)".to_string()
+    } else if lower.contains("fuel") {
+        "handler exceeded its CPU budget (out of fuel)".to_string()
+    } else if lower.contains("memory") || lower.contains("allocation") {
+        "handler exceeded its memory budget".to_string()
+    } else {
+        "handler trapped (engine-level fault) — common causes: calling an \
+         unsupported web API (e.g. network access) or a bug in the handler; \
+         the raw wasm backtrace is in the host logs/trace"
+            .to_string()
+    }
+}
+
 // Span fields kept low-cardinality on purpose: `http.method` and
 // `route.matched_pattern` are bounded; the raw URL path with path-param
 // values is deliberately omitted so OTel attribute cardinality stays
@@ -959,7 +989,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 (envelope, dropped, axum, None, "ok")
             }
             Err(e) => {
-                let msg = format!("{e:#}");
+                let msg = friendly_handler_error(e);
                 let body = msg.clone().into_bytes();
                 let envelope = ResponseEnvelope {
                     status: 500,
@@ -1474,4 +1504,46 @@ fn error_response(status: StatusCode, msg: &str) -> Response {
         )
         .body(Body::from(msg.to_string()))
         .expect("error response build should not fail")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::friendly_handler_error;
+
+    #[test]
+    fn clean_js_error_passes_through() {
+        // A JS exception from the engine is already a readable one-liner.
+        let e = wasmtime::Error::msg("ReferenceError: log is not defined");
+        assert_eq!(
+            friendly_handler_error(&e),
+            "ReferenceError: log is not defined"
+        );
+    }
+
+    #[test]
+    fn js_error_mentioning_unreachable_is_not_masked() {
+        // No wasm-trap markers → not a trap → keep the handler's own message.
+        let e = wasmtime::Error::msg("Error: upstream unreachable");
+        assert_eq!(friendly_handler_error(&e), "Error: upstream unreachable");
+    }
+
+    #[test]
+    fn unreachable_trap_becomes_generic_line() {
+        let e = wasmtime::Error::msg(
+            "error while executing at wasm backtrace:\n  0: <unknown>!<wasm function 1234>\n\
+             Caused by: wasm trap: wasm `unreachable` instruction executed",
+        );
+        let msg = friendly_handler_error(&e);
+        assert!(msg.contains("handler trapped"), "got: {msg}");
+        assert!(!msg.contains("wasm function"), "backtrace stripped: {msg}");
+    }
+
+    #[test]
+    fn epoch_trap_reports_time_budget() {
+        let e = wasmtime::Error::msg("wasm trap: interrupt");
+        assert_eq!(
+            friendly_handler_error(&e),
+            "handler exceeded its time budget (epoch deadline)"
+        );
+    }
 }

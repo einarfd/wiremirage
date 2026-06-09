@@ -510,7 +510,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "find_route",
-        description = "Probe what would match a hypothetical request **within a group**: a method + path pair, like an inbound HTTP request to that group's subdomain. Returns the matching route if there is one, or a list of near-misses (method-mismatch or literal-prefix typos) explaining what almost matched. Reach for this when debugging \"my mock isn't firing\" — it tells you whether any route exists in the group for the request, and if not, the closest candidates. Owner-or-admin of the group (ADR-0030: matching is per-subdomain)."
+        description = "Probe what would match a hypothetical request **within a group**: a method + path pair, like an inbound HTTP request to that group's subdomain. Returns the matching route if there is one, or a list of near-misses explaining what almost matched. Near-miss detection is intentionally shallow: it catches a method mismatch (path pattern matches but methods don't) and a single-segment literal-prefix typo — it does NOT catch deeper edits like a transposed or misspelled segment, so an EMPTY near-miss list does not prove no similar route exists. Reach for this when debugging \"my mock isn't firing\" — it tells you whether any route exists in the group for the request, and if not, the closest candidates. Owner-or-admin of the group (ADR-0030: matching is per-subdomain)."
     )]
     pub async fn find_route(
         &self,

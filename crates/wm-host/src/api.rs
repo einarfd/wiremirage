@@ -2237,13 +2237,11 @@ pub(crate) fn export_group_core(
                 group.name, r.number, r.language
             )));
         };
-        let (method, methods) = match r.methods.as_slice() {
-            [only] => (Some(only.clone()), Vec::new()),
-            _ => (None, r.methods.clone()),
-        };
         route_specs.push(wm_core::spec::RouteSpec {
-            method,
-            methods,
+            // Canonical export: always the plural `methods` form (never the
+            // singular `method`), so one document doesn't mix both shapes.
+            method: None,
+            methods: r.methods.clone(),
             path: r.path.clone(),
             language: Some(r.language.clone()),
             source: Some(source),
@@ -2254,7 +2252,7 @@ pub(crate) fn export_group_core(
     Ok(wm_core::spec::GroupSpec {
         name: group.name.clone(),
         description: None,
-        ttl: Some(group.ttl_seconds.to_string()),
+        ttl: Some(wm_core::spec::format_duration(group.ttl_seconds)),
         sliding: Some(group.sliding_ttl),
         routes: route_specs,
     })
