@@ -70,7 +70,7 @@
     <tbody>
     {%- for g in groups %}
       <tr>
-        <td><a href="/__ui/groups/{{ g.name }}">{{ g.name }}</a>{% if g.implicit %} <span class="badge">implicit</span>{% endif %}</td>
+        <td><a href="/__ui/groups/{{ g.name }}">{{ g.name }}</a>{% if g.implicit %} <span class="badge">implicit</span>{% endif %}<br><code class="text-muted">{{ g.base_url }}</code></td>
         <td class="text-muted">{{ g.owner_name }}</td>
         <td>{{ g.route_count }}</td>
         <td>{{ g.ttl_seconds }}</td>
