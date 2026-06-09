@@ -2,7 +2,7 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">{{ group.name }}</span>
 </nav>
@@ -32,13 +32,13 @@
     <dd><code>{{ group.id }}</code></dd>
   </dl>
   <div class="action-row">
-    <form method="post" action="/__ui/groups/{{ group.name }}/refresh" class="inline-form">
+    <form method="post" action="/ui/groups/{{ group.name }}/refresh" class="inline-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button type="submit" class="btn">Refresh TTL</button>
     </form>
     <details class="edit-disclosure">
       <summary>Edit group</summary>
-      <form method="post" action="/__ui/groups/{{ group.name }}/edit" class="filter-form">
+      <form method="post" action="/ui/groups/{{ group.name }}/edit" class="filter-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <label class="filter-field">
           <span class="filter-field__label">Name (subdomain)</span>
@@ -62,12 +62,12 @@
 <section class="card">
   <header class="card__header">
     <h2>Routes <span class="text-muted">({{ route_count }})</span></h2>
-    <a class="btn" href="/__ui/routes/new?group={{ group.name }}">+ Add route</a>
+    <a class="btn" href="/ui/routes/new?group={{ group.name }}">+ Add route</a>
   </header>
   {% if routes | length == 0 %}
   <p class="empty-state">
     No routes in this group yet.
-    <a href="/__ui/routes/new?group={{ group.name }}">Add the first one</a>
+    <a href="/ui/routes/new?group={{ group.name }}">Add the first one</a>
     or use
     <code>wm routes add --group {{ group.name }} --method GET --path /foo --source-file handler.ts</code>.
   </p>
@@ -87,7 +87,7 @@
       <tr>
         <td class="text-muted">{{ r.number }}</td>
         <td>{{ r.methods }}</td>
-        <td><a href="/__ui/routes/{{ group.name }}/{{ r.number }}"><code>{{ r.path }}</code></a></td>
+        <td><a href="/ui/routes/{{ group.name }}/{{ r.number }}"><code>{{ r.path }}</code></a></td>
         <td>{{ r.hits_total }}</td>
         <td class="text-muted">{% if r.last_hit_at %}{{ r.last_hit_at }}{% else %}never{% endif %}</td>
       </tr>
@@ -100,14 +100,14 @@
 <section class="card">
   <header class="card__header">
     <h2>Live activity</h2>
-    <a class="link" href="/__ui/journal/live?group={{ group.name }}">Full view &rarr;</a>
+    <a class="link" href="/ui/journal/live?group={{ group.name }}">Full view &rarr;</a>
   </header>
   <ul id="group-live" class="action-list">
   {%- for j in recent_entries %}
     <li>
       <code>{{ j.created_at_human }}</code>
       <span class="status status-{{ j.status_class }}">{{ j.status }}</span>
-      <a href="/__ui/journal/{{ group.name }}/{{ j.number }}">{{ j.method }} <code>{{ j.path }}</code></a>
+      <a href="/ui/journal/{{ group.name }}/{{ j.number }}">{{ j.method }} <code>{{ j.path }}</code></a>
     </li>
   {%- else %}
     <li id="group-live-empty" class="text-muted">No traffic yet. Hit one of this group's routes to see activity.</li>
@@ -118,7 +118,7 @@
 <script>
 (function () {
   // Group-detail live pane: same EventSource pattern as the
-  // /__ui/journal/live page, scoped to this group via ?group=.
+  // /ui/journal/live page, scoped to this group via ?group=.
   // Prepend a row for each `handled` event; cap the list at 25.
   var list = document.getElementById("group-live");
   if (!list) return;
@@ -140,7 +140,7 @@
       li.innerHTML =
         '<code>' + fmtTime(e.created_at) + '</code> ' +
         '<span class="status status-' + statusClass(e.response.status) + '">' + e.response.status + '</span> ' +
-        '<a href="/__ui/journal/' + encodeURIComponent(e.group_name) + '/' + e.number + '">' +
+        '<a href="/ui/journal/' + encodeURIComponent(e.group_name) + '/' + e.number + '">' +
         e.request.method + ' <code>' + e.request.path + '</code></a>';
       var empty = document.getElementById("group-live-empty");
       if (empty) empty.remove();
@@ -152,22 +152,22 @@
 </script>
 
 <footer class="page-footer">
-  <a class="link" href="/__ui/journal/live?group={{ group.name }}">Full journal</a>
+  <a class="link" href="/ui/journal/live?group={{ group.name }}">Full journal</a>
   <span class="text-muted">·</span>
-  <a class="link" href="/__ui/groups/{{ group.name }}/state">Group state</a>
+  <a class="link" href="/ui/groups/{{ group.name }}/state">Group state</a>
   <span class="text-muted">·</span>
-  <a class="link" href="/__ui/groups/{{ group.name }}/match">Match probe</a>
+  <a class="link" href="/ui/groups/{{ group.name }}/match">Match probe</a>
   <span class="text-muted">·</span>
-  <a class="btn btn--ghost" download href="/__ui/groups/{{ group.name }}/export?format=yaml"
+  <a class="btn btn--ghost" download href="/ui/groups/{{ group.name }}/export?format=yaml"
      data-wm-save="{{ group.name }}.yaml">Export spec</a>
   <span class="text-muted">·</span>
-  <form method="post" action="/__ui/groups/{{ group.name }}/journal/clear" class="inline-form"
+  <form method="post" action="/ui/groups/{{ group.name }}/journal/clear" class="inline-form"
         onsubmit="return confirm('Clear all journal entries for {{ group.name }}? Routes and state are kept.');">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <button type="submit" class="btn btn--ghost">Clear journal</button>
   </form>
   <span class="text-muted">·</span>
-  <form method="post" action="/__ui/groups/{{ group.name }}/delete" class="inline-form"
+  <form method="post" action="/ui/groups/{{ group.name }}/delete" class="inline-form"
         onsubmit="return confirm('Delete {{ group.name }} and all its routes? This can\'t be undone.');">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <button type="submit" class="btn btn--danger">Delete group</button>

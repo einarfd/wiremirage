@@ -4,27 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ page_title }} — WireMirage</title>
-<link rel="stylesheet" href="/__ui/static/wm.css">
+<link rel="stylesheet" href="/ui/static/wm.css">
 {%- block head %}{% endblock %}
 </head>
 <body>
 <header class="app-header">
   <div class="app-header__inner">
-    <a class="app-brand" href="/__ui/">WireMirage</a>
+    <a class="app-brand" href="/ui/">WireMirage</a>
     <nav class="app-nav" aria-label="Primary">
-      <a href="/__ui/">Home</a>
-      <a href="/__ui/connect">Connect</a>
-      <a href="/__ui/groups">Groups</a>
-      <a href="/__ui/routes">Routes</a>
-      <a href="/__ui/journal/live">Live</a>
-      <a href="/__ui/unmatched">Unmatched</a>
-      <a href="/__ui/me/tokens">Tokens</a>
+      <a href="/ui/">Home</a>
+      <a href="/ui/connect">Connect</a>
+      <a href="/ui/groups">Groups</a>
+      <a href="/ui/routes">Routes</a>
+      <a href="/ui/journal/live">Live</a>
+      <a href="/ui/unmatched">Unmatched</a>
+      <a href="/ui/me/tokens">Tokens</a>
     </nav>
     {% if user %}
     <div class="app-user">
       <span class="app-user__name">{{ user.name }}</span>
       {%- if user.is_admin %}<span class="badge badge--admin">admin</span>{% endif %}
-      <form method="post" action="/__auth/logout" class="logout-form">
+      <form method="post" action="/auth/logout" class="logout-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button type="submit" class="link-button">Log out</button>
       </form>

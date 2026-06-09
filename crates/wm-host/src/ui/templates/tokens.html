@@ -4,7 +4,7 @@
 <section class="page-header">
   <h1>API tokens</h1>
   <p class="text-muted">
-    Tokens authenticate <code>wm</code>, MCP, and curl against this host's <code>/__api/*</code>.
+    Tokens authenticate <code>wm</code>, MCP, and curl against this host's <code>/api/*</code>.
     They belong to you; admins manage other users' tokens via the CLI.
   </p>
 </section>
@@ -30,7 +30,7 @@
   <header class="card__header">
     <h2>Create a new token</h2>
   </header>
-  <form method="post" action="/__ui/me/tokens" class="filter-form">
+  <form method="post" action="/ui/me/tokens" class="filter-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <label class="filter-field">
       <span class="filter-field__label">Name</span>
@@ -79,13 +79,13 @@
         <td class="text-muted">{% if t.last_used_at %}{{ t.last_used_at }}{% else %}never{% endif %}</td>
         <td class="text-muted">{% if t.expires_at %}{{ t.expires_at }}{% else %}—{% endif %}</td>
         <td class="token-actions">
-          <form method="post" action="/__ui/me/tokens/{{ t.name }}/rename" class="inline-form"
+          <form method="post" action="/ui/me/tokens/{{ t.name }}/rename" class="inline-form"
                 onsubmit="var n = prompt('New name for {{ t.name }}:', '{{ t.name }}'); if (!n || n === '{{ t.name }}') return false; this.new_name.value = n; return true;">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <input type="hidden" name="new_name" value="">
             <button type="submit" class="btn btn--ghost">Rename</button>
           </form>
-          <form method="post" action="/__ui/me/tokens/{{ t.name }}/revoke" class="inline-form" onsubmit="return confirm('Revoke {{ t.name }}? This can\'t be undone.');">
+          <form method="post" action="/ui/me/tokens/{{ t.name }}/revoke" class="inline-form" onsubmit="return confirm('Revoke {{ t.name }}? This can\'t be undone.');">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <button type="submit" class="btn btn--ghost">Revoke</button>
           </form>
@@ -132,7 +132,7 @@
         <td class="text-muted">{{ g.granted_at }}</td>
         <td class="text-muted">{{ g.expires_at }}</td>
         <td class="token-actions">
-          <form method="post" action="/__ui/me/tokens/oauth/{{ g.client_id }}/revoke" class="inline-form"
+          <form method="post" action="/ui/me/tokens/oauth/{{ g.client_id }}/revoke" class="inline-form"
                 onsubmit="return confirm('Revoke access for {{ g.client_name }}? This can\'t be undone.');">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <button type="submit" class="btn btn--ghost">Revoke</button>

@@ -44,10 +44,10 @@ trap 'kill "$HOST_PID" 2>/dev/null || true' EXIT
 
 echo "waiting for host on ${BASE} ..."
 for _ in $(seq 1 180); do
-  curl -fsS "${BASE}/__health" >/dev/null 2>&1 && break
+  curl -fsS "${BASE}/health" >/dev/null 2>&1 && break
   sleep 1
 done
-curl -fsS "${BASE}/__health" >/dev/null || { echo "host never became ready"; exit 1; }
+curl -fsS "${BASE}/health" >/dev/null || { echo "host never became ready"; exit 1; }
 
 fail=0
 for lane in "${LANES[@]}"; do
@@ -58,7 +58,7 @@ for lane in "${LANES[@]}"; do
   # Each lane is a group spec (spec.json): a group name + routes that reference
   # their handler by source_file. Inline each source_file into `source`
   # (jq -Rs JSON-encodes the file, so handler quoting/newlines survive intact)
-  # and import the whole group in one shot via POST /__api/groups/import — the
+  # and import the whole group in one shot via POST /api/groups/import — the
   # same spec round-trip the CLI / MCP / UI use (ADR-0030). The group name
   # doubles as the subdomain the client addresses mock traffic on.
   spec="${lane}/spec.json"
@@ -71,7 +71,7 @@ for lane in "${LANES[@]}"; do
     routes=$(jq -c --argjson r "$route" '. + [$r]' <<<"$routes")
   done < <(jq -c '.routes[]' "$spec")
   payload=$(jq -c --argjson r "$routes" '.routes = $r' "$spec")
-  curl -fsS -X POST "${BASE}/__api/groups/import" \
+  curl -fsS -X POST "${BASE}/api/groups/import" \
     -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' \
     -d "$payload" >/dev/null
   echo "  imported group ${group} ($(jq '.routes | length' <<<"$payload") route(s))"

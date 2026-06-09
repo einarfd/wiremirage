@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 
     // GitHub OAuth (slice 50, ADR-0010). Optional. When configured,
     // the login page shows a "Continue with GitHub" button and the
-    // `/__auth/start/github` + `/__auth/callback` routes are live.
+    // `/auth/start/github` + `/auth/callback` routes are live.
     // SESSION_SECRET is required when GitHub login is enabled — the
     // callback flow can't mint a cookie otherwise. Errors at parse
     // time (partial credentials, missing allow rules) bubble up here
@@ -236,7 +236,7 @@ fn configure_local_auth(mut state: AppState, storage: Storage) -> anyhow::Result
             }
             tracing::info!(
                 "SESSION_SECRET unset and no browser-login methods configured; \
-                 `/__api/*` will only accept bearer tokens"
+                 `/api/*` will only accept bearer tokens"
             );
         }
     }
@@ -279,7 +279,7 @@ fn bootstrap_admin_if_requested(auth: &Auth) -> anyhow::Result<()> {
             } else {
                 tracing::info!(
                     "WM_BOOTSTRAP_TOKEN provided but bootstrap user already exists; ignoring \
-                     (rotate via /__api/tokens or by deleting the bootstrap user first)"
+                     (rotate via /api/tokens or by deleting the bootstrap user first)"
                 );
             }
             Ok(())

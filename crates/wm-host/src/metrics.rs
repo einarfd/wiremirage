@@ -276,7 +276,7 @@ pub fn record_streaming_completion(chunks: u64, bytes: u64, disposition: &str, d
 
 /// Record a control-plane HTTP request completion (ADR-0024 slice 2).
 /// `route` is the matched axum route template (e.g.
-/// `/__api/groups/{group}`), NOT the resolved path — path-param values
+/// `/api/groups/{group}`), NOT the resolved path — path-param values
 /// would explode cardinality. `surface` is one of the bounded
 /// [`Surface`] labels. `duration_s` is in seconds per HTTP semconv.
 pub fn record_internal_http(

@@ -79,7 +79,7 @@ fn default_scopes() -> Vec<String> {
 /// Which credential satisfied the auth check. Lets downstream
 /// handlers branch on token-vs-session if needed (e.g. forbid
 /// session-only callers from a programmatic-only endpoint). Today
-/// all `/__api/*` handlers treat both the same.
+/// all `/api/*` handlers treat both the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialKind {
     Token,

@@ -78,13 +78,6 @@ impl StreamSummary {
     }
 }
 
-/// Path prefixes the host owns; user routes can never claim them. Requests
-/// that don't match any actual host endpoint under these prefixes return
-/// 404 directly rather than falling through to the route table — that way
-/// a typo in `/__api/...` doesn't accidentally execute a user handler.
-const RESERVED_PREFIXES: &[&str] = &["/__api/", "/__ui/", "/__auth/", "/__admin/"];
-const RESERVED_EXACT: &[&str] = &["/__health", "/__ready", "/__api", "/__ui", "/__auth"];
-
 /// Which routing target a request's `Host` header resolves to under
 /// virtual-host routing (ADR-0030).
 enum HostKind {
@@ -183,7 +176,7 @@ pub struct AppState {
     /// GitHub OAuth config, populated when both `WM_GITHUB_CLIENT_ID`
     /// and `WM_GITHUB_CLIENT_SECRET` are set. `None` means the login
     /// page hides the "Continue with GitHub" button and the
-    /// `/__auth/start/github` + `/__auth/callback` routes respond
+    /// `/auth/start/github` + `/auth/callback` routes respond
     /// 503. Kept behind `Arc` so cloning `AppState` shares it.
     github_oauth: Option<Arc<crate::github_oauth::GitHubConfig>>,
 }
@@ -317,10 +310,10 @@ impl AppState {
     }
 }
 
-/// Build the axum router. The REST API mounts at `/__api/*`; mock-traffic
+/// Build the axum router. The REST API mounts at `/api/*`; mock-traffic
 /// dispatch is the fallback. The fallback rejects requests under reserved
-/// prefixes (e.g., `/__api/typo`) with 404 before consulting user routes.
-/// MCP (`/__api/mcp`) merges in as a separate sub-router with its own
+/// prefixes (e.g., `/api/typo`) with 404 before consulting user routes.
+/// MCP (`/api/mcp`) merges in as a separate sub-router with its own
 /// auth layer.
 pub fn router(state: AppState) -> Router {
     let mcp = crate::mcp::router(state.clone());
@@ -336,13 +329,39 @@ pub fn router(state: AppState) -> Router {
     crate::api::router()
         .merge(crate::auth_api::router(state.clone()))
         .merge(crate::mcp_oauth::router(state.clone()))
-        .route("/__health", get(health))
-        .route("/__ready", get(ready))
+        .route("/health", get(health))
+        .route("/ready", get(ready))
         .route_layer(middleware::from_fn(internal_http_metrics))
         .fallback(any(dispatch))
-        .with_state(state)
+        .with_state(state.clone())
         .merge(mcp)
         .merge(ui)
+        // ADR-0033: control-plane is served on the apex (and on direct/loopback
+        // access); a recognized `{group}.{apex}` subdomain is pure mock space,
+        // so divert it to mock dispatch before any control-plane route can
+        // match — letting a tenant mock /health, /api/*, /auth/*, etc.
+        .layer(middleware::from_fn_with_state(
+            state,
+            control_plane_apex_gate,
+        ))
+}
+
+/// ADR-0033 apex-only control-plane routing. The control-plane surfaces
+/// (/api, /ui, /auth, /health, /ready, MCP) live at the apex. A request to a
+/// recognized `{group}.{apex}` subdomain is mock traffic for that group, so we
+/// divert it to mock dispatch before the path-based control-plane routes can
+/// match — that is what lets a tenant mock /health, /api/*, /auth/*, etc.
+/// Everything else (the apex itself, direct IP / loopback access) falls through
+/// to the control-plane router, which is auth-gated as before.
+async fn control_plane_apex_gate(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    match resolve_host_kind(req.headers(), state.apex_host()) {
+        HostKind::Group(_) => dispatch(State(state), req).await,
+        _ => next.run(req).await,
+    }
 }
 
 /// Map a matched axum route template to its control-plane surface label,
@@ -350,13 +369,13 @@ pub fn router(state: AppState) -> Router {
 /// frequency, low operator value). The label space is a fixed enum so
 /// `wm.surface` stays bounded. ADR-0024 slice 2.
 fn surface_for_route(route: &str) -> Option<&'static str> {
-    if route.starts_with("/__api/mcp") {
+    if route.starts_with("/api/mcp") {
         Some("mcp")
-    } else if route.starts_with("/__api") {
+    } else if route.starts_with("/api") {
         Some("api")
-    } else if route.starts_with("/__ui") {
+    } else if route.starts_with("/ui") {
         Some("ui")
-    } else if route.starts_with("/__auth") || route.starts_with("/.well-known") {
+    } else if route.starts_with("/auth") || route.starts_with("/.well-known") {
         Some("auth")
     } else {
         None
@@ -367,7 +386,7 @@ fn surface_for_route(route: &str) -> Option<&'static str> {
 /// the `http.server.*` metrics AND opens a request span so internal
 /// traffic shows up in traces with per-route latency — the analogue of
 /// arkiv's framework-level request spans, and what lets a trace backend
-/// answer "p95 latency for `/__api/groups/{group}`" that the routeless
+/// answer "p95 latency for `/api/groups/{group}`" that the routeless
 /// aggregate metrics can't.
 ///
 /// The route *template* comes from `MatchedPath` (never the resolved
@@ -402,7 +421,7 @@ async fn internal_http_metrics(req: Request, next: Next) -> Response {
     }
 
     // Static-asset routes get metrics but no span (volume control).
-    let span = if route.starts_with("/__ui/static") {
+    let span = if route.starts_with("/ui/static") {
         tracing::Span::none()
     } else {
         tracing::info_span!(
@@ -467,13 +486,9 @@ async fn ready(State(state): State<AppState>) -> Response {
     (status, Json(body)).into_response()
 }
 
-pub fn is_reserved_path(path: &str) -> bool {
-    RESERVED_EXACT.contains(&path) || RESERVED_PREFIXES.iter().any(|&p| path.starts_with(p))
-}
-
 /// True iff the request carries a `wm_session` cookie that resolves to
 /// a live session. Used by the bare-`/` redirect to pick between
-/// `/__ui/` (signed in) and `/__auth/login` (not). Reuses the same
+/// `/ui/` (signed in) and `/auth/login` (not). Reuses the same
 /// cookie name and verification as `ui::auth_redirect::require_session`
 /// — slightly duplicated cookie parsing, but the alternative (extract
 /// a shared helper) is a tiny refactor for a tiny win.
@@ -581,32 +596,14 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
 
     let path = uri.path();
 
-    // Reserved paths never reach user routes. Any sub-router (slice 3+
-    // mounts /__api/* here) takes precedence; if nothing else matched, a
-    // request under a reserved prefix is a typo, not mock traffic — and
-    // intentionally NOT journaled (typos shouldn't pollute the
-    // unmatched log; if operators want them, they're in stderr/OTel).
-    //
-    // For `/__ui/*` typos specifically, render a branded HTML 404
-    // page so a human pointing a browser at a wrong URL lands on the
-    // app shell instead of a JSON error blob. Everything else under a
-    // reserved prefix (`/__api/typo`, `/__auth/typo`) stays JSON —
-    // those surfaces are consumed by scripts and agents that want a
-    // parseable error.
-    //
-    // ADR-0024: no metrics recorded here — the `wm.*` metric family is
-    // mock-traffic-only, and a typo under a reserved prefix is
-    // internal-shaped. Skipped intentionally.
-    if is_reserved_path(path) {
-        span.record("outcome", "reserved_path_404");
-        let mut resp = if path.starts_with("/__ui/") {
-            crate::ui::render_not_found(&state, path)
-        } else {
-            not_found_response("reserved path")
-        };
-        inject_response_trace_id(&trace_id, resp.headers_mut());
-        return Ok(resp);
-    }
+    // ADR-0033: there are no globally reserved paths. The control-plane
+    // surfaces (/api, /ui, /auth, /health, /ready, MCP) are served by the
+    // router on the apex / direct-access hosts; a request to a `{group}.{apex}`
+    // subdomain is diverted to mock dispatch wholesale by
+    // `control_plane_apex_gate` before it can reach the router, so a tenant can
+    // mock any path. A request reaching this fallback is therefore either an
+    // unmatched apex path (handled in the `Apex` arm below — including the
+    // branded `/ui/*` 404) or mock traffic on a subdomain.
 
     // ADR-0024: claim a mock-dispatch in-flight slot now that we've
     // ruled out internal-prefix traffic. The guard decrements on drop,
@@ -616,53 +613,43 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let mut in_flight = Some(crate::metrics::dispatch_in_flight(method.as_str()));
     crate::metrics::record_request_body_bytes(method.as_str(), body_bytes.len() as u64);
 
-    // Resolve the request Host to a group (ADR-0030 virtual-host routing).
-    // Mock traffic is served on `{group}.{apex}`; the apex is control-plane
-    // only, and anything that isn't a subdomain of the apex has no group to
-    // attribute to.
+    // Resolve the request Host to a group (ADR-0030 / ADR-0033 virtual-host
+    // routing). Mock traffic is served on `{group}.{apex}` subdomains. A
+    // group subdomain is diverted to mock dispatch by `control_plane_apex_gate`
+    // before routing, so reaching this fallback for a non-subdomain host (the
+    // apex itself, loopback, a bare IP) means an *unmatched control-plane path*
+    // — the host serves no mock traffic, so it's never journaled (no group to
+    // attribute it to).
     let group_name = match resolve_host_kind(&header_map, state.apex_host()) {
-        HostKind::Apex => {
-            // Bare `GET /` on the apex bounces a human to the UI (with a
-            // session) or login (without) — route-model.md. It deliberately
-            // isn't journaled: pointing a browser at the apex isn't a
-            // "missing mock" signal. Every other apex request is
-            // control-plane-only territory — the apex serves no mock
-            // traffic — so it's a plain 404 with no journal (no group to
-            // attribute it to).
+        HostKind::Apex | HostKind::Foreign => {
+            // Bare `GET /` bounces a human to the UI (with a session) or login.
             if method == http::Method::GET && path == "/" {
                 let target = if has_valid_session(&state, &header_map) {
-                    "/__ui/"
+                    "/ui/"
                 } else {
-                    "/__auth/login"
+                    "/auth/login"
                 };
                 span.record("outcome", "root_redirect");
                 let mut resp = axum::response::Redirect::to(target).into_response();
                 inject_response_trace_id(&trace_id, resp.headers_mut());
                 return Ok(resp);
             }
-            span.record("outcome", "apex_no_mock_404");
+            // A `/ui/*` path that no UI route matched is a human at a bad URL —
+            // render the branded HTML 404 page rather than a JSON blob.
+            if path.starts_with("/ui/") {
+                span.record("outcome", "ui_not_found");
+                let mut resp = crate::ui::render_not_found(&state, path);
+                inject_response_trace_id(&trace_id, resp.headers_mut());
+                return Ok(resp);
+            }
+            span.record("outcome", "control_plane_404");
             crate::metrics::record_dispatch(
                 method.as_str(),
                 404,
-                "apex_no_mock_404",
+                "control_plane_404",
                 started.elapsed().as_millis() as u64,
             );
-            let mut resp =
-                not_found_response("mock traffic is served on group subdomains, not the apex");
-            inject_response_trace_id(&trace_id, resp.headers_mut());
-            return Ok(resp);
-        }
-        HostKind::Foreign => {
-            // Host isn't the apex or a subdomain of it — no group to route
-            // to, so 404 with no journal write.
-            span.record("outcome", "unknown_host_404");
-            crate::metrics::record_dispatch(
-                method.as_str(),
-                404,
-                "unknown_host_404",
-                started.elapsed().as_millis() as u64,
-            );
-            let mut resp = not_found_response("unknown host");
+            let mut resp = not_found_response("not found");
             inject_response_trace_id(&trace_id, resp.headers_mut());
             return Ok(resp);
         }
@@ -1202,7 +1189,7 @@ fn summarize_response(
 /// Maximum size of a mock-dispatch request body. Per storage-model.md's
 /// `limits.request_body_size: 10MiB`. Anything larger gets rejected
 /// with 413 *before* the handler is touched — protects the host from
-/// OOM-by-curl. Path /__api/* uses its own (larger) limit so wasm
+/// OOM-by-curl. Path /api/* uses its own (larger) limit so wasm
 /// uploads still fit.
 pub(crate) const MAX_DISPATCH_BODY_BYTES: usize = 10 * 1024 * 1024;
 

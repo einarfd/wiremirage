@@ -2,9 +2,9 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/groups/{{ route.group_name }}">{{ route.group_name }}</a>
+  <a href="/ui/groups/{{ route.group_name }}">{{ route.group_name }}</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">{{ route.methods }} {{ route.path }}</span>
 </nav>
@@ -12,7 +12,7 @@
 <header class="page-header">
   <h1><code>{{ route.methods }} {{ route.path }}</code></h1>
   <p class="text-muted">
-    #{{ route.number }} in <a href="/__ui/groups/{{ route.group_name }}">{{ route.group_name }}</a> ·
+    #{{ route.number }} in <a href="/ui/groups/{{ route.group_name }}">{{ route.group_name }}</a> ·
     {% if route.hits_total > 0 -%}
     <strong>{{ route.hits_total }} hit{% if route.hits_total != 1 %}s{% endif %}</strong>, last {{ route.last_hit_at }}
     {%- else -%}
@@ -42,7 +42,7 @@
 <section class="card">
   <header class="card__header">
     <h2>Recent journal entries</h2>
-    <a class="link" href="/__ui/journal/live?group={{ route.group_name }}">View full journal &rarr;</a>
+    <a class="link" href="/ui/journal/live?group={{ route.group_name }}">View full journal &rarr;</a>
   </header>
   {% if journal | length == 0 %}
   <p class="empty-state">No journal entries for this route yet.</p>
@@ -60,7 +60,7 @@
     <tbody>
     {%- for j in journal %}
       <tr>
-        <td><a href="/__ui/journal/{{ route.group_name }}/{{ j.number }}"><time datetime="{{ j.created_at }}">{{ j.created_at }}</time></a></td>
+        <td><a href="/ui/journal/{{ route.group_name }}/{{ j.number }}"><time datetime="{{ j.created_at }}">{{ j.created_at }}</time></a></td>
         <td class="text-muted">{{ j.number }}</td>
         <td><span class="status status-{{ j.status_class }}">{{ j.status }}</span></td>
         <td>{{ j.duration_ms }} ms</td>
@@ -80,7 +80,7 @@
   {% if route.source %}
   <div class="ace-host ace-host--viewer" data-wm-ace="{{ route.language }}" data-wm-ace-readonly aria-label="Handler source">{{ route.source }}</div>
   <div class="action-row">
-    <a class="btn btn--ghost" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/source/edit">Edit source</a>
+    <a class="btn btn--ghost" href="/ui/routes/{{ route.group_name }}/{{ route.number }}/source/edit">Edit source</a>
     <span class="text-muted">
       Saving recompiles via the sidecar and swaps the artifact in place.
     </span>
@@ -94,11 +94,11 @@
 </section>
 
 <footer class="page-footer">
-  <a class="link" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/state">Route state</a>
+  <a class="link" href="/ui/routes/{{ route.group_name }}/{{ route.number }}/state">Route state</a>
   <span class="text-muted">·</span>
-  <a class="link" href="/__ui/routes/{{ route.group_name }}/{{ route.number }}/dry-run">Run dry-run</a>
+  <a class="link" href="/ui/routes/{{ route.group_name }}/{{ route.number }}/dry-run">Run dry-run</a>
   <span class="text-muted">·</span>
-  <form method="post" action="/__ui/routes/{{ route.group_name }}/{{ route.number }}/delete" class="inline-form"
+  <form method="post" action="/ui/routes/{{ route.group_name }}/{{ route.number }}/delete" class="inline-form"
         onsubmit="return confirm('Delete {{ route.methods }} {{ route.path }}? This can\'t be undone.');">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <button type="submit" class="btn btn--danger">Delete route</button>
@@ -106,11 +106,11 @@
 </footer>
 
 {% if route.source %}
-<script src="/__ui/static/ace/ace.js"></script>
-<script src="/__ui/static/ace/mode-javascript.js"></script>
-<script src="/__ui/static/ace/mode-typescript.js"></script>
-<script src="/__ui/static/ace/theme-github_light_default.js"></script>
-<script src="/__ui/static/ace/theme-github_dark.js"></script>
-<script src="/__ui/static/wm-ace.js"></script>
+<script src="/ui/static/ace/ace.js"></script>
+<script src="/ui/static/ace/mode-javascript.js"></script>
+<script src="/ui/static/ace/mode-typescript.js"></script>
+<script src="/ui/static/ace/theme-github_light_default.js"></script>
+<script src="/ui/static/ace/theme-github_dark.js"></script>
+<script src="/ui/static/wm-ace.js"></script>
 {% endif %}
 {% endblock %}

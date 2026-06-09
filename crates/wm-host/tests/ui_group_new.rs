@@ -65,12 +65,12 @@ async fn start() -> Harness {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf value");
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -110,7 +110,7 @@ async fn group_new_form_renders() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/groups/new"))
+        .get(url(&h, "/ui/groups/new"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -130,7 +130,7 @@ async fn group_new_submit_creates_and_redirects() {
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/groups/new"))
+        .post(url(&h, "/ui/groups/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -142,12 +142,12 @@ async fn group_new_submit_creates_and_redirects() {
     assert_eq!(resp.status().as_u16(), 303, "303 on success");
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/__ui/groups/my-tenant"
+        "/ui/groups/my-tenant"
     );
 
     // Following the redirect proves the group really exists.
     let detail = client
-        .get(url(&h, "/__ui/groups/my-tenant"))
+        .get(url(&h, "/ui/groups/my-tenant"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -162,7 +162,7 @@ async fn group_new_submit_auto_names_when_blank() {
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/groups/new"))
+        .post(url(&h, "/ui/groups/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&name=&ttl_seconds=&sliding_ttl=on"))
@@ -172,11 +172,11 @@ async fn group_new_submit_auto_names_when_blank() {
     assert_eq!(resp.status().as_u16(), 303);
     let loc = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(
-        loc.starts_with("/__ui/groups/"),
+        loc.starts_with("/ui/groups/"),
         "redirected to a group: {loc}"
     );
     assert_ne!(
-        loc, "/__ui/groups/new",
+        loc, "/ui/groups/new",
         "got an auto-assigned name, not 'new'"
     );
 }
@@ -187,7 +187,7 @@ async fn group_new_submit_rejects_invalid_name() {
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/groups/new"))
+        .post(url(&h, "/ui/groups/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         // Uppercase + underscore: not a valid DNS label.
@@ -210,7 +210,7 @@ async fn group_new_submit_without_csrf_is_forbidden() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/groups/new"))
+        .post(url(&h, "/ui/groups/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body("name=x&ttl_seconds=&sliding_ttl=on") // _csrf omitted
@@ -246,7 +246,7 @@ async fn import_form_renders() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/groups/import"))
+        .get(url(&h, "/ui/groups/import"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -271,7 +271,7 @@ async fn import_creates_group_and_redirects() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let spec = SPEC_YAML.replace("PLACEHOLDER", "ui-import");
     let resp = client
-        .post(url(&h, "/__ui/groups/import"))
+        .post(url(&h, "/ui/groups/import"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -284,11 +284,11 @@ async fn import_creates_group_and_redirects() {
     assert!((300..400).contains(&resp.status().as_u16()));
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/__ui/groups/ui-import"
+        "/ui/groups/ui-import"
     );
     // The group landed.
     let detail = client
-        .get(url(&h, "/__ui/groups/ui-import"))
+        .get(url(&h, "/ui/groups/ui-import"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -304,7 +304,7 @@ async fn import_bad_spec_is_400() {
     // Route missing `source` — parses, but normalize (in import_core) rejects.
     let spec = "name: bad-import\nroutes:\n  - method: POST\n    path: /x\n";
     let resp = client
-        .post(url(&h, "/__ui/groups/import"))
+        .post(url(&h, "/ui/groups/import"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -324,7 +324,7 @@ async fn export_downloads_a_spec() {
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let spec = SPEC_YAML.replace("PLACEHOLDER", "exp");
     client
-        .post(url(&h, "/__ui/groups/import"))
+        .post(url(&h, "/ui/groups/import"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -336,7 +336,7 @@ async fn export_downloads_a_spec() {
         .unwrap();
 
     let resp = client
-        .get(url(&h, "/__ui/groups/exp/export?format=yaml"))
+        .get(url(&h, "/ui/groups/exp/export?format=yaml"))
         .header("cookie", &cookie)
         .send()
         .await

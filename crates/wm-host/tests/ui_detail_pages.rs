@@ -6,7 +6,7 @@
 //!   * Route detail renders metadata
 //!   * Non-admin sees 403 on someone else's group / route
 //!   * Unknown group / route → 404 (rendered placeholder)
-//!   * `GET /` → 302 to `/__ui/` with session, `/__auth/login` without
+//!   * `GET /` → 302 to `/ui/` with session, `/auth/login` without
 //!   * `GET /` is shadowed by a user-defined `GET /` route
 
 use std::sync::Arc;
@@ -126,13 +126,13 @@ async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
     // wm_csrf cookie + read the embedded `_csrf` form value, then POST
     // with both. Returns the combined cookie string callers send back
     // on subsequent requests.
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf form value");
 
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -163,7 +163,7 @@ fn extract_csrf_value(body: &str) -> Option<String> {
     Some(body[start..start + end].to_string())
 }
 
-// -- /__ui/groups/{group} ---------------------------------------------------
+// -- /ui/groups/{group} ---------------------------------------------------
 
 #[tokio::test]
 async fn group_detail_renders_metadata_and_routes_for_owner() {
@@ -172,7 +172,7 @@ async fn group_detail_renders_metadata_and_routes_for_owner() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -189,13 +189,13 @@ async fn group_detail_renders_metadata_and_routes_for_owner() {
     assert!(body.contains("charges"), "route path visible");
     // + Add route button surfaces the slice-29 creation form.
     assert!(
-        body.contains("/__ui/routes/new?group=stripe-mock"),
+        body.contains("/ui/routes/new?group=stripe-mock"),
         "add-route link visible: {body}"
     );
     // Export spec is an action button (Save-As enhanced), not a plain link:
     // styled as a button, carries `download` + the suggested filename.
     assert!(
-        body.contains("/__ui/groups/stripe-mock/export?format=yaml")
+        body.contains("/ui/groups/stripe-mock/export?format=yaml")
             && body.contains("data-wm-save=\"stripe-mock.yaml\""),
         "export is a download button: {body}"
     );
@@ -214,7 +214,7 @@ async fn group_detail_404_when_unknown() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let resp = client
-        .get(url(&h, "/__ui/groups/no-such-group"))
+        .get(url(&h, "/ui/groups/no-such-group"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -229,7 +229,7 @@ async fn group_detail_403_for_non_owner_non_admin() {
     let cookie = login_cookie(&h, &client, "alice").await;
 
     let resp = client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -253,7 +253,7 @@ async fn group_detail_includes_live_activity_pane_after_traffic() {
     }
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/groups/stripe-mock"))
+        .get(url(&h, "/ui/groups/stripe-mock"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -267,7 +267,7 @@ async fn group_detail_includes_live_activity_pane_after_traffic() {
     assert!(body.contains("Live activity"));
     assert!(body.contains("status-2xx"), "pre-fetched 2xx entry: {body}");
     assert!(
-        body.contains("/__api/journal/tail?group=stripe-mock"),
+        body.contains("/api/journal/tail?group=stripe-mock"),
         "group-scoped SSE URL present"
     );
 }
@@ -279,7 +279,7 @@ async fn group_detail_admin_can_view_any_group() {
     let cookie = login_cookie(&h, &client, "admin").await;
     // admin views alice's group
     let resp = client
-        .get(url(&h, "/__ui/groups/alice-private"))
+        .get(url(&h, "/ui/groups/alice-private"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -290,7 +290,7 @@ async fn group_detail_admin_can_view_any_group() {
     assert!(body.contains("alice"), "owner column shows alice");
 }
 
-// -- /__ui/routes/{group}/{n} ----------------------------------------------
+// -- /ui/routes/{group}/{n} ----------------------------------------------
 
 #[tokio::test]
 async fn route_detail_renders_metadata_for_owner() {
@@ -299,7 +299,7 @@ async fn route_detail_renders_metadata_for_owner() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -330,7 +330,7 @@ async fn route_detail_404_when_unknown_number() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/stripe-mock/9999"))
+        .get(url(&h, "/ui/routes/stripe-mock/9999"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -344,7 +344,7 @@ async fn route_detail_403_for_non_owner_non_admin() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -369,7 +369,7 @@ async fn route_detail_lists_recent_journal_entries_after_traffic() {
     }
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -395,7 +395,7 @@ async fn route_detail_renders_no_source_stored_for_wasm_upload() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/routes/stripe-mock/1"))
+        .get(url(&h, "/ui/routes/stripe-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -466,7 +466,7 @@ async fn route_detail_renders_stored_source_for_source_language_route() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/routes/ts-mock/1"))
+        .get(url(&h, "/ui/routes/ts-mock/1"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -509,7 +509,7 @@ async fn root_redirects_to_login_when_unauthenticated() {
         resp.status()
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, "/__auth/login");
+    assert_eq!(location, "/auth/login");
 }
 
 #[tokio::test]
@@ -527,7 +527,7 @@ async fn root_redirects_to_ui_when_authenticated() {
         .unwrap();
     assert!((300..400).contains(&resp.status().as_u16()));
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, "/__ui/");
+    assert_eq!(location, "/ui/");
 }
 
 #[tokio::test]

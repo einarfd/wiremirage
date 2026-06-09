@@ -19,7 +19,7 @@ just conformance openai-streaming # one lane
 ```
 
 `run.sh` boots `wm-host` in-memory (native, via cargo), imports each lane's
-group spec (`POST /__api/groups/import` — the same spec round-trip the CLI / MCP
+group spec (`POST /api/groups/import` — the same spec round-trip the CLI / MCP
 / UI use), and runs that lane's client **in Docker** (`--network host`) against
 the host. Requirements on the machine: **Docker + jq + a buildable host** — no
 per-language toolchain on the host itself (that lives in each lane's image). We
@@ -45,7 +45,7 @@ A lane is a subdirectory containing:
 | `Dockerfile` | Builds the client image (its language + SDK, pinned). `CMD` runs the test against `$WM_BASE`. |
 | `spec.json` | The lane's **group spec**: `{ "name": "<group>", "routes": [{ "methods": [...], "path": "...", "language"?: "typescript", "source_file": "handler.ts" }] }`. `run.sh` inlines each `source_file` into `source` and imports the whole group in one call. The group `name` doubles as the subdomain the client addresses. |
 | `<sources>.ts` | The mock handler(s), referenced by `source_file`. |
-| `setup.sh` (optional) | Run after import with `(base, token)` — for lane-specific seeding the routes-only spec can't carry (e.g. `PUT /__api/groups/<group>/state`). |
+| `setup.sh` (optional) | Run after import with `(base, token)` — for lane-specific seeding the routes-only spec can't carry (e.g. `PUT /api/groups/<group>/state`). |
 | the test | Whatever the `Dockerfile`'s `CMD` runs (e.g. `conformance.py`, a Go binary), asserting against `WM_BASE`. |
 | `README.md` | What the lane validates + findings. |
 

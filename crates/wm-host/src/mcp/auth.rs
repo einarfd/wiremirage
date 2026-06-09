@@ -1,6 +1,6 @@
 //! Bearer-token middleware for the MCP route.
 //!
-//! Applies the same authentication policy as `/__api/*`: an
+//! Applies the same authentication policy as `/api/*`: an
 //! `Authorization: Bearer wmt_...` (or `wmm_...`) header must resolve
 //! to a live token via [`Auth::authenticate`]. On success we inject
 //! the resolved [`AuthContext`] into request extensions so tools can

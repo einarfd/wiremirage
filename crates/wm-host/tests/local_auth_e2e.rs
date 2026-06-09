@@ -1,7 +1,7 @@
 //! Tier-2 end-to-end tests for slice 20 (local auth + sessions).
 //!
 //! Drive the full HTTP stack: parse `WM_LOCAL_AUTH`, POST credentials
-//! to `/__auth/login/password`, capture the Set-Cookie, then send it
+//! to `/auth/login/password`, capture the Set-Cookie, then send it
 //! back manually on an authed call. (Manual cookie handling rather
 //! than reqwest's cookie store keeps the workspace's reqwest feature
 //! set minimal.)
@@ -81,7 +81,7 @@ async fn post_login(
     // both. Returns the login POST response unchanged so this helper's
     // existing call sites still work.
     let get = client
-        .get(url(h, "/__auth/login"))
+        .get(url(h, "/auth/login"))
         .send()
         .await
         .expect("get login");
@@ -96,7 +96,7 @@ async fn post_login(
         urlencode(password)
     );
     client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(body)
@@ -221,7 +221,7 @@ async fn session_cookie_authenticates_api_endpoint() {
 
     // Hit an authed endpoint with the cookie (no Authorization header).
     let me = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("cookie", format!("{COOKIE_NAME}={cookie_value}"))
         .send()
         .await
@@ -240,13 +240,13 @@ async fn logout_invalidates_the_cookie() {
     // Slice-25 CSRF: GET login page first to mint the wm_csrf cookie,
     // then POST with it. The logout below also needs the csrf cookie
     // + form field.
-    let login_page = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let login_page = client.get(url(&h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_csrf_set_cookie(&login_page).expect("csrf");
     let csrf_value =
         extract_csrf_form_value(&login_page.text().await.unwrap()).expect("csrf form value");
 
     let login_resp = client
-        .post(url(&h, "/__auth/login/password"))
+        .post(url(&h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -267,7 +267,7 @@ async fn logout_invalidates_the_cookie() {
 
     // Confirm it authenticates first.
     let me = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("cookie", &cookie_header)
         .send()
         .await
@@ -275,7 +275,7 @@ async fn logout_invalidates_the_cookie() {
     assert_eq!(me.status().as_u16(), 200);
 
     let logout = client
-        .post(url(&h, "/__auth/logout"))
+        .post(url(&h, "/auth/logout"))
         .header("cookie", &cookie_header)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf_value}"))
@@ -286,7 +286,7 @@ async fn logout_invalidates_the_cookie() {
 
     // Subsequent call with the now-invalidated cookie → 401.
     let after = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("cookie", &cookie_header)
         .send()
         .await
@@ -298,18 +298,18 @@ async fn logout_invalidates_the_cookie() {
 async fn login_page_renders_form_when_local_auth_is_configured() {
     let h = start("alice:hunter2").await;
     let client = no_redirect_client();
-    let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("Sign in"), "expected form");
-    assert!(body.contains("/__auth/login/password"));
+    assert!(body.contains("/auth/login/password"));
 }
 
 #[tokio::test]
 async fn login_page_says_disabled_when_no_methods_configured() {
     let h = start("").await;
     let client = no_redirect_client();
-    let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body = resp.text().await.unwrap();
     assert!(
@@ -328,7 +328,7 @@ async fn admin_role_in_env_syncs_on_login() {
         extract_cookie_value(login.headers().get("set-cookie").unwrap().to_str().unwrap());
 
     let me = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("cookie", format!("{COOKIE_NAME}={cookie_value}"))
         .send()
         .await
@@ -350,7 +350,7 @@ async fn tampered_session_cookie_returns_401() {
     bytes[last] ^= 0x01;
 
     let resp = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("cookie", format!("{COOKIE_NAME}={cookie_value}"))
         .send()
         .await
@@ -383,7 +383,7 @@ async fn bearer_token_still_works_when_session_store_is_configured() {
 
     let client = Client::new();
     let resp = client
-        .get(url(&h, "/__api/users/me"))
+        .get(url(&h, "/api/users/me"))
         .header("authorization", "Bearer wmt_test")
         .send()
         .await
@@ -457,7 +457,7 @@ async fn cookies_carry_secure_flag_when_enabled() {
     // GET the login page first so the CSRF cookie is minted with the
     // hardening flags in scope.
     let get = client
-        .get(url(&h, "/__auth/login"))
+        .get(url(&h, "/auth/login"))
         .send()
         .await
         .expect("get login");
@@ -488,13 +488,13 @@ async fn forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback() {
         // Burn the CSRF cookie minted per request so each POST has
         // matching cookie + form value; this is what `post_login`
         // already does internally.
-        let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+        let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
         let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
         let csrf_value =
             extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/__ui/",);
+        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/ui/",);
         let _ = client
-            .post(url(&h, "/__auth/login/password"))
+            .post(url(&h, "/auth/login/password"))
             .header("content-type", "application/x-www-form-urlencoded")
             .header("cookie", format!("wm_csrf={csrf_cookie}"))
             .header("x-forwarded-for", format!("203.0.113.{i}"))
@@ -507,12 +507,12 @@ async fn forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback() {
     // we'd see 401 (fresh IP, untouched throttle). With XFF ignored,
     // the loopback bucket is already at the lockout threshold so we
     // see 429.
-    let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
     let csrf_value = extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/__ui/");
+    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/ui/");
     let resp = client
-        .post(url(&h, "/__auth/login/password"))
+        .post(url(&h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .header("x-forwarded-for", "198.51.100.42")
@@ -533,13 +533,13 @@ async fn forwarded_for_honored_when_explicitly_trusted() {
     let client = no_redirect_client();
     // Five failures from one XFF IP locks THAT IP only.
     for i in 1..=5 {
-        let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+        let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
         let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
         let csrf_value =
             extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/__ui/",);
+        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/ui/",);
         let _ = client
-            .post(url(&h, "/__auth/login/password"))
+            .post(url(&h, "/auth/login/password"))
             .header("content-type", "application/x-www-form-urlencoded")
             .header("cookie", format!("wm_csrf={csrf_cookie}"))
             .header("x-forwarded-for", "203.0.113.5")
@@ -550,12 +550,12 @@ async fn forwarded_for_honored_when_explicitly_trusted() {
     }
     // A different XFF IP, with the right password, succeeds (303)
     // because each XFF IP has its own throttle bucket now.
-    let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
     let csrf_value = extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/__ui/");
+    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/ui/");
     let resp = client
-        .post(url(&h, "/__auth/login/password"))
+        .post(url(&h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .header("x-forwarded-for", "198.51.100.42")

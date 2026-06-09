@@ -77,7 +77,7 @@ async fn start() -> Harness {
 /// page. Returns (cookie_value, form_value).
 async fn fetch_csrf(h: &Harness, client: &Client) -> (String, String) {
     let resp = client
-        .get(url(h, "/__auth/login"))
+        .get(url(h, "/auth/login"))
         .send()
         .await
         .expect("get login");
@@ -90,7 +90,7 @@ async fn fetch_csrf(h: &Harness, client: &Client) -> (String, String) {
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
     let (csrf_cookie, csrf_value) = fetch_csrf(h, client).await;
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -128,7 +128,7 @@ async fn tokens_page_renders_empty_state_for_new_user() {
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -151,7 +151,7 @@ async fn create_token_shows_plaintext_once_and_lists_it() {
     let cookie = login_cookie(&h, &client, "admin").await;
     // Read the page-level csrf cookie + form value from the tokens page.
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -159,7 +159,7 @@ async fn create_token_shows_plaintext_once_and_lists_it() {
     let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
 
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&name=laptop&ttl_hours="))
@@ -176,7 +176,7 @@ async fn create_token_shows_plaintext_once_and_lists_it() {
 
     // A subsequent GET no longer shows the plaintext.
     let later = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -197,14 +197,14 @@ async fn revoke_redirects_and_drops_token_from_list() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
     let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
     let _ = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&name=throwaway"))
@@ -213,7 +213,7 @@ async fn revoke_redirects_and_drops_token_from_list() {
         .unwrap();
 
     let revoke = client
-        .post(url(&h, "/__ui/me/tokens/throwaway/revoke"))
+        .post(url(&h, "/ui/me/tokens/throwaway/revoke"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}"))
@@ -227,7 +227,7 @@ async fn revoke_redirects_and_drops_token_from_list() {
     );
 
     let later = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -244,7 +244,7 @@ async fn create_token_empty_name_shows_inline_error() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -252,7 +252,7 @@ async fn create_token_empty_name_shows_inline_error() {
     let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
 
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&name=&ttl_hours="))
@@ -270,7 +270,7 @@ async fn csrf_missing_form_field_is_403() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body("name=oops")
@@ -286,7 +286,7 @@ async fn csrf_mismatched_token_is_403() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body("_csrf=NOT-THE-RIGHT-VALUE&name=oops")
@@ -309,7 +309,7 @@ async fn csrf_missing_cookie_is_403() {
         .trim()
         .to_string();
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", session_only)
         .header("content-type", "application/x-www-form-urlencoded")
         .body("_csrf=anything&name=oops")
@@ -327,14 +327,14 @@ async fn alice_does_not_see_admins_tokens() {
     // Admin creates a token.
     let admin_cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &admin_cookie)
         .send()
         .await
         .unwrap();
     let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
     let _ = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &admin_cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&name=admin-only"))
@@ -347,7 +347,7 @@ async fn alice_does_not_see_admins_tokens() {
     let alice_client = no_redirect_client();
     let alice_cookie = login_cookie(&h, &alice_client, "alice").await;
     let body = alice_client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &alice_cookie)
         .send()
         .await
@@ -365,14 +365,14 @@ async fn ttl_preset_30d_sets_a_30_day_expiry() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
     let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -401,14 +401,14 @@ async fn ttl_preset_never_creates_token_without_expiry() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
     let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -437,14 +437,14 @@ async fn ttl_preset_custom_falls_through_to_hours_field() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
     let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
     let resp = client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
@@ -477,14 +477,14 @@ async fn token_list_sorts_by_name_when_requested() {
     // Create three tokens with names that sort differently from creation order.
     for n in ["gamma", "alpha", "beta"] {
         let page = client
-            .get(url(&h, "/__ui/me/tokens"))
+            .get(url(&h, "/ui/me/tokens"))
             .header("cookie", &cookie)
             .send()
             .await
             .unwrap();
         let csrf = extract_csrf_value(&page.text().await.unwrap()).expect("csrf");
         client
-            .post(url(&h, "/__ui/me/tokens"))
+            .post(url(&h, "/ui/me/tokens"))
             .header("cookie", &cookie)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(format!("_csrf={csrf}&name={n}&ttl_preset=never"))
@@ -494,7 +494,7 @@ async fn token_list_sorts_by_name_when_requested() {
     }
     // Default sort = created desc → beta, alpha, gamma (newest first).
     let default_body = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -506,7 +506,7 @@ async fn token_list_sorts_by_name_when_requested() {
     assert_eq!(default_order, vec!["beta", "alpha", "gamma"]);
     // sort=name asc → alpha, beta, gamma.
     let by_name = client
-        .get(url(&h, "/__ui/me/tokens?sort=name&dir=asc"))
+        .get(url(&h, "/ui/me/tokens?sort=name&dir=asc"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -529,7 +529,7 @@ async fn rename_redirects_and_swaps_token_name() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -537,7 +537,7 @@ async fn rename_redirects_and_swaps_token_name() {
     let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
     // Create then rename.
     client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&name=old-name&ttl_preset=never"))
@@ -545,7 +545,7 @@ async fn rename_redirects_and_swaps_token_name() {
         .await
         .unwrap();
     let resp = client
-        .post(url(&h, "/__ui/me/tokens/old-name/rename"))
+        .post(url(&h, "/ui/me/tokens/old-name/rename"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&new_name=fresh-name"))
@@ -558,7 +558,7 @@ async fn rename_redirects_and_swaps_token_name() {
         resp.status()
     );
     let later = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -576,7 +576,7 @@ async fn rename_collision_shows_inline_error_and_keeps_old_name() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -584,7 +584,7 @@ async fn rename_collision_shows_inline_error_and_keeps_old_name() {
     let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
     for n in ["taken", "renameable"] {
         client
-            .post(url(&h, "/__ui/me/tokens"))
+            .post(url(&h, "/ui/me/tokens"))
             .header("cookie", &cookie)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(format!("_csrf={csrf}&name={n}&ttl_preset=never"))
@@ -593,7 +593,7 @@ async fn rename_collision_shows_inline_error_and_keeps_old_name() {
             .unwrap();
     }
     let resp = client
-        .post(url(&h, "/__ui/me/tokens/renameable/rename"))
+        .post(url(&h, "/ui/me/tokens/renameable/rename"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&new_name=taken"))
@@ -605,7 +605,7 @@ async fn rename_collision_shows_inline_error_and_keeps_old_name() {
     assert!(body.contains("already exists"), "collision error: {body}");
     // Both tokens still present under their original names.
     let later = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -623,14 +623,14 @@ async fn rename_empty_new_name_shows_inline_error() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/__ui/me/tokens"))
+        .get(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
     let csrf = extract_csrf_value(&page.text().await.unwrap()).unwrap();
     client
-        .post(url(&h, "/__ui/me/tokens"))
+        .post(url(&h, "/ui/me/tokens"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&name=x&ttl_preset=never"))
@@ -638,7 +638,7 @@ async fn rename_empty_new_name_shows_inline_error() {
         .await
         .unwrap();
     let resp = client
-        .post(url(&h, "/__ui/me/tokens/x/rename"))
+        .post(url(&h, "/ui/me/tokens/x/rename"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf}&new_name=   "))

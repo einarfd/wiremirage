@@ -150,7 +150,7 @@ pub struct FindRouteNearMiss {
     pub route_path: String,
     pub reason: FindRouteNearMissReason,
     /// Free-form details — shape depends on `reason`. See the host's
-    /// REST `/__api/match` endpoint for the matching JSON contract.
+    /// REST `/api/match` endpoint for the matching JSON contract.
     pub details: JsonValue,
 }
 
@@ -418,7 +418,7 @@ impl WmMcpServer {
             .registry()
             .read_group_by_ref(&args.group)
             .map_err(|_| not_found("group not found"))?;
-        // Owner-or-admin gate, matching the REST `/__api/journal/{group}`
+        // Owner-or-admin gate, matching the REST `/api/journal/{group}`
         // endpoint: admin, or owns at least one route in the group.
         if !auth.is_admin {
             let owned = self

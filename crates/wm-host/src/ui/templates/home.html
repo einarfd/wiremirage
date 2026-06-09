@@ -15,10 +15,10 @@
 <section class="card">
   <header class="card__header">
     <h2>Groups</h2>
-    <a class="link" href="/__ui/groups">View all &rarr;</a>
+    <a class="link" href="/ui/groups">View all &rarr;</a>
   </header>
   {% if groups | length == 0 %}
-  <p class="empty-state">No groups yet. <a class="link" href="/__ui/groups/new">Create one</a> (or <code>wm groups create &lt;name&gt;</code>).</p>
+  <p class="empty-state">No groups yet. <a class="link" href="/ui/groups/new">Create one</a> (or <code>wm groups create &lt;name&gt;</code>).</p>
   {% else %}
   <table class="data-table">
     <thead>
@@ -32,7 +32,7 @@
     <tbody>
     {%- for g in groups %}
       <tr>
-        <td><a href="/__ui/groups/{{ g.name }}">{{ g.name }}</a></td>
+        <td><a href="/ui/groups/{{ g.name }}">{{ g.name }}</a></td>
         <td>{{ g.route_count }}</td>
         <td>{{ g.ttl_seconds }}</td>
         <td>{% if g.last_activity %}<time datetime="{{ g.last_activity }}">{{ g.last_activity }}</time>{% else %}<span class="text-muted">never</span>{% endif %}</td>
@@ -48,11 +48,11 @@
     <h2>Quick actions</h2>
   </header>
   <ul class="action-list">
-    <li><a href="/__ui/connect">Connect an agent (MCP)</a></li>
-    <li><a href="/__ui/groups/new">Create a group</a></li>
-    <li><a href="/__ui/routes/new">Create a route</a></li>
-    <li><a href="/__ui/journal/live">Watch live journal</a></li>
-    <li><a href="/__ui/me/tokens">Manage API tokens</a></li>
+    <li><a href="/ui/connect">Connect an agent (MCP)</a></li>
+    <li><a href="/ui/groups/new">Create a group</a></li>
+    <li><a href="/ui/routes/new">Create a route</a></li>
+    <li><a href="/ui/journal/live">Watch live journal</a></li>
+    <li><a href="/ui/me/tokens">Manage API tokens</a></li>
   </ul>
 </section>
 {% endblock %}

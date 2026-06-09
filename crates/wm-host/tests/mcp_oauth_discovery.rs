@@ -66,7 +66,7 @@ async fn protected_resource_metadata_names_the_mcp_endpoint() {
     let body: Value = resp.json().await.expect("json");
     assert_eq!(
         body["resource"],
-        Value::String(format!("http://{}/__api/mcp", h.addr))
+        Value::String(format!("http://{}/api/mcp", h.addr))
     );
     assert!(
         body["authorization_servers"]
@@ -95,19 +95,19 @@ async fn authorization_server_metadata_advertises_every_required_field() {
     assert_eq!(body["issuer"], Value::String(base.clone()));
     assert_eq!(
         body["authorization_endpoint"],
-        Value::String(format!("{base}/__auth/oauth/authorize"))
+        Value::String(format!("{base}/auth/oauth/authorize"))
     );
     assert_eq!(
         body["token_endpoint"],
-        Value::String(format!("{base}/__auth/oauth/token"))
+        Value::String(format!("{base}/auth/oauth/token"))
     );
     assert_eq!(
         body["registration_endpoint"],
-        Value::String(format!("{base}/__auth/oauth/register"))
+        Value::String(format!("{base}/auth/oauth/register"))
     );
     assert_eq!(
         body["revocation_endpoint"],
-        Value::String(format!("{base}/__auth/oauth/revoke"))
+        Value::String(format!("{base}/auth/oauth/revoke"))
     );
     // PKCE with S256 is mandatory per ADR-0019; explicitly advertise it.
     assert_eq!(
@@ -171,13 +171,13 @@ async fn forwarded_proto_is_honored_when_trust_flag_is_set() {
 
 #[tokio::test]
 async fn mcp_endpoint_401_carries_www_authenticate_discovery_hint() {
-    // ADR-0019 slice D: an unauth'd request to /__api/mcp gets a
+    // ADR-0019 slice D: an unauth'd request to /api/mcp gets a
     // 401 with `WWW-Authenticate: Bearer resource_metadata="..."` so
     // native MCP clients can run discovery against the AS without
     // pre-configuration.
     let h = start(false).await;
     let resp = client()
-        .post(format!("http://{}/__api/mcp", h.addr))
+        .post(format!("http://{}/api/mcp", h.addr))
         // No Authorization header — should trigger the discovery hint.
         .send()
         .await

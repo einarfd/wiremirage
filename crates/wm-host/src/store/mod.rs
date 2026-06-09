@@ -153,7 +153,7 @@ impl Storage {
     }
 
     /// Round-trip a no-op against the backend. Always Ok for in-memory;
-    /// for Valkey, performs a `PING`. Used by `/__ready`.
+    /// for Valkey, performs a `PING`. Used by `/ready`.
     pub fn ping(&self) -> Result<(), StoreError> {
         match self {
             Storage::InMemory(_) => Ok(()),
@@ -271,7 +271,7 @@ impl Bucket {
     /// Delete every key under `user_prefix`. Implemented as `SCAN +
     /// DEL` because Valkey has no native prefix-delete; on the
     /// in-memory backend it walks the map. Used by group lifecycle
-    /// cleanup (cascade-delete and `DELETE /__api/groups/{group}/state`)
+    /// cleanup (cascade-delete and `DELETE /api/groups/{group}/state`)
     /// where we need to wipe a whole namespace at once. Returns the
     /// number of keys actually deleted.
     pub fn delete_with_prefix(&mut self, user_prefix: &str) -> Result<u64, StoreError> {

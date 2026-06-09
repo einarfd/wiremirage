@@ -108,7 +108,7 @@ deliberate project convention.
 
 ## Source-language pipeline (ADR-0020)
 
-`POST /__api/routes` accepts three body shapes (per `rest-api.md`):
+`POST /api/routes` accepts three body shapes (per `rest-api.md`):
 
 - `language: "wasm"` — pre-compiled component bytes. Validated as a
   `wasmtime::component::Component` at create time; per-route component
@@ -140,21 +140,21 @@ reads from `wit/*.wit` independently.
 
 ## Auth (slice 5)
 
-Bearer tokens gate every `/__api/*` endpoint. Mock-traffic dispatch
+Bearer tokens gate every `/api/*` endpoint. Mock-traffic dispatch
 (everything not under a reserved prefix) stays open by design — SUTs
-don't have tokens. The unauthenticated probes `GET /__health` and
-`GET /__ready` are explicitly public.
+don't have tokens. The unauthenticated probes `GET /health` and
+`GET /ready` are explicitly public.
 
 - **Bootstrap.** On first startup, set `WM_BOOTSTRAP_TOKEN=wmt_...`. The
   host creates an admin user named `bootstrap` whose API token is the
   supplied plaintext. Subsequent starts with the same env var are
   no-ops; rotate by deleting the bootstrap user or revoking via
-  `/__api/tokens`. The host **refuses to start** if no users exist and
+  `/api/tokens`. The host **refuses to start** if no users exist and
   `WM_BOOTSTRAP_TOKEN` is unset — this prevents a fresh deployment from
   silently coming up with no way to authenticate.
 - **Token shape.** Plaintext: `wmt_<base64-url-no-pad-of-32-random-bytes>`,
   per ADR-0012. Hashed at rest as SHA-256(plaintext); plaintext appears
-  exactly once, in the response to `POST /__api/tokens`.
+  exactly once, in the response to `POST /api/tokens`.
 - **Test harness.** `crates/wm-host/tests/api_routes.rs` calls
   `Auth::bootstrap_admin("bootstrap", "wmt_test_bootstrap_token")` and
   builds a default `reqwest::Client` carrying that token. Tests that
@@ -166,14 +166,14 @@ don't have tokens. The unauthenticated probes `GET /__health` and
   at create time). DELETE requires `route.owner_id == caller || caller.is_admin`;
   unauthorized callers get 403 `forbidden`. PATCH and admin "act on behalf of"
   flows for tokens land later.
-- **User CRUD.** `/__api/users` exposes POST/GET/PATCH/DELETE plus
-  `GET /__api/users/me`. Admin-only for cross-user actions; any authed
+- **User CRUD.** `/api/users` exposes POST/GET/PATCH/DELETE plus
+  `GET /api/users/me`. Admin-only for cross-user actions; any authed
   caller can read their own record (via `me` or `GET /{name}` when
   `name` is theirs). Three guardrails on destructive ops:
   (a) an admin **cannot delete themselves** (self-lockout protection),
   (b) the system **cannot drop below one admin** (refuse last-admin DELETE
   or PATCH-to-non-admin), (c) a user that **owns routes cannot be deleted** —
-  admins clean up the routes via `/__api/routes/...` first.
+  admins clean up the routes via `/api/routes/...` first.
   PATCH today only mutates `is_admin`; rename is deferred (it overlaps
   with the user-merge operation in the design docs).
 - **Token cascade.** `Auth::delete_user` cascades the user's tokens but
@@ -217,7 +217,7 @@ collector get a clean stderr-only experience.
 Every successful or failed mock-traffic dispatch writes a JSON-encoded
 record to Valkey, plus an `unmatched:*` record for any request that
 reached `dispatch_inner` and didn't match a user route. Reserved-prefix
-404s (typos under `/__api/*`, `/__ui/*`, etc.) are intentionally **not**
+404s (typos under `/api/*`, `/ui/*`, etc.) are intentionally **not**
 journaled — those go to stderr/OTel as host operational logs.
 
 - **Module:** `crates/wm-host/src/journal.rs`. `Journal::record_handled`
@@ -225,9 +225,9 @@ journaled — those go to stderr/OTel as host operational logs.
   ListCursor)` / `get(group_id, n)` / `list_unmatched` / `get_unmatched`
   read it back. Cursor pagination via `?before={n}&limit={n}`, capped
   at 100 entries per page, newest-first.
-- **Endpoints:** `GET /__api/journal/{group}` (list, admin or any
-  group-route owner), `GET /__api/journal/{group}/{n}` (one),
-  `GET /__api/unmatched` (list, admin-only), `GET /__api/unmatched/{n}`
+- **Endpoints:** `GET /api/journal/{group}` (list, admin or any
+  group-route owner), `GET /api/journal/{group}/{n}` (one),
+  `GET /api/unmatched` (list, admin-only), `GET /api/unmatched/{n}`
   (one). Group reference accepts name or ULID.
 - **Storage layout:** `journal:{group_ulid}:{ulid}` is a JSON blob with
   TTL; `journal:by-number:{group_ulid}:{n}` indexes per-group sequence;
@@ -249,7 +249,7 @@ journaled — those go to stderr/OTel as host operational logs.
   this path call `wm_host::telemetry::install_propagator()` because the
   global subscriber is set-once and the test harnesses don't run
   `init`.
-- **What's deferred:** SSE tail (`/__api/journal/{group}/tail`),
+- **What's deferred:** SSE tail (`/api/journal/{group}/tail`),
   near-misses computation on unmatched records (currently `[]`),
   configurable TTLs, OTel logs export.
 
@@ -259,11 +259,11 @@ Groups are first-class lifecycle units. Every route, kv/gkv key, and
 journal entry has a parent group; when the group goes away (explicit
 DELETE *or* Valkey TTL expiry), the children go with it.
 
-- **Endpoints:** `POST/GET /__api/groups`,
-  `GET/PATCH/DELETE /__api/groups/{group}`,
-  `POST /__api/groups/{group}/refresh`,
-  `GET/PUT/DELETE /__api/groups/{group}/state`,
-  `DELETE /__api/groups/{group}/journal`. Owner-or-admin for per-group
+- **Endpoints:** `POST/GET /api/groups`,
+  `GET/PATCH/DELETE /api/groups/{group}`,
+  `POST /api/groups/{group}/refresh`,
+  `GET/PUT/DELETE /api/groups/{group}/state`,
+  `DELETE /api/groups/{group}/journal`. Owner-or-admin for per-group
   actions; non-admin list filters to owned groups.
 - **TTL.** Default 24h, max 30d, configured per-group. `sliding_ttl`
   defaults to `true` — every successful route match in `dispatch_inner`
@@ -287,8 +287,8 @@ DELETE *or* Valkey TTL expiry), the children go with it.
   serve stale routes from their caches until they restart or run
   their own sweep on the same group. Proper fix is Valkey keyspace
   notifications (deferred).
-- **Writable state (ADR-0025).** `PUT /__api/routes/{group}/{n}/state`
-  and `PUT /__api/groups/{group}/state` upsert byte values (others
+- **Writable state (ADR-0025).** `PUT /api/routes/{group}/{n}/state`
+  and `PUT /api/groups/{group}/state` upsert byte values (others
   untouched); `GET .../state?format=snapshot` returns a round-trippable
   dump; reset = clear + write. Registry methods `set_route_state` /
   `set_group_state`; per-key cap 1 MiB enforced at the handler. MCP
@@ -343,7 +343,7 @@ formatting, and exit-code mapping.
   shouldn't repeat it.
 - **Tests.** Three tiers, mirroring the rest of the repo.
   Tier 1 — `wm-core/tests/client_smoke.rs` builds an in-process
-  axum router that mimics `/__api/*` and asserts request bodies,
+  axum router that mimics `/api/*` and asserts request bodies,
   query strings, headers (including User-Agent), and how response
   shapes round-trip. Cheap, fast, the bulk of coverage.
   Tier 2 — `wm-cli/tests/wm_core_against_host.rs` boots a real
@@ -377,7 +377,7 @@ formatting, and exit-code mapping.
 ## MCP server (slice 10)
 
 The MCP server is a `mcp/` module inside `wm-host`, mounted onto the
-host's axum router at `/__api/mcp` via `rmcp::transport::
+host's axum router at `/api/mcp` via `rmcp::transport::
 StreamableHttpService`. It is *not* a separate crate — that would
 have created a circular dep (`wm-mcp` would need `AppState` from
 `wm-host`; `wm-host` would need `wm-mcp` to mount it). Folding the
@@ -386,7 +386,7 @@ allowing tools to be added/tested in isolation.
 
 - **Layout.** `wm-host/src/mcp/`:
   - `mod.rs` — `pub fn router(state) -> axum::Router` that mounts
-    `/__api/mcp` with the bearer-token middleware.
+    `/api/mcp` with the bearer-token middleware.
   - `auth.rs` — middleware that reuses `Auth::authenticate` and
     inserts the resolved `AuthContext` into request extensions.
   - `server.rs` — `WmMcpServer` struct holding `Arc<AppState>` plus
@@ -555,9 +555,9 @@ caller buffer arbitrary bytes into host memory.
 - **`api.rs`**: new `MAX_API_BODY_BYTES = 16 * 1024 *
   1024` (16 MiB) applied as a
   `DefaultBodyLimit::max(...)` layer on the
-  `/__api/*` router. Lifts axum's 2 MiB default so
-  wasm uploads on `POST /__api/routes` + `PATCH
-  /__api/routes/{g}/{n}` aren't artificially cut off.
+  `/api/*` router. Lifts axum's 2 MiB default so
+  wasm uploads on `POST /api/routes` + `PATCH
+  /api/routes/{g}/{n}` aren't artificially cut off.
   Base64 expansion (~33%) means ~12 MiB of raw wasm
   fits — comfortably above componentize-js's typical
   1-3 MiB output. Auth-gated, so the higher limit
@@ -753,7 +753,7 @@ vendored as a script-tag distribution — no JS bundler.
   polish; the wire surface is unchanged. CLI source
   editing was already in via `wm routes update
   --source-file`.
-- **Mode dropdown on `/__ui/routes/new`.** Changing the
+- **Mode dropdown on `/ui/routes/new`.** Changing the
   language `<select>` live-swaps the Ace mode via a tiny
   `window.wmAce.setMode(host, mode)` helper exposed by
   `wm-ace.js`. The host div is stashed on a property
@@ -770,7 +770,7 @@ vendored as a script-tag distribution — no JS bundler.
 ## Source editing on route detail UI (slice 40)
 
 Makes the slice-37 read-only source card editable. New
-`/__ui/routes/{group}/{n}/source/edit` page renders a
+`/ui/routes/{group}/{n}/source/edit` page renders a
 textarea pre-populated with the route's stored source;
 POST forwards to `api::patch_route_core` which runs the
 slice-58 swc transpile (for TS) and swaps the artifact in
@@ -818,7 +818,7 @@ place.
 
 Backfill of the slice-35 deferral: `list_recent_unmatched`
 now ships the slim near-miss list on every entry, so agents
-don't need a second REST hop to `/__api/unmatched/{n}` to
+don't need a second REST hop to `/api/unmatched/{n}` to
 see the "Did you mean…?" candidates.
 
 - **`mcp/tools/discovery.rs`**: `UnmatchedSummary` gains a
@@ -828,7 +828,7 @@ see the "Did you mean…?" candidates.
   record. `#[serde(default)]` so the wire stays
   forward-compatible if a future record was missing the
   field for any reason.
-- **Shape**: identical to what `/__api/unmatched/{n}` and
+- **Shape**: identical to what `/api/unmatched/{n}` and
   the UI already serialise. No new schema. The field is
   present as `[]` (not omitted) when the dispatcher didn't
   find a neighbour — agent code can rely on its shape.
@@ -841,7 +841,7 @@ see the "Did you mean…?" candidates.
 `list_recent_unmatched` returns only a summary (number / method /
 path / near-misses), so an MCP-only agent could see *that* an
 unknown path was hit but not the **headers/body** the SUT sent —
-it had to drop to REST `GET /__api/unmatched/{n}`. `show_unmatched`
+it had to drop to REST `GET /api/unmatched/{n}`. `show_unmatched`
 (`mcp/tools/discovery.rs`, admin-only, wraps `Journal::get_unmatched`)
 returns the full `UnmatchedRecord`. This is the actual gap behind the
 first user's "#5 catch-all / echo route" ask: the unmatched journal
@@ -855,7 +855,7 @@ empty the unmatched journal. Test:
 
 ## Source viewer on route detail UI (slice 37)
 
-`/__ui/routes/{group}/{n}` now renders a "Handler source" card
+`/ui/routes/{group}/{n}` now renders a "Handler source" card
 just above the footer. For source-language routes (where slice
 36's `route.source` is `Some`) the card shows the stored source
 in a read-only `<pre class="source-block"><code>` block. For
@@ -910,7 +910,7 @@ posted; for pre-compiled `wasm` uploads, `source` is `None`
   `source_patch: Option<Option<String>>` alongside the artifact
   decision: wasm swap → `Some(None)`, source-lang swap →
   `Some(Some(src))`, no change → `None`. New endpoint
-  `GET /__api/routes/{group}/{number}/source` (owner-or-admin
+  `GET /api/routes/{group}/{number}/source` (owner-or-admin
   gate) returns a `RouteSourceResponse { slug, language,
   source }`. The `compiled_wasm` bytes still never appear on
   list/get; `source` follows the same pattern — only the dedicated
@@ -1107,7 +1107,7 @@ driving real traffic first.
 ## Dry-run UI page (slice 32)
 
 Surfaces the slice-16 dry-run API at
-`/__ui/routes/{group}/{n}/dry-run` as a real full page —
+`/ui/routes/{group}/{n}/dry-run` as a real full page —
 the route-detail footer's "Run dry-run" link is no longer
 the slice-30 muted "CLI only" placeholder.
 
@@ -1192,7 +1192,7 @@ that didn't have a "Slice N state" deferred-note already.
   swaps the `token:by-name:{owner}:{name}` index in
   write-new → update-record-name → drop-old order so a
   crash leaves a redundant entry rather than a dangling
-  lookup. REST `PATCH /__api/tokens/{name}` with
+  lookup. REST `PATCH /api/tokens/{name}` with
   `{ "name": "new" }`; CSRF-gated UI form per row using a
   small `prompt()` for the new name. `NameTaken` → 409 /
   inline 400 on the UI; empty name rejected at the entry
@@ -1216,8 +1216,8 @@ that didn't have a "Slice N state" deferred-note already.
   (commit `e2cec9d`) — small leftovers bundle. Routes
   list's Group filter switches from a free-text input to
   a `<select>` of the caller's non-implicit groups
-  (admin sees all). Both `/__ui/groups/{group}/state`
-  and `/__ui/routes/{group}/{n}/state` get a
+  (admin sees all). Both `/ui/groups/{group}/state`
+  and `/ui/routes/{group}/{n}/state` get a
   `← Back to {target}` link in a `.page-footer` row,
   pairing the destructive Clear button with a non-
   destructive sibling.
@@ -1239,7 +1239,7 @@ Cleanup slice driven by a dogfood pass: two pages had drifted
 from their wireframes and the route-new form had no natural
 entry point.
 
-- **Group detail (`/__ui/groups/{group}`)**: was rendering as
+- **Group detail (`/ui/groups/{group}`)**: was rendering as
   a sequence of cards (page-header card with H1, then a
   Metadata card, then a Routes card, then a Live activity
   card, then a Manage card with all actions at the bottom).
@@ -1254,7 +1254,7 @@ entry point.
   redistributed into header + footer positions. The
   "Manage from CLI" hint panel from slice 23 is gone too;
   buttons + `wm --help` cover discoverability.
-- **Route creation (`/__ui/routes/new`)**: slice 29 had
+- **Route creation (`/ui/routes/new`)**: slice 29 had
   reused `.filter-form` (a horizontal flex row designed for
   list-page filter bars), which put every form field in one
   cramped row. Restructured to a `.form-grid` 2-column
@@ -1277,13 +1277,13 @@ entry point.
 - **Test churn**: `tests/ui_detail_pages.rs::group_detail_renders_metadata_and_routes_for_owner`
   switched from asserting on the gone "wm groups refresh"
   CLI hint to asserting on the new `+ Add route` link
-  (`/__ui/routes/new?group=stripe-mock`).
+  (`/ui/routes/new?group=stripe-mock`).
 
 ## Web UI route creation form (slice 29)
 
-Ninth UI slice. Replaces the `/__ui/routes/new` stub with a
+Ninth UI slice. Replaces the `/ui/routes/new` stub with a
 working source-based create-route flow, sharing the validate-
-compile-register pipeline with `POST /__api/routes`.
+compile-register pipeline with `POST /api/routes`.
 
 - **GET** renders the form (method dropdown, path input,
   group dropdown of the caller's owned groups + an "(new
@@ -1296,7 +1296,7 @@ compile-register pipeline with `POST /__api/routes`.
   `CreateRouteBody` and calls the new
   `pub(crate) api::create_route_core(state, auth, body)`
   helper extracted from the REST `create_route` handler. On
-  success: 303 to `/__ui/routes/{group}/{number}`. On error:
+  success: 303 to `/ui/routes/{group}/{number}`. On error:
   re-render the form with `error.title` / `message` /
   `diagnostics` from the `ApiError`, status 400, submitted
   values preserved.
@@ -1333,11 +1333,11 @@ compile-register pipeline with `POST /__api/routes`.
 
 ## Web UI unmatched pages (slice 28)
 
-Eighth UI slice. Promotes the `/__ui/unmatched` stub into the
+Eighth UI slice. Promotes the `/ui/unmatched` stub into the
 admin-only unmatched-request view and adds a per-entry detail
-page at `/__ui/unmatched/{number}`.
+page at `/ui/unmatched/{number}`.
 
-- **List page** (`GET /__ui/unmatched`):
+- **List page** (`GET /ui/unmatched`):
   - Filter form: `method` (dropdown of canonical HTTP verbs +
     "Any") and `path_pattern` (free-form text, glob-matched
     against the request path).
@@ -1352,8 +1352,8 @@ page at `/__ui/unmatched/{number}`.
   - Each row: timestamp (`HH:MM:SS` + ISO `datetime` attr),
     `METHOD path`, entry number, "View request" link to the
     detail page, "Create route from request" link to
-    `/__ui/routes/new?method=…&path=…` (target still stubbed).
-- **Detail page** (`GET /__ui/unmatched/{number}`):
+    `/ui/routes/new?method=…&path=…` (target still stubbed).
+- **Detail page** (`GET /ui/unmatched/{number}`):
   request envelope only — no response (unmatched requests
   never reached a handler). Summary card with entry ID + trace
   ID, request card with headers table and body block (UTF-8
@@ -1363,7 +1363,7 @@ page at `/__ui/unmatched/{number}`.
 - **Filter agreement**: composes a `JournalFilter` with just
   `method` + `path_pattern` and runs
   `matches_unmatched(record)`, matching the REST
-  `/__api/unmatched` surface exactly. Validation uses
+  `/api/unmatched` surface exactly. Validation uses
   `api_filters::validate_method`; an invalid method (lowercase,
   bad chars) renders the standard 400 placeholder.
 - **Authorization**: admin-only on both pages (host-wide
@@ -1384,23 +1384,23 @@ page at `/__ui/unmatched/{number}`.
   suggestions (the dispatcher writes `near_misses: vec![]`
   today — would need a Levenshtein-distance lookup at
   journal-write or read time), and the actual
-  `/__ui/routes/new` form the deep-links point at — that's a
+  `/ui/routes/new` form the deep-links point at — that's a
   later slice. The `ui_smoke.rs` placeholder-routes loop was
-  trimmed to just `/__ui/settings` to reflect the new state.
+  trimmed to just `/ui/settings` to reflect the new state.
 
 ## Web UI state pages (slice 27)
 
-Seventh UI slice. Promotes the `/__ui/routes/{group}/{n}/state`
-and `/__ui/groups/{group}/state` stubs into real pages — a
+Seventh UI slice. Promotes the `/ui/routes/{group}/{n}/state`
+and `/ui/groups/{group}/state` stubs into real pages — a
 read-only window onto the route's private `kv:` namespace and
 the group's shared `gkv:` namespace, with a "Clear state"
 button for either.
 
-- **Route state page** (`GET /__ui/routes/{group}/{n}/state`):
+- **Route state page** (`GET /ui/routes/{group}/{n}/state`):
   pulls entries via `Registry::list_route_state(group_id,
   route_id)`. POST to the same URL clears (calls
   `Registry::clear_route_state`) and 303-redirects back.
-- **Group state page** (`GET /__ui/groups/{group}/state`):
+- **Group state page** (`GET /ui/groups/{group}/state`):
   new `Registry::list_group_state(group_id)` mirrors
   `list_route_state` but reads from `Storage::group_bucket`
   (the `gkv:{group_id}:` namespace). POST clears via
@@ -1434,17 +1434,17 @@ button for either.
 
 ## UI 404 page (slice 26 polish)
 
-A typo under `/__ui/*` used to fall through to the dispatcher's
+A typo under `/ui/*` used to fall through to the dispatcher's
 generic `not_found_response`, returning JSON `{"error":{"code":
-"not_found", ...}}` — fine for `/__api/*` consumers but ugly for
+"not_found", ...}}` — fine for `/api/*` consumers but ugly for
 a human in a browser. Now `dispatch_inner`'s reserved-path
-branch detects the `/__ui/` prefix specifically and calls
+branch detects the `/ui/` prefix specifically and calls
 `ui::render_not_found(&state, path)` to render a branded
 `not_found.html` extending `base.html`.
 
 The other 404 paths stay as-is — they're the design:
-- `/__api/*` typos: JSON, machine-readable, no journal write.
-- `/__auth/*` typos: JSON, same shape.
+- `/api/*` typos: JSON, machine-readable, no journal write.
+- `/auth/*` typos: JSON, same shape.
 - Mock-traffic 404s: JSON + write to the unmatched journal so
   operators see what their SUT was hitting that they hadn't
   mocked yet.
@@ -1457,8 +1457,8 @@ auto-escape neutralises any HTML smuggled in the requested
 path.
 
 5 tier-2 tests in `tests/ui_not_found.rs` lock in: UI typo →
-HTML 404 with the app shell, `/__api/typo` → JSON 404,
-`/__auth/typo` → JSON 404, mock-traffic typo → JSON 404,
+HTML 404 with the app shell, `/api/typo` → JSON 404,
+`/auth/typo` → JSON 404, mock-traffic typo → JSON 404,
 and a smoke check that `<script>` in the URL doesn't survive
 into the rendered body.
 
@@ -1468,7 +1468,7 @@ Sixth UI slice. Replaces the "Manage from CLI" panels on the
 group + route detail pages with real action buttons backed by
 the CSRF wiring landed in slice 25.
 
-- **Group actions** (`/__ui/groups/{group}/...`):
+- **Group actions** (`/ui/groups/{group}/...`):
   - `POST .../refresh` — re-arms the Valkey TTL to the
     configured value via `Registry::refresh_group`.
   - `POST .../edit` — accepts `ttl_seconds` (positive integer)
@@ -1480,7 +1480,7 @@ the CSRF wiring landed in slice 25.
   - `POST .../delete` — `Registry::cascade_delete_group` +
     `RouteTable::refresh_after_group_cascade`. Browsers see a
     `confirm()` prompt before the form submits.
-- **Route action** (`/__ui/routes/{group}/{n}/delete`):
+- **Route action** (`/ui/routes/{group}/{n}/delete`):
   `Registry::delete_route` + `RouteTable::refresh_after_delete`.
   Redirects back to the group detail if the group survived
   (explicit groups do; implicit single-route groups vanish), or
@@ -1508,7 +1508,7 @@ the CSRF wiring landed in slice 25.
 
 ## Web UI tokens page + CSRF middleware (slice 25)
 
-Fifth UI slice. Replaces the `/__ui/me/tokens` stub with a real
+Fifth UI slice. Replaces the `/ui/me/tokens` stub with a real
 self-service tokens page (list / create / revoke), and lands the
 double-submit CSRF middleware that every future authed UI form
 will rely on.
@@ -1529,7 +1529,7 @@ will rely on.
     don't carry the cookie at all, so they fail the
     cookie-presence check before any body comparison runs. The
     form field is the secondary check.
-  - Applied to `/__ui/*` (in `ui::router`) and `/__auth/*` (in
+  - Applied to `/ui/*` (in `ui::router`) and `/auth/*` (in
     `auth_api::router`) as a `Router::layer` of
     `middleware::from_fn`.
 - **Token injection into templates:** `ui::render` reads the
@@ -1541,7 +1541,7 @@ will rely on.
   structs and maps (got a tuple struct)"). With the spread,
   handlers stay focused on page data; `base.html`'s logout form
   and every form template get `{{ csrf_token }}` for free.
-- **Tokens page (`/__ui/me/tokens`):**
+- **Tokens page (`/ui/me/tokens`):**
   - GET: lists the user's own tokens (`auth.list_tokens_for`),
     sorted newest first. Empty state hints at the create form.
   - POST: validates name + optional TTL hours, calls
@@ -1556,7 +1556,7 @@ will rely on.
   - Admins managing other users' tokens still go through the CLI;
     the page is "your own tokens only" by deliberate design.
 - **Test plumbing:** existing tier-2 tests' `login_cookie`
-  helpers had to learn the CSRF dance — GET `/__auth/login` to
+  helpers had to learn the CSRF dance — GET `/auth/login` to
   mint the wm_csrf cookie and read the embedded `_csrf` form
   value, then POST with both. The combined cookie string
   `wm_csrf=X; wm_session=Y` is what subsequent requests send.
@@ -1575,14 +1575,14 @@ will rely on.
 ## Web UI live journal + journal entry (slice 24)
 
 Fourth UI slice. Replaces the slice-21 stubs at
-`/__ui/journal/live` and `/__ui/journal/{group}/{n}` with real
+`/ui/journal/live` and `/ui/journal/{group}/{n}` with real
 pages backed by the slice-11 SSE tail and journal record store.
 
-- **Live journal (`/__ui/journal/live`):**
+- **Live journal (`/ui/journal/live`):**
   - Pre-renders ~25 most-recent entries server-side when scoped
     to a group (via `journal.list_for_group` + in-process method/
     status/path_pattern filter — mirrors the SSE filter shape).
-  - Opens an `EventSource` against `GET /__api/journal/tail` and
+  - Opens an `EventSource` against `GET /api/journal/tail` and
     prepends a row for each `event: handled`. Plain JavaScript
     (~50 LoC inline in the template) — HTMX comes in when there's
     a screen that wants HTML-fragment swaps from the server.
@@ -1598,7 +1598,7 @@ pages backed by the slice-11 SSE tail and journal record store.
   - Auto-cap: client keeps at most 200 rows in the DOM to bound
     memory if the page is left running. Reconnect on SSE error
     is handled by the browser's EventSource automatic retry.
-- **Journal entry (`/__ui/journal/{group}/{n}`):**
+- **Journal entry (`/ui/journal/{group}/{n}`):**
   - Reads `journal.get(group_id, number)`. Owner-or-admin gate.
   - Renders request envelope (method, path, query, headers,
     body), response envelope (status, headers, body), handler
@@ -1629,18 +1629,18 @@ pages backed by the slice-11 SSE tail and journal record store.
 ## Web UI detail pages + `/` redirect (slice 23)
 
 Third UI slice. Replaces the slice-21 stubs at
-`/__ui/groups/{group}` and `/__ui/routes/{group}/{n}` with real
+`/ui/groups/{group}` and `/ui/routes/{group}/{n}` with real
 detail pages, and implements the bare-`/` redirect from
 `route-model.md`.
 
-- **Group detail (`/__ui/groups/{group}`):** breadcrumb back to
+- **Group detail (`/ui/groups/{group}`):** breadcrumb back to
   the listing, metadata grid (TTL, sliding flag, last activity,
   created, group ID), routes-in-group table with link-through to
   per-route detail, and a "Manage from CLI" panel listing
   `wm groups refresh / update / delete` plus `wm journal tail`.
   Source of truth: `registry.read_group_by_ref` + `registry.list_routes`
   filtered in-process.
-- **Route detail (`/__ui/routes/{group}/{n}`):** breadcrumb,
+- **Route detail (`/ui/routes/{group}/{n}`):** breadcrumb,
   metadata (methods, path, language, bindings, component size,
   owner, route ID, created), recent journal entries
   (`journal.list_for_group` → filtered by `route_id`, capped at 10),
@@ -1658,8 +1658,8 @@ detail pages, and implements the bare-`/` redirect from
     (`ensure_group_owner_or_admin`).
 - **`GET /` redirect:** in `server::dispatch_inner`, when no user
   route matches and method+path are exactly `GET /`, the host
-  returns `Redirect::to("/__ui/")` if a valid session cookie is
-  attached or `/__auth/login` otherwise. A user-registered `GET /`
+  returns `Redirect::to("/ui/")` if a valid session cookie is
+  attached or `/auth/login` otherwise. A user-registered `GET /`
   route shadows the redirect because `find_match` returns `Some`
   before the fallback executes. The redirect deliberately does
   NOT write to the unmatched journal — a browser pointed at the
@@ -1691,7 +1691,7 @@ detail pages, and implements the bare-`/` redirect from
 ## Web UI list pages (slice 22)
 
 Second slice of the UI track. Replaces the slice-21 stubs at
-`/__ui/groups` and `/__ui/routes` with real list pages on top of
+`/ui/groups` and `/ui/routes` with real list pages on top of
 the slice-18 filter/sort/paginate surface.
 
 - **Shared core extracted in `api.rs`:** `list_routes_core` /
@@ -1760,7 +1760,7 @@ the slice-18 filter/sort/paginate surface.
 First slice of the UI track. Ships the templating + asset pipeline,
 implements the design-tokens CSS, replaces the slice-20 inline
 login page with a templated one, and adds a real home page plus
-stubs for every other `/__ui/*` route — so navigation works
+stubs for every other `/ui/*` route — so navigation works
 end-to-end before the detail pages land.
 
 - **Templating:** `minijinja` 2.x with features
@@ -1777,13 +1777,13 @@ end-to-end before the detail pages land.
     fully-stateful `Router` (state passed in so the auth-redirect
     middleware can hold a clone — same shape as
     `mcp::router(state)`).
-  - `auth_redirect.rs` — middleware on `/__ui/*` (except
-    `/__ui/static/*`). Reads the `wm_session` cookie via
+  - `auth_redirect.rs` — middleware on `/ui/*` (except
+    `/ui/static/*`). Reads the `wm_session` cookie via
     `session.touch()`; on failure issues `302` (axum's
     `Redirect::to`, actually 303 by default) to
-    `/__auth/login?next=<original_path>` with the path
+    `/auth/login?next=<original_path>` with the path
     percent-encoded.
-  - `static_assets.rs` — `/__ui/static/{*path}` serves CSS/JS
+  - `static_assets.rs` — `/ui/static/{*path}` serves CSS/JS
     from `include_bytes!`. One file today (`wm.css`); HTMX lands
     alongside the slice that needs it. `Cache-Control: no-store`
     until we have content-hashed filenames.
@@ -1814,7 +1814,7 @@ end-to-end before the detail pages land.
   fixed `SESSION_SECRET`, then `cargo run -p wm-host`. Data
   persists across host restarts in the Valkey volume
   (`docker compose down -v` to wipe). Visit
-  `http://localhost:8080/__ui/` and log in. `just run-web-fast`
+  `http://localhost:8080/ui/` and log in. `just run-web-fast`
   is the in-memory shortcut for when you don't need persistence.
 - **Stubs:** `placeholder.html` is shared by every "coming in a
   later slice" route. The stub handler names the equivalent API
@@ -1865,12 +1865,12 @@ method to mint it isn't useful.
   back to `127.0.0.1` (we don't wire `ConnectInfo` into the
   server — would mean touching every test harness). For the threat
   model the fallback collision is fine.
-- **`crates/wm-host/src/auth_api.rs`** — routes under `/__auth/*`:
-  `GET /__auth/login` (HTML form; switches to a "no methods
+- **`crates/wm-host/src/auth_api.rs`** — routes under `/auth/*`:
+  `GET /auth/login` (HTML form; switches to a "no methods
   configured" body when local auth isn't set), `POST
-  /__auth/login/password` (form-encoded; vague `401 login failed`
+  /auth/login/password` (form-encoded; vague `401 login failed`
   on bad creds, `429` when throttled, `303 See Other` + Set-Cookie
-  on success), `POST /__auth/logout` (204 + Max-Age=0 cookie
+  on success), `POST /auth/logout` (204 + Max-Age=0 cookie
   clear; idempotent). Login validates the `next` redirect target
   is a host-relative path so a crafted login URL can't open-
   redirect the browser.
@@ -1969,8 +1969,8 @@ command (admin-only).
 ## List filter / sort / pagination (slice 18)
 
 Adds a shared filter + sort + offset-pagination vocabulary across the
-four REST list endpoints (`GET /__api/routes`, `/__api/groups`,
-`/__api/journal/{group}`, `/__api/unmatched`). Implementation is
+four REST list endpoints (`GET /api/routes`, `/api/groups`,
+`/api/journal/{group}`, `/api/unmatched`). Implementation is
 in-memory at the handler layer — small data sets, cheap to filter
 and sort each request.
 
@@ -2070,7 +2070,7 @@ as slice 18) but the fields themselves are useful immediately.
   fresh-route, first-hit, second-hit sequence. Tier-2
   `activity_fields_bump_on_dispatch` drives three real HTTP
   requests against a route and verifies the fields propagate
-  through to `GET /__api/routes/{slug}` and `GET /__api/groups/{name}`.
+  through to `GET /api/routes/{slug}` and `GET /api/groups/{name}`.
 
 ## Per-route state + dry-run (slice 16)
 
@@ -2078,12 +2078,12 @@ The second half of the route-debug pair. Three new host endpoints,
 three new MCP tools, and `wm routes state` / `wm routes test` on
 the CLI.
 
-- **State endpoints:** `GET /__api/routes/{group}/{n}/state`
+- **State endpoints:** `GET /api/routes/{group}/{n}/state`
   lists each kv key with its storage-level kind (`bytes` / `list` /
   `hash` / `set` / `other`); bytes inline the value, collections
   report `length`. `DELETE` wipes the route's private kv namespace
   via the existing `delete_with_prefix`. Both owner-or-admin.
-- **Dry-run endpoint:** `POST /__api/routes/{group}/{n}/dry-run`
+- **Dry-run endpoint:** `POST /api/routes/{group}/{n}/dry-run`
   with a synthetic request body. Lives in `crates/wm-host/src/dry_run.rs`
   to keep server.rs lean. Owner-or-admin.
 - **Snapshot semantics:** the route's `kv:{group}:{route}:*` and
@@ -2122,7 +2122,7 @@ the CLI.
 
 ## Route update (slice 15)
 
-`PATCH /__api/routes/{group}/{n}` mutates a route in place. The
+`PATCH /api/routes/{group}/{n}` mutates a route in place. The
 matching `wm routes update <slug>` CLI subcommand and the
 `update_route` MCP tool round it out — same shape as the
 create-route surface, partial body.
@@ -2161,7 +2161,7 @@ done before agents connect.
 
 - **Subcommands:** `list`, `show NAME`, `me`, `create NAME [--admin]`,
   `update NAME --admin|--no-admin`, `delete NAME --force`. Wraps
-  the existing `/__api/users` REST endpoints (slice 5b).
+  the existing `/api/users` REST endpoints (slice 5b).
 - **Auth model unchanged:** admin-only for cross-user actions; any
   authed user can `wm users me`. `wm users show NAME` works for
   same-name (self) calls without admin.
@@ -2175,7 +2175,7 @@ shell's completion directory.
 
 ## Match probe (slice 13)
 
-`GET /__api/match?method=&path=` answers "what would handle this
+`GET /api/match?method=&path=` answers "what would handle this
 request?" with either the matching route or a list of near-misses.
 Mirrored as `wm match METHOD PATH` in the CLI and `find_route` in
 MCP.
@@ -2221,7 +2221,7 @@ succeeds; consumers subscribe via `Journal::subscribe()`.
   specific code). Per-route filters implicitly hide unmatched
   events. Used by both the SSE handler and the MCP streaming tools
   so semantics stay aligned.
-- **HTTP surface.** `GET /__api/journal/tail` returns an axum SSE
+- **HTTP surface.** `GET /api/journal/tail` returns an axum SSE
   stream wrapped around `BroadcastStream`. Each matching event
   emits `event: handled` or `event: unmatched`; `event: warning`
   surfaces lag if a consumer can't keep up. Heartbeat via
@@ -2237,7 +2237,7 @@ succeeds; consumers subscribe via `Journal::subscribe()`.
   (MCP parity batch), the after-the-fact query that reads the
   *stored* journal (`Journal::list_for_group`) so a completed
   request can be pulled without having waited live — same filter
-  surface as REST `GET /__api/journal/{group}`, owner-or-admin of
+  surface as REST `GET /api/journal/{group}`, owner-or-admin of
   the group.
 - **Multi-host gap.** The bus is in-process. Sibling hosts in a
   multi-host deployment won't see each other's events. Documented

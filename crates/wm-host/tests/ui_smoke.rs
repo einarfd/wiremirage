@@ -1,12 +1,12 @@
 //! Tier-2 smoke tests for the web UI (slice 21).
 //!
 //! Drives the full flow you'd see in a browser:
-//!   1. Hit `/__ui/` unauthenticated → 302 to `/__auth/login?next=...`
-//!   2. GET `/__auth/login` → 200 with the password form
-//!   3. POST `/__auth/login/password` → 303 + Set-Cookie
-//!   4. GET `/__ui/` with the cookie → 200, the user's name on the page
-//!   5. GET `/__ui/static/wm.css` → 200, `text/css`
-//!   6. GET `/__ui/groups/foo` → 200, "Coming soon" placeholder
+//!   1. Hit `/ui/` unauthenticated → 302 to `/auth/login?next=...`
+//!   2. GET `/auth/login` → 200 with the password form
+//!   3. POST `/auth/login/password` → 303 + Set-Cookie
+//!   4. GET `/ui/` with the cookie → 200, the user's name on the page
+//!   5. GET `/ui/static/wm.css` → 200, `text/css`
+//!   6. GET `/ui/groups/foo` → 200, "Coming soon" placeholder
 //!
 //! Logging the user into the web UI is exactly what `just run-web`
 //! is meant to demonstrate; these tests are the automated version
@@ -78,7 +78,7 @@ async fn login_and_get_cookie(h: &Harness, client: &Client) -> String {
     // POST with both. Return the combined cookie string the rest of
     // the test will send back on subsequent requests.
     let get = client
-        .get(url(h, "/__auth/login"))
+        .get(url(h, "/auth/login"))
         .send()
         .await
         .expect("get login");
@@ -87,7 +87,7 @@ async fn login_and_get_cookie(h: &Harness, client: &Client) -> String {
     let csrf_value = extract_csrf_value(&body).expect("_csrf hidden input");
 
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -129,7 +129,7 @@ async fn unauthenticated_ui_redirects_to_login_with_next() {
     let h = start_with_users("admin:devpassword:admin").await;
     let client = no_redirect_client();
 
-    let resp = client.get(url(&h, "/__ui/")).send().await.expect("get");
+    let resp = client.get(url(&h, "/ui/")).send().await.expect("get");
     // axum's Redirect::to returns 303 See Other by default. Either is
     // fine for "you need to log in" — we just check we got a redirect.
     assert!(
@@ -144,8 +144,8 @@ async fn unauthenticated_ui_redirects_to_login_with_next() {
         .to_str()
         .unwrap();
     assert!(
-        location.starts_with("/__auth/login?next=/__ui/"),
-        "expected /__auth/login?next=/__ui/, got: {location}"
+        location.starts_with("/auth/login?next=/ui/"),
+        "expected /auth/login?next=/ui/, got: {location}"
     );
 }
 
@@ -154,15 +154,11 @@ async fn deeper_ui_path_preserves_next_through_login_redirect() {
     let h = start_with_users("admin:devpassword:admin").await;
     let client = no_redirect_client();
 
-    let resp = client
-        .get(url(&h, "/__ui/routes"))
-        .send()
-        .await
-        .expect("get");
+    let resp = client.get(url(&h, "/ui/routes")).send().await.expect("get");
     assert!((300..400).contains(&resp.status().as_u16()));
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(
-        location.contains("/__ui/routes"),
+        location.contains("/ui/routes"),
         "next param should carry the original path, got: {location}"
     );
 }
@@ -171,14 +167,14 @@ async fn deeper_ui_path_preserves_next_through_login_redirect() {
 async fn login_page_renders_form_from_template() {
     let h = start_with_users("admin:devpassword:admin").await;
     let client = no_redirect_client();
-    let resp = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("Sign in to WireMirage"));
-    assert!(body.contains("/__auth/login/password"));
+    assert!(body.contains("/auth/login/password"));
     // Stylesheet link is the foundation deliverable — confirm it
-    // reaches the page (the actual CSS is served by /__ui/static/).
-    assert!(body.contains("/__ui/static/wm.css"));
+    // reaches the page (the actual CSS is served by /ui/static/).
+    assert!(body.contains("/ui/static/wm.css"));
 }
 
 #[tokio::test]
@@ -186,7 +182,7 @@ async fn login_page_carries_next_into_form_hidden_input() {
     let h = start_with_users("admin:devpassword:admin").await;
     let client = no_redirect_client();
     let resp = client
-        .get(url(&h, "/__auth/login?next=/__ui/groups"))
+        .get(url(&h, "/auth/login?next=/ui/groups"))
         .send()
         .await
         .unwrap();
@@ -198,7 +194,7 @@ async fn login_page_carries_next_into_form_hidden_input() {
     // against future template tweaks.
     assert!(body.contains("name=\"next\""), "hidden next input missing");
     assert!(
-        body.contains("__ui") && body.contains("groups"),
+        body.contains("ui") && body.contains("groups"),
         "next value should carry the redirect target (in some encoding); body was: {body}"
     );
 }
@@ -210,7 +206,7 @@ async fn home_page_renders_after_login() {
     let cookie = login_and_get_cookie(&h, &client).await;
 
     let resp = client
-        .get(url(&h, "/__ui/"))
+        .get(url(&h, "/ui/"))
         .header("cookie", cookie)
         .send()
         .await
@@ -223,7 +219,7 @@ async fn home_page_renders_after_login() {
     assert!(body.contains("admin"), "expected user name on home page");
     assert!(body.contains("Welcome, admin"));
     assert!(body.contains("Groups"));
-    assert!(body.contains("/__ui/static/wm.css"));
+    assert!(body.contains("/ui/static/wm.css"));
 }
 
 #[tokio::test]
@@ -232,7 +228,7 @@ async fn home_page_shows_admin_badge_for_admin_user() {
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
     let body = client
-        .get(url(&h, "/__ui/"))
+        .get(url(&h, "/ui/"))
         .header("cookie", cookie)
         .send()
         .await
@@ -252,7 +248,7 @@ async fn css_served_unauthenticated_and_correct_mime() {
     let h = start_with_users("admin:devpassword:admin").await;
     let client = no_redirect_client();
     let resp = client
-        .get(url(&h, "/__ui/static/wm.css"))
+        .get(url(&h, "/ui/static/wm.css"))
         .send()
         .await
         .unwrap();
@@ -271,17 +267,17 @@ async fn css_served_unauthenticated_and_correct_mime() {
 #[tokio::test]
 async fn ace_editor_assets_served_with_js_mime() {
     // Slice 41 vendored a fixed list of Ace files under
-    // /__ui/static/ace/. Just spot-check that the core script plus
+    // /ui/static/ace/. Just spot-check that the core script plus
     // one mode + one theme + the wm-ace bootstrap come back as JS,
     // and that an unknown filename under the same prefix still 404s
     // (the handler is an enum match, not a passthrough to the filesystem).
     let h = start_with_users("admin:devpassword:admin").await;
     let client = no_redirect_client();
     for path in [
-        "/__ui/static/ace/ace.js",
-        "/__ui/static/ace/mode-typescript.js",
-        "/__ui/static/ace/theme-github_light_default.js",
-        "/__ui/static/wm-ace.js",
+        "/ui/static/ace/ace.js",
+        "/ui/static/ace/mode-typescript.js",
+        "/ui/static/ace/theme-github_light_default.js",
+        "/ui/static/wm-ace.js",
     ] {
         let resp = client.get(url(&h, path)).send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 200, "{path} 200");
@@ -297,7 +293,7 @@ async fn ace_editor_assets_served_with_js_mime() {
         );
     }
     let resp = client
-        .get(url(&h, "/__ui/static/ace/mode-cobol.js"))
+        .get(url(&h, "/ui/static/ace/mode-cobol.js"))
         .send()
         .await
         .unwrap();
@@ -316,11 +312,11 @@ async fn placeholder_pages_render_with_api_hint() {
     //
     // Each successive UI slice converts more of these stubs to real
     // pages and removes them from this list. After slice 28's unmatched
-    // page landed, only `/__ui/settings` (and the not-yet-implemented
-    // `/__ui/admin/health` and `/__ui/routes/new`) remain placeholders.
+    // page landed, only `/ui/settings` (and the not-yet-implemented
+    // `/ui/admin/health` and `/ui/routes/new`) remain placeholders.
     // If a future slice adds back a placeholder route, add a check
     // here for it.
-    let placeholders: &[(&str, &[&str])] = &[("/__ui/settings", &["GET", "__api", "users"])];
+    let placeholders: &[(&str, &[&str])] = &[("/ui/settings", &["GET", "api", "users"])];
     for &(path, expected_substrings) in placeholders.iter() {
         let resp = client
             .get(url(&h, path))
@@ -350,11 +346,11 @@ async fn admin_only_stubs_are_forbidden_for_non_admin() {
 
     // Log in as the non-admin user. Slice-25 CSRF: GET login page
     // first to mint the cookie + extract form value.
-    let get = client.get(url(&h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(&h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let csrf_value = extract_csrf_value(&get.text().await.unwrap()).expect("csrf");
     let resp = client
-        .post(url(&h, "/__auth/login/password"))
+        .post(url(&h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -368,10 +364,10 @@ async fn admin_only_stubs_are_forbidden_for_non_admin() {
     let cookie = format!("wm_csrf={csrf_cookie}; wm_session={session_cookie}");
 
     // Admin-only stubs should return 403 (rendered through the same
-    // placeholder template but with `Forbidden` title). `/__ui/unmatched`
+    // placeholder template but with `Forbidden` title). `/ui/unmatched`
     // is no longer here: ADR-0030 made it owner-scoped (a non-admin gets a
     // 200 with only their own groups' entries) — see ui_unmatched_pages.rs.
-    for path in ["/__ui/settings", "/__ui/admin/health"] {
+    for path in ["/ui/settings", "/ui/admin/health"] {
         let resp = client
             .get(url(&h, path))
             .header("cookie", &cookie)
@@ -391,7 +387,7 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
     // Confirm we're in and read the CSRF token embedded in the page
     // so we can post a valid logout request.
     let me = client
-        .get(url(&h, "/__ui/"))
+        .get(url(&h, "/ui/"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -402,7 +398,7 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
 
     // Log out via the form button in the header.
     let logout = client
-        .post(url(&h, "/__auth/logout"))
+        .post(url(&h, "/auth/logout"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!("_csrf={csrf_value}"))
@@ -411,9 +407,9 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
         .unwrap();
     assert_eq!(logout.status().as_u16(), 204);
 
-    // With the (now-invalidated) cookie, /__ui/ should redirect again.
+    // With the (now-invalidated) cookie, /ui/ should redirect again.
     let after = client
-        .get(url(&h, "/__ui/"))
+        .get(url(&h, "/ui/"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -432,7 +428,7 @@ async fn connect_page_shows_mcp_endpoint_and_configs() {
     let cookie = login_and_get_cookie(&h, &client).await;
 
     let resp = client
-        .get(url(&h, "/__ui/connect"))
+        .get(url(&h, "/ui/connect"))
         .header("cookie", cookie)
         .send()
         .await
@@ -442,8 +438,11 @@ async fn connect_page_shows_mcp_endpoint_and_configs() {
     // The live MCP endpoint (derived from the request) + paste-ready configs.
     // minijinja HTML-escapes the URL's `/` to `&#x2f;` (correct — the
     // Host-derived value must not be marked `safe`), so assert on the
-    // escaping-stable path component, not the literal `/__api/mcp`.
-    assert!(body.contains("__api"), "shows the MCP endpoint: {body}");
+    // escaping-stable path component, not the literal `/api/mcp`.
+    assert!(
+        body.contains("api&#x2f;mcp"),
+        "shows the MCP endpoint: {body}"
+    );
     assert!(
         body.contains("claude mcp add"),
         "shows the Claude Code command"

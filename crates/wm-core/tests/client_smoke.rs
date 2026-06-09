@@ -37,7 +37,7 @@ async fn capture_get(
     State(state): State<Arc<MockState>>,
     headers: HeaderMap,
 ) -> axum::Json<serde_json::Value> {
-    *state.last.lock().unwrap() = Some(captured_no_body("GET", "/__health", &headers));
+    *state.last.lock().unwrap() = Some(captured_no_body("GET", "/health", &headers));
     axum::Json(json!({ "status": "ok", "version": "0.0.0" }))
 }
 
@@ -45,7 +45,7 @@ async fn capture_groups_list(
     State(state): State<Arc<MockState>>,
     headers: HeaderMap,
 ) -> axum::Json<serde_json::Value> {
-    *state.last.lock().unwrap() = Some(captured_no_body("GET", "/__api/groups", &headers));
+    *state.last.lock().unwrap() = Some(captured_no_body("GET", "/api/groups", &headers));
     axum::Json(json!({
         "groups": [
             {
@@ -68,7 +68,7 @@ async fn capture_groups_create(
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
     *state.last.lock().unwrap() = Some(captured(
         "POST",
-        "/__api/groups",
+        "/api/groups",
         &headers,
         Some(body.clone()),
     ));
@@ -93,7 +93,7 @@ async fn capture_groups_show(
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     *state.last.lock().unwrap() = Some(captured_no_body(
         "GET",
-        &format!("/__api/groups/{name}"),
+        &format!("/api/groups/{name}"),
         &headers,
     ));
     if name == "missing" {
@@ -121,7 +121,7 @@ async fn capture_groups_patch(
 ) -> axum::Json<serde_json::Value> {
     *state.last.lock().unwrap() = Some(captured(
         "PATCH",
-        &format!("/__api/groups/{name}"),
+        &format!("/api/groups/{name}"),
         &headers,
         Some(body.clone()),
     ));
@@ -143,7 +143,7 @@ async fn capture_groups_delete(
 ) -> StatusCode {
     *state.last.lock().unwrap() = Some(captured_no_body(
         "DELETE",
-        &format!("/__api/groups/{name}"),
+        &format!("/api/groups/{name}"),
         &headers,
     ));
     StatusCode::NO_CONTENT
@@ -156,7 +156,7 @@ async fn capture_tokens_create(
 ) -> (StatusCode, axum::Json<serde_json::Value>) {
     *state.last.lock().unwrap() = Some(captured(
         "POST",
-        "/__api/tokens",
+        "/api/tokens",
         &headers,
         Some(body.clone()),
     ));
@@ -189,7 +189,7 @@ async fn capture_journal_list(
     Query(q): Query<JournalQuery>,
     headers: HeaderMap,
 ) -> axum::Json<serde_json::Value> {
-    let mut path = format!("/__api/journal/{group}");
+    let mut path = format!("/api/journal/{group}");
     let mut params: Vec<String> = Vec::new();
     if let Some(b) = q.before {
         params.push(format!("before={b}"));
@@ -237,22 +237,22 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
 async fn start_mock() -> (Arc<MockState>, String, tokio::task::JoinHandle<()>) {
     let state = Arc::new(MockState::default());
     let app = Router::new()
-        .route("/__health", get(capture_get))
+        .route("/health", get(capture_get))
         .route(
-            "/__api/groups",
+            "/api/groups",
             get(capture_groups_list).post(capture_groups_create),
         )
         .route(
-            "/__api/groups/{name}",
+            "/api/groups/{name}",
             get(capture_groups_show)
                 .patch(capture_groups_patch)
                 .delete(capture_groups_delete),
         )
-        .route("/__api/tokens", post(capture_tokens_create))
-        .route("/__api/journal/{group}", get(capture_journal_list))
+        .route("/api/tokens", post(capture_tokens_create))
+        .route("/api/journal/{group}", get(capture_journal_list))
         // Two unused routes so we can verify the right verb fires:
-        .route("/__api/groups/{name}/refresh", post(|| async {}))
-        .route("/__api/groups/{name}/state", delete(|| async {}))
+        .route("/api/groups/{name}/refresh", post(|| async {}))
+        .route("/api/groups/{name}/state", delete(|| async {}))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -274,7 +274,7 @@ async fn health_round_trips() {
     assert_eq!(h.version, "0.0.0");
     let cap = state.last.lock().unwrap().clone().unwrap();
     assert_eq!(cap.method, "GET");
-    assert_eq!(cap.path, "/__health");
+    assert_eq!(cap.path, "/health");
     // User-Agent default is wm-cli/{CARGO_PKG_VERSION-of-wm-core}.
     let ua = cap.user_agent.expect("user-agent");
     assert!(ua.starts_with("wm-cli/"));
@@ -411,7 +411,7 @@ async fn journal_list_serializes_pagination_query_params() {
         .await
         .expect("list");
     let cap = state.last.lock().unwrap().clone().unwrap();
-    assert_eq!(cap.path, "/__api/journal/stripe-mock?before=7&limit=20");
+    assert_eq!(cap.path, "/api/journal/stripe-mock?before=7&limit=20");
     server.abort();
 }
 

@@ -1,7 +1,7 @@
 //! Regression test for the slice-24 graceful-shutdown bug.
 //!
 //! Symptom that motivated this test: pressing Ctrl-C while a browser
-//! tab was pointed at `/__ui/journal/live` logged "received Ctrl-C,
+//! tab was pointed at `/ui/journal/live` logged "received Ctrl-C,
 //! shutting down" but the process hung indefinitely. The cause was
 //! `axum::serve(...).with_graceful_shutdown()` waiting for all
 //! in-flight requests to drain, while the SSE journal tail held the
@@ -11,7 +11,7 @@
 //!
 //! This test reproduces the wiring at the unit level: spin up the
 //! host with a shutdown receiver, open an SSE connection to
-//! `/__api/journal/tail`, fire the shutdown, and assert the SSE
+//! `/api/journal/tail`, fire the shutdown, and assert the SSE
 //! response body completes within a small bound. Without the fix,
 //! the response stays open and the test times out.
 
@@ -58,7 +58,7 @@ async fn sse_tail_ends_when_shutdown_fires() {
         .build()
         .unwrap();
     let resp = client
-        .get(format!("http://{addr}/__api/journal/tail"))
+        .get(format!("http://{addr}/api/journal/tail"))
         .header("authorization", format!("Bearer {plaintext}"))
         .send()
         .await

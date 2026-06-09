@@ -1,9 +1,9 @@
 //! Tier-2 smoke tests for the UI 404 page (slice 26 polish).
 //!
 //! Coverage:
-//!   * `/__ui/typo` returns 404 with the branded HTML page (extends
+//!   * `/ui/typo` returns 404 with the branded HTML page (extends
 //!     `base.html`), not the JSON error blob.
-//!   * `/__api/typo` keeps the JSON 404 — scripts and agents are the
+//!   * `/api/typo` keeps the JSON 404 — scripts and agents are the
 //!     audience there.
 //!   * Mock traffic (non-reserved path) keeps the JSON 404 + writes
 //!     to the unmatched journal.
@@ -75,7 +75,7 @@ async fn start() -> Harness {
 async fn ui_typo_renders_branded_html_404() {
     let h = start().await;
     let client = no_redirect_client();
-    let resp = client.get(url(&h, "/__ui/typo")).send().await.unwrap();
+    let resp = client.get(url(&h, "/ui/typo")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 404);
     let ct = resp
         .headers()
@@ -92,8 +92,8 @@ async fn ui_typo_renders_branded_html_404() {
     assert!(body.contains("typo"), "path mentioned in body");
     // The page extends base.html so the nav + CSS link should be
     // present.
-    assert!(body.contains("/__ui/static/wm.css"));
-    assert!(body.contains("/__ui/journal/live"));
+    assert!(body.contains("/ui/static/wm.css"));
+    assert!(body.contains("/ui/journal/live"));
 }
 
 #[tokio::test]
@@ -105,7 +105,7 @@ async fn ui_404_does_not_reflect_unescaped_html_from_the_path() {
     // characters. Either way, the raw `<script>` tag must not appear
     // in the rendered body — that's the property we care about.
     let resp = client
-        .get(url(&h, "/__ui/%3Cscript%3Ealert(1)%3C/script%3E"))
+        .get(url(&h, "/ui/%3Cscript%3Ealert(1)%3C/script%3E"))
         .send()
         .await
         .unwrap();
@@ -121,7 +121,7 @@ async fn ui_404_does_not_reflect_unescaped_html_from_the_path() {
 async fn api_typo_keeps_json_404() {
     let h = start().await;
     let client = no_redirect_client();
-    let resp = client.get(url(&h, "/__api/typo")).send().await.unwrap();
+    let resp = client.get(url(&h, "/api/typo")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 404);
     let ct = resp
         .headers()
@@ -135,16 +135,15 @@ async fn api_typo_keeps_json_404() {
     );
     let body = resp.text().await.unwrap();
     assert!(body.contains("\"code\":\"not_found\""));
-    assert!(body.contains("reserved path"));
 }
 
 #[tokio::test]
 async fn auth_typo_keeps_json_404() {
-    // Same rule applies to /__auth/* — the surface is consumed by
+    // Same rule applies to /auth/* — the surface is consumed by
     // login flows and bots, not browsers exploring.
     let h = start().await;
     let client = no_redirect_client();
-    let resp = client.get(url(&h, "/__auth/typo")).send().await.unwrap();
+    let resp = client.get(url(&h, "/auth/typo")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 404);
     let ct = resp
         .headers()

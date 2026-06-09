@@ -1,4 +1,4 @@
-//! Per-IP login throttle for `POST /__auth/login/password`.
+//! Per-IP login throttle for `POST /auth/login/password`.
 //!
 //! ADR-0018 calls for "5 failed attempts in 60 seconds triggers a
 //! 60-second lockout, in-memory counter". This isn't sufficient to

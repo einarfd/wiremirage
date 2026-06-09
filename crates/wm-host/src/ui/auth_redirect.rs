@@ -1,14 +1,14 @@
-//! Auth-redirect middleware for `/__ui/*`.
+//! Auth-redirect middleware for `/ui/*`.
 //!
 //! When a browser hits a UI URL without a valid session cookie, the
 //! standard `AuthContext` extractor would respond with `401
-//! Unauthorized` — fine for `/__api/*` but a dead-end UX for a
-//! browser. This middleware intercepts requests under `/__ui/*` and
-//! redirects to `/__auth/login?next=<original_path>` instead, then
-//! the `/__auth/login/password` handler honours `next` after a
+//! Unauthorized` — fine for `/api/*` but a dead-end UX for a
+//! browser. This middleware intercepts requests under `/ui/*` and
+//! redirects to `/auth/login?next=<original_path>` instead, then
+//! the `/auth/login/password` handler honours `next` after a
 //! successful login.
 //!
-//! Static-asset URLs (`/__ui/static/*`) are excluded from this
+//! Static-asset URLs (`/ui/static/*`) are excluded from this
 //! middleware in `ui::router()` — they're served unauthenticated.
 
 use axum::extract::{Request, State};
@@ -36,7 +36,7 @@ fn pick_session_cookie(req: &Request) -> Option<String> {
 }
 
 /// Encode `path` for embedding in the login redirect's `next=` query
-/// parameter. Only `/__ui/*` paths reach this middleware so the input
+/// parameter. Only `/ui/*` paths reach this middleware so the input
 /// alphabet is tame, but we percent-encode anything outside the
 /// query-safe set defensively.
 fn encode_next(path: &str) -> String {
@@ -69,7 +69,7 @@ pub async fn require_session(
         next_layer.run(req).await
     } else {
         let next = encode_next(&path);
-        let url = format!("/__auth/login?next={next}");
+        let url = format!("/auth/login?next={next}");
         Redirect::to(&url).into_response()
     }
 }

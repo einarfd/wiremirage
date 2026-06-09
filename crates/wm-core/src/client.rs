@@ -135,11 +135,11 @@ impl Client {
     // -- Health ---------------------------------------------------------
 
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {
-        self.send(Method::GET, "/__health", None::<&()>).await
+        self.send(Method::GET, "/health", None::<&()>).await
     }
 
     pub async fn ready(&self) -> Result<ReadyResponse, ClientError> {
-        self.send(Method::GET, "/__ready", None::<&()>).await
+        self.send(Method::GET, "/ready", None::<&()>).await
     }
 
     // -- Groups ---------------------------------------------------------
@@ -157,15 +157,15 @@ impl Client {
     ) -> Result<ListGroupsResponse, ClientError> {
         let qs = params.to_query_string();
         let path = if qs.is_empty() {
-            "/__api/groups".to_string()
+            "/api/groups".to_string()
         } else {
-            format!("/__api/groups?{qs}")
+            format!("/api/groups?{qs}")
         };
         self.send(Method::GET, &path, None::<&()>).await
     }
 
     pub async fn create_group(&self, body: &CreateGroupBody) -> Result<GroupRecord, ClientError> {
-        self.send(Method::POST, "/__api/groups", Some(body)).await
+        self.send(Method::POST, "/api/groups", Some(body)).await
     }
 
     /// Import a group + its routes from a spec (routes-only). The host
@@ -174,7 +174,7 @@ impl Client {
         &self,
         spec: &crate::spec::GroupSpec,
     ) -> Result<crate::spec::ImportSummary, ClientError> {
-        self.send(Method::POST, "/__api/groups/import", Some(spec))
+        self.send(Method::POST, "/api/groups/import", Some(spec))
             .await
     }
 
@@ -182,7 +182,7 @@ impl Client {
     pub async fn export_group(&self, group: &str) -> Result<crate::spec::GroupSpec, ClientError> {
         self.send(
             Method::GET,
-            &format!("/__api/groups/{}/export", urlencode(group)),
+            &format!("/api/groups/{}/export", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -191,7 +191,7 @@ impl Client {
     pub async fn get_group(&self, group: &str) -> Result<GroupRecord, ClientError> {
         self.send(
             Method::GET,
-            &format!("/__api/groups/{}", urlencode(group)),
+            &format!("/api/groups/{}", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -204,24 +204,21 @@ impl Client {
     ) -> Result<GroupRecord, ClientError> {
         self.send(
             Method::PATCH,
-            &format!("/__api/groups/{}", urlencode(group)),
+            &format!("/api/groups/{}", urlencode(group)),
             Some(body),
         )
         .await
     }
 
     pub async fn delete_group(&self, group: &str) -> Result<(), ClientError> {
-        self.send_no_body(
-            Method::DELETE,
-            &format!("/__api/groups/{}", urlencode(group)),
-        )
-        .await
+        self.send_no_body(Method::DELETE, &format!("/api/groups/{}", urlencode(group)))
+            .await
     }
 
     pub async fn refresh_group(&self, group: &str) -> Result<GroupRecord, ClientError> {
         self.send(
             Method::POST,
-            &format!("/__api/groups/{}/refresh", urlencode(group)),
+            &format!("/api/groups/{}/refresh", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -230,7 +227,7 @@ impl Client {
     pub async fn clear_group_state(&self, group: &str) -> Result<(), ClientError> {
         self.send_no_body(
             Method::DELETE,
-            &format!("/__api/groups/{}/state", urlencode(group)),
+            &format!("/api/groups/{}/state", urlencode(group)),
         )
         .await
     }
@@ -242,7 +239,7 @@ impl Client {
     ) -> Result<(), ClientError> {
         self.send_body_no_response(
             Method::PUT,
-            &format!("/__api/groups/{}/state", urlencode(group)),
+            &format!("/api/groups/{}/state", urlencode(group)),
             &SetStateBody { entries },
         )
         .await
@@ -254,7 +251,7 @@ impl Client {
     ) -> Result<StateSnapshotResponse, ClientError> {
         self.send(
             Method::GET,
-            &format!("/__api/groups/{}/state?format=snapshot", urlencode(group)),
+            &format!("/api/groups/{}/state?format=snapshot", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -263,7 +260,7 @@ impl Client {
     pub async fn clear_group_journal(&self, group: &str) -> Result<(), ClientError> {
         self.send_no_body(
             Method::DELETE,
-            &format!("/__api/groups/{}/journal", urlencode(group)),
+            &format!("/api/groups/{}/journal", urlencode(group)),
         )
         .await
     }
@@ -280,15 +277,15 @@ impl Client {
     ) -> Result<ListRoutesResponse, ClientError> {
         let qs = params.to_query_string();
         let path = if qs.is_empty() {
-            "/__api/routes".to_string()
+            "/api/routes".to_string()
         } else {
-            format!("/__api/routes?{qs}")
+            format!("/api/routes?{qs}")
         };
         self.send(Method::GET, &path, None::<&()>).await
     }
 
     pub async fn create_route(&self, body: &CreateRouteBody) -> Result<RouteRecord, ClientError> {
-        self.send(Method::POST, "/__api/routes", Some(body)).await
+        self.send(Method::POST, "/api/routes", Some(body)).await
     }
 
     pub async fn get_route(&self, slug: &str) -> Result<RouteRecord, ClientError> {
@@ -298,7 +295,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send(
             Method::GET,
-            &format!("/__api/routes/{}/{number}", urlencode(group)),
+            &format!("/api/routes/{}/{number}", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -312,7 +309,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send(
             Method::PATCH,
-            &format!("/__api/routes/{}/{number}", urlencode(group)),
+            &format!("/api/routes/{}/{number}", urlencode(group)),
             Some(body),
         )
         .await
@@ -322,7 +319,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send_no_body(
             Method::DELETE,
-            &format!("/__api/routes/{}/{number}", urlencode(group)),
+            &format!("/api/routes/{}/{number}", urlencode(group)),
         )
         .await
     }
@@ -334,7 +331,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send(
             Method::GET,
-            &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+            &format!("/api/routes/{}/{number}/state", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -344,7 +341,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send_no_body(
             Method::DELETE,
-            &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+            &format!("/api/routes/{}/{number}/state", urlencode(group)),
         )
         .await
     }
@@ -357,7 +354,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send_body_no_response(
             Method::PUT,
-            &format!("/__api/routes/{}/{number}/state", urlencode(group)),
+            &format!("/api/routes/{}/{number}/state", urlencode(group)),
             &SetStateBody { entries },
         )
         .await
@@ -371,7 +368,7 @@ impl Client {
         self.send(
             Method::GET,
             &format!(
-                "/__api/routes/{}/{number}/state?format=snapshot",
+                "/api/routes/{}/{number}/state?format=snapshot",
                 urlencode(group)
             ),
             None::<&()>,
@@ -383,7 +380,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send(
             Method::GET,
-            &format!("/__api/routes/{}/{number}/source", urlencode(group)),
+            &format!("/api/routes/{}/{number}/source", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -397,7 +394,7 @@ impl Client {
         let (group, number) = split_route_slug(slug)?;
         self.send(
             Method::POST,
-            &format!("/__api/routes/{}/{number}/dry-run", urlencode(group)),
+            &format!("/api/routes/{}/{number}/dry-run", urlencode(group)),
             Some(body),
         )
         .await
@@ -429,9 +426,9 @@ impl Client {
     ) -> Result<ListJournalResponse, ClientError> {
         let qs = params.to_query_string();
         let path = if qs.is_empty() {
-            format!("/__api/journal/{}", urlencode(group))
+            format!("/api/journal/{}", urlencode(group))
         } else {
-            format!("/__api/journal/{}?{qs}", urlencode(group))
+            format!("/api/journal/{}?{qs}", urlencode(group))
         };
         self.send(Method::GET, &path, None::<&()>).await
     }
@@ -443,9 +440,9 @@ impl Client {
     ) -> Result<ListUnmatchedResponse, ClientError> {
         let qs = params.to_query_string();
         let path = if qs.is_empty() {
-            "/__api/unmatched".to_string()
+            "/api/unmatched".to_string()
         } else {
-            format!("/__api/unmatched?{qs}")
+            format!("/api/unmatched?{qs}")
         };
         self.send(Method::GET, &path, None::<&()>).await
     }
@@ -454,7 +451,7 @@ impl Client {
     pub async fn get_unmatched_entry(&self, number: u64) -> Result<UnmatchedRecord, ClientError> {
         self.send(
             Method::GET,
-            &format!("/__api/unmatched/{number}"),
+            &format!("/api/unmatched/{number}"),
             None::<&()>,
         )
         .await
@@ -467,7 +464,7 @@ impl Client {
     ) -> Result<JournalRecord, ClientError> {
         self.send(
             Method::GET,
-            &format!("/__api/journal/{}/{number}", urlencode(group)),
+            &format!("/api/journal/{}/{number}", urlencode(group)),
             None::<&()>,
         )
         .await
@@ -476,22 +473,19 @@ impl Client {
     // -- Tokens ---------------------------------------------------------
 
     pub async fn list_tokens(&self) -> Result<ListTokensResponse, ClientError> {
-        self.send(Method::GET, "/__api/tokens", None::<&()>).await
+        self.send(Method::GET, "/api/tokens", None::<&()>).await
     }
 
     pub async fn create_token(
         &self,
         body: &CreateTokenBody,
     ) -> Result<CreateTokenResponse, ClientError> {
-        self.send(Method::POST, "/__api/tokens", Some(body)).await
+        self.send(Method::POST, "/api/tokens", Some(body)).await
     }
 
     pub async fn delete_token(&self, name: &str) -> Result<(), ClientError> {
-        self.send_no_body(
-            Method::DELETE,
-            &format!("/__api/tokens/{}", urlencode(name)),
-        )
-        .await
+        self.send_no_body(Method::DELETE, &format!("/api/tokens/{}", urlencode(name)))
+            .await
     }
 
     pub async fn rename_token(
@@ -505,7 +499,7 @@ impl Client {
         }
         self.send(
             Method::PATCH,
-            &format!("/__api/tokens/{}", urlencode(name)),
+            &format!("/api/tokens/{}", urlencode(name)),
             Some(&Body { name: new_name }),
         )
         .await
@@ -516,7 +510,7 @@ impl Client {
     /// List all users. Admin-only on the host side; non-admin callers
     /// get a `Forbidden` error.
     pub async fn list_users(&self) -> Result<crate::models::ListUsersResponse, ClientError> {
-        self.send(Method::GET, "/__api/users", None::<&()>).await
+        self.send(Method::GET, "/api/users", None::<&()>).await
     }
 
     /// Show one user by name. Admin can see any user; non-admin can
@@ -524,7 +518,7 @@ impl Client {
     pub async fn get_user(&self, name: &str) -> Result<crate::models::UserRecord, ClientError> {
         self.send(
             Method::GET,
-            &format!("/__api/users/{}", urlencode(name)),
+            &format!("/api/users/{}", urlencode(name)),
             None::<&()>,
         )
         .await
@@ -533,7 +527,7 @@ impl Client {
     /// Show the authenticated user's own record. Always available
     /// regardless of admin status.
     pub async fn get_me(&self) -> Result<crate::models::UserRecord, ClientError> {
-        self.send(Method::GET, "/__api/users/me", None::<&()>).await
+        self.send(Method::GET, "/api/users/me", None::<&()>).await
     }
 
     /// Create a new user. Admin-only.
@@ -541,7 +535,7 @@ impl Client {
         &self,
         body: &crate::models::CreateUserBody,
     ) -> Result<crate::models::UserRecord, ClientError> {
-        self.send(Method::POST, "/__api/users", Some(body)).await
+        self.send(Method::POST, "/api/users", Some(body)).await
     }
 
     /// Update a user's mutable fields (currently only `is_admin`).
@@ -553,7 +547,7 @@ impl Client {
     ) -> Result<crate::models::UserRecord, ClientError> {
         self.send(
             Method::PATCH,
-            &format!("/__api/users/{}", urlencode(name)),
+            &format!("/api/users/{}", urlencode(name)),
             Some(body),
         )
         .await
@@ -562,7 +556,7 @@ impl Client {
     /// Delete a user. Admin-only. The host refuses to delete the
     /// last admin or a user that owns routes.
     pub async fn delete_user(&self, name: &str) -> Result<(), ClientError> {
-        self.send_no_body(Method::DELETE, &format!("/__api/users/{}", urlencode(name)))
+        self.send_no_body(Method::DELETE, &format!("/api/users/{}", urlencode(name)))
             .await
     }
 
@@ -576,8 +570,8 @@ impl Client {
         topic: Option<&str>,
     ) -> Result<crate::models::CapabilityResponse, ClientError> {
         let path = match topic {
-            Some(t) if !t.is_empty() => format!("/__api/capabilities/{}", urlencode(t)),
-            _ => "/__api/capabilities".to_string(),
+            Some(t) if !t.is_empty() => format!("/api/capabilities/{}", urlencode(t)),
+            _ => "/api/capabilities".to_string(),
         };
         self.send(Method::GET, &path, None::<&()>).await
     }
@@ -594,7 +588,7 @@ impl Client {
         path: &str,
     ) -> Result<crate::models::MatchResponse, ClientError> {
         let qs = format!(
-            "/__api/match?group={}&method={}&path={}",
+            "/api/match?group={}&method={}&path={}",
             urlencode(group),
             urlencode(method),
             urlencode(path),

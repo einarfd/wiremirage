@@ -1,6 +1,6 @@
-//! REST API at `/__api/*`.
+//! REST API at `/api/*`.
 //!
-//! Routes (`/__api/routes`): POST/GET/DELETE per `rest-api.md`. The
+//! Routes (`/api/routes`): POST/GET/DELETE per `rest-api.md`. The
 //! only public artifact input is source (`language: "javascript" |
 //! "typescript"`, `source`); pre-compiled wasm upload was retired in
 //! ADR-0023. Requests are handled in-process: JS is stored verbatim and
@@ -8,11 +8,11 @@
 //! through `ts_transpile::transpile` (pure-Rust swc) first and is stored
 //! as JS. No external compiler.
 //!
-//! Tokens (`/__api/tokens`): POST/GET/DELETE for the caller's own
+//! Tokens (`/api/tokens`): POST/GET/DELETE for the caller's own
 //! tokens, per ADR-0012. Plaintext is returned exactly once, in the
 //! create response.
 //!
-//! Every handler under `/__api/*` requires a valid bearer token; the
+//! Every handler under `/api/*` requires a valid bearer token; the
 //! `AuthContext` extractor (impl below) returns 401 on missing /
 //! invalid / expired. Mock-traffic dispatch (the fallback in
 //! `server::router`) is intentionally open — SUTs don't have tokens.
@@ -33,12 +33,11 @@ use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::registry::{
     Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, RouteStateEntry, render_slug,
 };
-use crate::server::is_reserved_path;
 use crate::wire::WireBytes;
 use crate::{AppState, SUPPORTED_BINDINGS_VERSION};
 
-/// Maximum size of a `/__api/*` JSON body. axum's default is 2 MiB;
-/// `POST /__api/routes` and `PATCH /__api/routes/{group}/{n}` carry
+/// Maximum size of a `/api/*` JSON body. axum's default is 2 MiB;
+/// `POST /api/routes` and `PATCH /api/routes/{group}/{n}` carry
 /// handler source, which is comfortably under that for any realistic
 /// handler. 16 MiB is a generous ceiling that keeps the auth-gated
 /// JSON surface uniform without being a target.
@@ -46,85 +45,79 @@ pub(crate) const MAX_API_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/__api/routes", post(create_route).get(list_routes))
+        .route("/api/routes", post(create_route).get(list_routes))
         .route(
-            "/__api/routes/{group}/{number}",
+            "/api/routes/{group}/{number}",
             get(get_route).patch(patch_route).delete(delete_route),
         )
         .route(
-            "/__api/routes/{group}/{number}/state",
+            "/api/routes/{group}/{number}/state",
             get(get_route_state)
                 .put(set_route_state)
                 .delete(delete_route_state),
         )
+        .route("/api/routes/{group}/{number}/source", get(get_route_source))
+        .route("/api/routes/{group}/{number}/dry-run", post(dry_run_route))
+        .route("/api/tokens", post(create_token).get(list_tokens))
         .route(
-            "/__api/routes/{group}/{number}/source",
-            get(get_route_source),
-        )
-        .route(
-            "/__api/routes/{group}/{number}/dry-run",
-            post(dry_run_route),
-        )
-        .route("/__api/tokens", post(create_token).get(list_tokens))
-        .route(
-            "/__api/tokens/{name}",
+            "/api/tokens/{name}",
             get(get_token).delete(delete_token).patch(patch_token),
         )
         // Users — POST/GET (admin); GET /me (any authed); GET/PATCH/DELETE
         // /{name} (admin or self for the GET; admin-only for PATCH/DELETE).
         // /me must come before /{name} or axum's matcher will treat "me"
         // as a user name.
-        .route("/__api/users", post(create_user).get(list_users))
-        .route("/__api/users/me", get(get_me))
+        .route("/api/users", post(create_user).get(list_users))
+        .route("/api/users/me", get(get_me))
         .route(
-            "/__api/users/{name}",
+            "/api/users/{name}",
             get(get_user).patch(patch_user).delete(delete_user),
         )
         // Journal — list/get per group (admin or any group-route owner).
-        .route("/__api/journal/{group}", get(list_journal))
-        .route("/__api/journal/{group}/{number}", get(get_journal_entry))
+        .route("/api/journal/{group}", get(list_journal))
+        .route("/api/journal/{group}/{number}", get(get_journal_entry))
         // Journal tail — SSE stream of live events. Auth: owner-or-admin
         // when ?group= is set, admin-only otherwise (matches the
         // host-wide unmatched read).
-        .route("/__api/journal/tail", get(tail_journal))
+        .route("/api/journal/tail", get(tail_journal))
         // Match probe — read-only diagnostic. Any authenticated user.
-        .route("/__api/match", get(match_probe))
+        .route("/api/match", get(match_probe))
         // Unmatched — admin-only (host-wide and may include probing traffic).
-        .route("/__api/unmatched", get(list_unmatched))
-        .route("/__api/unmatched/{number}", get(get_unmatched_entry))
+        .route("/api/unmatched", get(list_unmatched))
+        .route("/api/unmatched/{number}", get(get_unmatched_entry))
         // Groups — owner-or-admin for cross-cutting actions; the
         // sub-endpoints (refresh, state, journal) live under the
-        // group's slug. Note: `DELETE /__api/groups/{group}/journal`
+        // group's slug. Note: `DELETE /api/groups/{group}/journal`
         // here supersedes the `clear-journal` shape from the rest-api
         // doc — same semantics, lives under the group's path.
-        .route("/__api/groups", post(create_group).get(list_groups))
-        // Static segment — registered before `/__api/groups/{group}`.
-        .route("/__api/groups/import", post(import_group_handler))
+        .route("/api/groups", post(create_group).get(list_groups))
+        // Static segment — registered before `/api/groups/{group}`.
+        .route("/api/groups/import", post(import_group_handler))
         .route(
-            "/__api/groups/{group}",
+            "/api/groups/{group}",
             get(get_group).patch(patch_group).delete(delete_group),
         )
-        .route("/__api/groups/{group}/export", get(export_group_handler))
-        .route("/__api/groups/{group}/refresh", post(refresh_group))
+        .route("/api/groups/{group}/export", get(export_group_handler))
+        .route("/api/groups/{group}/refresh", post(refresh_group))
         .route(
-            "/__api/groups/{group}/state",
+            "/api/groups/{group}/state",
             get(get_group_state)
                 .put(set_group_state)
                 .delete(delete_group_state),
         )
         .route(
-            "/__api/groups/{group}/journal",
+            "/api/groups/{group}/journal",
             axum::routing::delete(delete_group_journal),
         )
         // Handler-API capabilities. Returns the same markdown the MCP
         // tool and `wm capabilities` CLI command surface — single
         // source of truth in `crate::capabilities`. Bearer-token
-        // gated like everything else under /__api/*.
-        .route("/__api/capabilities", get(list_capabilities))
-        .route("/__api/capabilities/{topic}", get(get_capability))
+        // gated like everything else under /api/*.
+        .route("/api/capabilities", get(list_capabilities))
+        .route("/api/capabilities/{topic}", get(get_capability))
         // Lift axum's 2 MiB default so wasm uploads on POST/PATCH
-        // /__api/routes aren't artificially cut off. The lifted limit
-        // covers every /__api/* endpoint uniformly — overkill for the
+        // /api/routes aren't artificially cut off. The lifted limit
+        // covers every /api/* endpoint uniformly — overkill for the
         // endpoints that take small JSON, but the limit is a ceiling,
         // not a target, and uniform is simpler than per-route.
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
@@ -144,7 +137,7 @@ pub(crate) struct CreateRouteBody {
     pub(crate) source: Option<String>,
 }
 
-/// Partial-update payload for `PATCH /__api/routes/{group}/{n}`. Every
+/// Partial-update payload for `PATCH /api/routes/{group}/{n}`. Every
 /// field is optional; `language` is required when replacing the
 /// artifact (i.e. when `source` is present).
 #[derive(Debug, Deserialize)]
@@ -522,7 +515,7 @@ async fn create_route(
 ) -> Result<Response, ApiError> {
     let route = create_route_core(&state, &auth, body).await?;
     let location = format!(
-        "/__api/routes/{}",
+        "/api/routes/{}",
         render_slug(&route.group_name, route.number)
     );
     let resp_body = RouteResponse::build(&route, &headers, state.trust_forwarded_headers());
@@ -535,19 +528,15 @@ async fn create_route(
 }
 
 /// Shared validate + compile + register pipeline behind both
-/// `POST /__api/routes` and the UI's `POST /__ui/routes/new`. Lives
+/// `POST /api/routes` and the UI's `POST /ui/routes/new`. Lives
 /// in `api.rs` so the validation rules stay in one place.
 pub(crate) async fn create_route_core(
     state: &AppState,
     auth: &AuthContext,
     body: CreateRouteBody,
 ) -> Result<crate::registry::Route, ApiError> {
-    if is_reserved_path(&body.path) {
-        return Err(ApiError::validation(format!(
-            "path {:?} starts with a reserved prefix and cannot be claimed",
-            body.path
-        )));
-    }
+    // ADR-0033: no reserved paths — a route lives on its group's subdomain,
+    // which is pure mock space, so any path (incl. /health, /api/*) is fair game.
 
     // Cheap conflict precheck so idempotent retries don't burn an
     // swc transpile per attempt — the same scan runs again inside
@@ -652,7 +641,7 @@ async fn list_routes(
 
 /// One paginated page of routes plus the totals the caller needs to
 /// render "K of N" + a next-page link. Used by both the REST handler
-/// above and the `/__ui/routes` page handler.
+/// above and the `/ui/routes` page handler.
 pub(crate) struct PagedRoutes {
     pub routes: Vec<Route>,
     pub total: u64,
@@ -877,7 +866,7 @@ async fn patch_route(
 }
 
 /// Shared PATCH pipeline used by both the REST handler above and the
-/// `/__ui/routes/{g}/{n}/source/edit` page handler. Returns the updated
+/// `/ui/routes/{g}/{n}/source/edit` page handler. Returns the updated
 /// `Route` so callers can decide their own response shape (JSON for
 /// REST, redirect for UI).
 pub(crate) async fn patch_route_core(
@@ -906,14 +895,6 @@ pub(crate) async fn patch_route_core(
              (`methods`, `path`, `source`)",
         ));
     }
-    if let Some(ref new_path) = body.path
-        && is_reserved_path(new_path)
-    {
-        return Err(ApiError::validation(format!(
-            "path {new_path:?} starts with a reserved prefix and cannot be claimed",
-        )));
-    }
-
     // Compute the artifact triple (language, bindings_version,
     // compiled_wasm) when the body changes the source. When `source`
     // is absent the existing artifact is preserved; `language` is
@@ -1132,7 +1113,7 @@ async fn delete_route_state(
 
 // -- Source --------------------------------------------------------------------
 
-/// Response shape for `GET /__api/routes/{group}/{n}/source`. The
+/// Response shape for `GET /api/routes/{group}/{n}/source`. The
 /// `source` field carries the original handler source the caller sent;
 /// `None` for pre-compiled `wasm` uploads (no source ever existed) and
 /// for records that pre-date slice 36. The slug is included so the
@@ -1193,7 +1174,7 @@ async fn dry_run_route(
     Ok(Json(resp))
 }
 
-// -- /__api/tokens ------------------------------------------------------------
+// -- /api/tokens ------------------------------------------------------------
 //
 // Slice-5 scope: a caller manages their own tokens. Admin overrides
 // (revoking another user's token, listing on behalf of an owner, PATCH
@@ -1321,10 +1302,10 @@ async fn patch_token(
     Ok(Json(TokenRecord::from(&token)))
 }
 
-// -- /__api/users -------------------------------------------------------------
+// -- /api/users -------------------------------------------------------------
 //
-// Admin-only for cross-user actions. `GET /__api/users/me` and
-// `GET /__api/users/{name}` (when `name` is the caller's own name) are
+// Admin-only for cross-user actions. `GET /api/users/me` and
+// `GET /api/users/{name}` (when `name` is the caller's own name) are
 // open to any authed user. PATCH is admin-only and only toggles
 // `is_admin` for now — rename is too close to the deferred user-merge
 // operation, see the auth design notes.
@@ -1487,7 +1468,7 @@ async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// -- /__api/journal -----------------------------------------------------------
+// -- /api/journal -----------------------------------------------------------
 //
 // Per-request audit trail for mock traffic. The journal is the
 // agent-debugging surface ("did the SUT call my mock, and what
@@ -1777,7 +1758,7 @@ async fn get_unmatched_entry(
     Ok(Json(entry))
 }
 
-// -- /__api/groups ------------------------------------------------------------
+// -- /api/groups ------------------------------------------------------------
 //
 // Lifecycle endpoints. POST is open to any authed user (they own
 // what they create); list filters to owned-by-self for non-admin
@@ -1917,7 +1898,7 @@ async fn list_groups(
 
 /// One paginated page of groups plus the totals callers need for
 /// pagination chrome. Used by `list_groups` (REST) and the
-/// `/__ui/groups` page handler.
+/// `/ui/groups` page handler.
 pub(crate) struct PagedGroups {
     pub groups: Vec<Group>,
     pub total: u64,
@@ -2178,7 +2159,7 @@ async fn delete_group_journal(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// -- /__api/groups/import + /__api/groups/{group}/export (spec) --------------
+// -- /api/groups/import + /api/groups/{group}/export (spec) --------------
 //
 // Server-side import/export of a routes-only group spec (wm_core::spec).
 // Shared by REST (here), the MCP import_group/export_group tools, and the UI.
@@ -2292,7 +2273,7 @@ async fn export_group_handler(
     Ok(Json(export_group_core(&state, &auth, &group_ref)?))
 }
 
-// -- /__api/journal/tail (SSE) -----------------------------------------------
+// -- /api/journal/tail (SSE) -----------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct TailQuery {
@@ -2343,7 +2324,7 @@ async fn tail_journal(
 
     // Auth gate. When a group is supplied, owner-or-admin on that
     // group; otherwise admin-only (host-wide tail is sensitive, same
-    // shape as `/__api/unmatched`).
+    // shape as `/api/unmatched`).
     if let Some(group_ref) = filter.group.as_deref() {
         let group_record = state
             .routes()
@@ -2402,7 +2383,7 @@ async fn tail_journal(
 
     // End the stream when the host's shutdown signal fires so axum's
     // graceful-shutdown can drain — otherwise an idle browser tab on
-    // /__ui/journal/live pins this response open forever and the
+    // /ui/journal/live pins this response open forever and the
     // process won't exit on Ctrl-C. In test paths where no shutdown
     // receiver is wired, `pending()` keeps the original behaviour.
     let stop = match state.shutdown() {
@@ -2418,7 +2399,7 @@ async fn tail_journal(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-// -- /__api/match -------------------------------------------------------------
+// -- /api/match -------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct MatchQuery {
@@ -2572,8 +2553,8 @@ struct CapabilityResponse {
     available_topics: Vec<String>,
 }
 
-/// `GET /__api/capabilities` → overview + topic list. Returns the
-/// same shape as `/__api/capabilities/{topic}` with topic="overview".
+/// `GET /api/capabilities` → overview + topic list. Returns the
+/// same shape as `/api/capabilities/{topic}` with topic="overview".
 async fn list_capabilities(_: AuthContext) -> Json<CapabilityResponse> {
     let (topic, content) = crate::capabilities::lookup(None);
     Json(CapabilityResponse {
@@ -2586,7 +2567,7 @@ async fn list_capabilities(_: AuthContext) -> Json<CapabilityResponse> {
     })
 }
 
-/// `GET /__api/capabilities/{topic}` → the named topic. Unknown
+/// `GET /api/capabilities/{topic}` → the named topic. Unknown
 /// topics fall back to the overview rather than 404 — matches the
 /// MCP tool's behaviour (typos shouldn't punish an exploring agent).
 async fn get_capability(

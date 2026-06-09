@@ -2,7 +2,7 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">New group</span>
 </nav>
@@ -23,7 +23,7 @@
 </section>
 {% endif %}
 
-<form method="post" action="/__ui/groups/new">
+<form method="post" action="/ui/groups/new">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
   <section class="card">
@@ -48,11 +48,11 @@
 
   <footer class="page-footer">
     <button type="submit" class="btn btn--primary">Create group</button>
-    <a href="/__ui/groups" class="btn btn--ghost">Cancel</a>
+    <a href="/ui/groups" class="btn btn--ghost">Cancel</a>
   </footer>
 </form>
 
 <p class="text-muted">
-  Have a whole group spec (routes + sources)? <a class="link" href="/__ui/groups/import">Import it</a> instead.
+  Have a whole group spec (routes + sources)? <a class="link" href="/ui/groups/import">Import it</a> instead.
 </p>
 {% endblock %}

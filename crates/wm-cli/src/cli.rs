@@ -19,7 +19,7 @@ pub struct Cli {
     pub host: Option<String>,
 
     /// Bearer token (`wmt_...`). Required for everything under
-    /// `/__api/*`. Read from `WM_TOKEN` if not supplied; falls back
+    /// `/api/*`. Read from `WM_TOKEN` if not supplied; falls back
     /// to the selected profile's `token` field. `wm health` and
     /// `wm version` work without a token.
     #[arg(long, env = "WM_TOKEN", global = true)]
@@ -44,7 +44,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Probe `/__health`.
+    /// Probe `/health`.
     Health,
     /// Print CLI and (when reachable) host version info.
     Version,

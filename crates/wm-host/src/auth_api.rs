@@ -1,16 +1,16 @@
-//! `/__auth/*` HTTP endpoints. Unauthenticated by design: the login
+//! `/auth/*` HTTP endpoints. Unauthenticated by design: the login
 //! page renders for anyone, and the password POST is the only way
 //! to mint a session for local-auth users.
 //!
 //! Surface (slice 20):
 //!
-//!   GET  /__auth/login            login form (HTML); shows the
+//!   GET  /auth/login            login form (HTML); shows the
 //!                                 password form when `WM_LOCAL_AUTH`
 //!                                 is configured. OAuth provider
 //!                                 buttons land alongside in a later
 //!                                 slice.
-//!   POST /__auth/login/password   credential check + session mint
-//!   POST /__auth/logout           session revoke + cookie clear
+//!   POST /auth/login/password   credential check + session mint
+//!   POST /auth/logout           session revoke + cookie clear
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -30,22 +30,22 @@ use crate::session::COOKIE_NAME;
 
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/__auth/login", get(login_page))
-        .route("/__auth/login/password", post(password_login))
-        .route("/__auth/logout", post(logout))
+        .route("/auth/login", get(login_page))
+        .route("/auth/login/password", post(password_login))
+        .route("/auth/logout", post(logout))
         // GitHub OAuth (slice 50). Both are GETs — the browser does
         // navigation, GitHub posts back via 302 with the code in the
         // query string. No CSRF token needed because the `state`
         // parameter on the OAuth callback IS our CSRF defence (we
         // generate and validate it ourselves).
-        .route("/__auth/start/github", get(start_github))
-        .route("/__auth/callback", get(github_callback))
-        // Every form-bearing endpoint in this router is `/__auth/*`,
+        .route("/auth/start/github", get(start_github))
+        .route("/auth/callback", get(github_callback))
+        // Every form-bearing endpoint in this router is `/auth/*`,
         // so we can blanket-CSRF the lot. The login GET mints the
         // cookie; the POSTs (login + logout) validate it. The
         // middleware reads `state.secure_cookies()` to decide
         // whether to append `Secure` on the cookie it mints. The
-        // OAuth start/callback routes are also under `/__auth/*` —
+        // OAuth start/callback routes are also under `/auth/*` —
         // they don't carry form bodies but the middleware mints the
         // CSRF cookie on safe methods, which is fine to share with
         // the password login form.
@@ -58,7 +58,7 @@ pub fn router(state: AppState) -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct LoginPageQuery {
     /// Post-login redirect target carried through from the original
-    /// `/__ui/*` navigation. Validated as host-relative when the
+    /// `/ui/*` navigation. Validated as host-relative when the
     /// form posts (see `password_login`).
     next: Option<String>,
 }
@@ -66,7 +66,7 @@ struct LoginPageQuery {
 async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuery>) -> Response {
     // The form only renders when local auth is wired up; with the
     // surface bare today, showing it unconditionally would be a UX
-    // dead-end (`POST /__auth/login/password` would 503). The CSRF
+    // dead-end (`POST /auth/login/password` would 503). The CSRF
     // middleware wraps this handler so `csrf_token` is in scope and
     // gets injected into the template context by `ui::render`.
     let local_enabled = !state.local_auth().is_empty();
@@ -190,7 +190,7 @@ async fn password_login(
         .next
         .as_deref()
         .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-        .unwrap_or("/__ui/");
+        .unwrap_or("/ui/");
 
     let mut redirect: Response = Redirect::to(next).into_response();
     redirect.headers_mut().append(
@@ -284,13 +284,13 @@ fn format_clear_cookie(secure: bool) -> String {
 // -- GitHub OAuth ------------------------------------------------------------
 //
 // Two-step flow:
-//   GET /__auth/start/github   → 302 to github.com/login/oauth/authorize
-//   GET /__auth/callback       → exchange code, mint session, 302 to next
+//   GET /auth/start/github   → 302 to github.com/login/oauth/authorize
+//   GET /auth/callback       → exchange code, mint session, 302 to next
 //
 // CSRF is handled inside the OAuth protocol itself: we generate a
 // random `state` nonce at start, stash it (with the post-login `next`
 // path) in Valkey at `oauth_state:{nonce}` with a 10-minute TTL, and
-// validate the round-trip on callback. A request to /__auth/callback
+// validate the round-trip on callback. A request to /auth/callback
 // without a matching state is rejected.
 //
 // The state record is one-shot: the callback handler deletes it
@@ -330,7 +330,7 @@ async fn start_github(
         .next
         .as_deref()
         .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-        .unwrap_or("/__ui/")
+        .unwrap_or("/ui/")
         .to_string();
 
     // 32 random bytes encoded urlsafe-base64 ≈ 43 chars; collision-safe.
@@ -376,7 +376,7 @@ async fn github_callback(
 
     if let Some(err) = q.error {
         // User denied authorization at GitHub, or GitHub rejected the
-        // app. Bounce back to /__auth/login with a human-readable
+        // app. Bounce back to /auth/login with a human-readable
         // error. The description is GitHub-supplied; we surface it
         // verbatim because operators benefit from knowing whether it
         // was "access_denied" vs "redirect_uri_mismatch" vs other.
@@ -525,7 +525,7 @@ fn consume_oauth_state(state: &AppState, nonce: &str) -> Result<String, StateErr
     let Some(bytes) = bucket.get(&key).map_err(StateError::Storage)? else {
         return Err(StateError::NotFound);
     };
-    let next = String::from_utf8(bytes).unwrap_or_else(|_| "/__ui/".to_string());
+    let next = String::from_utf8(bytes).unwrap_or_else(|_| "/ui/".to_string());
     // One-shot — delete before we exchange the code so a parallel
     // attempt with the same state can't ride along.
     let _ = bucket.delete(&key);
@@ -533,7 +533,7 @@ fn consume_oauth_state(state: &AppState, nonce: &str) -> Result<String, StateErr
     let safe_next = if next.starts_with('/') && !next.starts_with("//") {
         next
     } else {
-        "/__ui/".to_string()
+        "/ui/".to_string()
     };
     Ok(safe_next)
 }
@@ -582,7 +582,7 @@ pub(crate) fn group_base_url(group: &str, headers: &HeaderMap, trust_forwarded: 
 
 fn derive_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
     format!(
-        "{}/__auth/callback",
+        "{}/auth/callback",
         public_base_url(headers, trust_forwarded)
     )
 }

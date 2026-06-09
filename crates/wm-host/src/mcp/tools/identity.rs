@@ -18,8 +18,8 @@ pub struct WhoAmIResult {
     /// `https://wm.example.com`) — derived from the request, honoring
     /// `X-Forwarded-*` when behind a trusted proxy (ADR-0027). Mock
     /// routes are served directly under it: a route at `/v1/charges`
-    /// answers at `{base_url}/v1/charges`. The `/__api/mcp` endpoint
-    /// you're talking to right now is `{base_url}/__api/mcp`.
+    /// answers at `{base_url}/v1/charges`. The `/api/mcp` endpoint
+    /// you're talking to right now is `{base_url}/api/mcp`.
     pub base_url: String,
 }
 

@@ -87,7 +87,7 @@ async fn typescript_route_creates_and_dispatches() {
         axum::serve(listener, app).await.expect("axum::serve");
     });
 
-    // POST /__api/routes with language=typescript + source. Host
+    // POST /api/routes with language=typescript + source. Host
     // transpiles via engine.transpile, stores as JS-shape source,
     // dispatch routes through the engine.
     let body = serde_json::json!({
@@ -104,7 +104,7 @@ async fn typescript_route_creates_and_dispatches() {
         "#,
     });
     let create = reqwest::Client::new()
-        .post(format!("http://{addr}/__api/routes"))
+        .post(format!("http://{addr}/api/routes"))
         .header("authorization", "Bearer wmt_test")
         .json(&body)
         .send()

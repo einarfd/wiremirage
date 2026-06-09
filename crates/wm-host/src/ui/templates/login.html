@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in — WireMirage</title>
-<link rel="stylesheet" href="/__ui/static/wm.css">
+<link rel="stylesheet" href="/ui/static/wm.css">
 </head>
 <body class="auth-body">
 <main class="auth-card">
@@ -12,7 +12,7 @@
 
 {% if github_enabled %}
 <a class="btn btn--primary auth-oauth-btn"
-   href="/__auth/start/github{% if next %}?next={{ next }}{% endif %}">
+   href="/auth/start/github{% if next %}?next={{ next }}{% endif %}">
   Continue with GitHub
 </a>
 {%- endif %}
@@ -22,7 +22,7 @@
 {%- endif %}
 
 {% if local_enabled %}
-<form method="post" action="/__auth/login/password" class="auth-form">
+<form method="post" action="/auth/login/password" class="auth-form">
   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   {%- if next %}
   <input type="hidden" name="next" value="{{ next }}">

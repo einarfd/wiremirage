@@ -42,7 +42,7 @@ at the bottom of `inject.ts` (`successResponse` / `throttleResponse`).
 ## How config gets in
 
 The rules are seeded into the group's shared state via the writable-state API
-(ADR-0025): `setup.sh` does `PUT /__api/groups/s3-slowdown/state` with
+(ADR-0025): `setup.sh` does `PUT /api/groups/s3-slowdown/state` with
 `rules.json` as the value of the `inject:rules` key, which `inject.ts` reads.
 
 This used to be the lane's headline *finding* — WireMirage had no public

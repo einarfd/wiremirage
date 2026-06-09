@@ -528,9 +528,9 @@ async fn user_agent_default_starts_with_wm_cli() {
         })
         .await
         .expect("create");
-    // The /__api/groups POST went through the default client; the
+    // The /api/groups POST went through the default client; the
     // host journal would have stamped a User-Agent in OTel spans
-    // (not journaled for /__api/* traffic). For tier-2 we simply
+    // (not journaled for /api/* traffic). For tier-2 we simply
     // confirm the call succeeds; the tier-1 mock test asserts the
     // header value directly.
 }

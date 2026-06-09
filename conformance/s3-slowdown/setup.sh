@@ -11,7 +11,7 @@ set -euo pipefail
 BASE="$1"
 TOKEN="$2"
 body=$(jq -Rs --arg k "inject:rules" '{entries: {($k): .}}' < rules.json)
-curl -fsS -X PUT "${BASE}/__api/groups/s3-slowdown/state" \
+curl -fsS -X PUT "${BASE}/api/groups/s3-slowdown/state" \
   -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' \
   -d "$body" >/dev/null
 echo "  seeded injection rules into group state ($(wc -c < rules.json | tr -d ' ') bytes)"

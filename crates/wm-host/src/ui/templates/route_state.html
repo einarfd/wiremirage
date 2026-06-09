@@ -2,11 +2,11 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/groups/{{ group_name }}">{{ group_name }}</a>
+  <a href="/ui/groups/{{ group_name }}">{{ group_name }}</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/routes/{{ group_name }}/{{ route_number }}">#{{ route_number }} {{ route_methods }} {{ route_path }}</a>
+  <a href="/ui/routes/{{ group_name }}/{{ route_number }}">#{{ route_number }} {{ route_methods }} {{ route_path }}</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">State</span>
 </nav>
@@ -15,7 +15,7 @@
   <h1>Route state — <code>{{ route_methods }} {{ route_path }}</code></h1>
   <p class="text-muted">
     Private kv (the <code>kv:</code> namespace) for this route. Group-shared
-    state lives on the <a href="/__ui/groups/{{ group_name }}/state">group state page</a>.
+    state lives on the <a href="/ui/groups/{{ group_name }}/state">group state page</a>.
   </p>
 </section>
 
@@ -23,7 +23,7 @@
   <header class="card__header">
     <h2>{{ data.total }} entr{% if data.total == 1 %}y{% else %}ies{% endif %}</h2>
     {% if data.total > 0 %}
-    <form method="post" action="/__ui/routes/{{ group_name }}/{{ route_number }}/state" class="inline-form"
+    <form method="post" action="/ui/routes/{{ group_name }}/{{ route_number }}/state" class="inline-form"
           onsubmit="return confirm('Wipe the kv state for this route? The route itself stays alive.');">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button type="submit" class="btn btn--danger">Clear state</button>
@@ -73,7 +73,7 @@
     keys are overwritten, others left untouched. (For binary values, use the
     CLI/MCP, which accept base64.)
   </p>
-  <form method="post" action="/__ui/routes/{{ group_name }}/{{ route_number }}/state/set">
+  <form method="post" action="/ui/routes/{{ group_name }}/{{ route_number }}/state/set">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <textarea name="keys" rows="6" class="source-editor"
               placeholder="counter=4&#10;seeded=true"></textarea>
@@ -84,6 +84,6 @@
 </section>
 
 <footer class="page-footer">
-  <a class="link" href="/__ui/routes/{{ group_name }}/{{ route_number }}">&larr; Back to {{ route_methods }} {{ route_path }}</a>
+  <a class="link" href="/ui/routes/{{ group_name }}/{{ route_number }}">&larr; Back to {{ route_methods }} {{ route_path }}</a>
 </footer>
 {% endblock %}

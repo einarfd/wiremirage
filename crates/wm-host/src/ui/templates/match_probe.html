@@ -2,9 +2,9 @@
 
 {% block content %}
 <nav class="breadcrumb" aria-label="breadcrumb">
-  <a href="/__ui/groups">Groups</a>
+  <a href="/ui/groups">Groups</a>
   <span class="breadcrumb__sep">›</span>
-  <a href="/__ui/groups/{{ group_name }}">{{ group_name }}</a>
+  <a href="/ui/groups/{{ group_name }}">{{ group_name }}</a>
   <span class="breadcrumb__sep">›</span>
   <span aria-current="page">Match probe</span>
 </nav>
@@ -19,7 +19,7 @@
 </header>
 
 <section class="card">
-  <form method="get" action="/__ui/groups/{{ group_name }}/match" class="filter-form">
+  <form method="get" action="/ui/groups/{{ group_name }}/match" class="filter-form">
     <label class="filter-field">
       <span class="filter-field__label">Method</span>
       <select name="method">
@@ -47,7 +47,7 @@
   <header class="card__header"><h2>Match</h2></header>
   <p>
     Matches
-    <a class="link" href="/__ui/routes/{{ result.hit.slug }}"><code>{{ result.hit.slug }}</code></a>
+    <a class="link" href="/ui/routes/{{ result.hit.slug }}"><code>{{ result.hit.slug }}</code></a>
     (<code>{{ result.hit.route_path }}</code>).
   </p>
   {% if result.hit.params | length > 0 %}
@@ -67,7 +67,7 @@
   <ul class="action-list">
     {%- for nm in result.near_misses %}
     <li>
-      <a class="link" href="/__ui/routes/{{ nm.slug }}"><code>{{ nm.route_methods }} {{ nm.route_path }}</code></a>
+      <a class="link" href="/ui/routes/{{ nm.slug }}"><code>{{ nm.route_methods }} {{ nm.route_path }}</code></a>
       — {{ nm.explanation }}
     </li>
     {%- endfor %}
@@ -80,6 +80,6 @@
 {% endif %}
 
 <footer class="page-footer">
-  <a class="link" href="/__ui/groups/{{ group_name }}">&larr; Back to {{ group_name }}</a>
+  <a class="link" href="/ui/groups/{{ group_name }}">&larr; Back to {{ group_name }}</a>
 </footer>
 {% endblock %}

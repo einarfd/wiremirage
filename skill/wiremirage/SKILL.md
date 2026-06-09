@@ -21,7 +21,7 @@ WireMirage is a programmable mock HTTP server. You write small TypeScript handle
 
 ## Model in one paragraph
 
-A **route** matches on `(method, path-pattern)` and runs a TypeScript handler that returns a response. Routes live inside a **group** (TTL-bounded — default 24h, sliding by default; explicit DELETE cascades all the group's state). The handler has access to two stores: a per-route key-value store and a per-group shared store. Groups + routes are addressed by ULIDs internally and by `{group}/{n}` slugs externally (e.g. `stripe-mock/7`). Mock traffic doesn't need a token; the admin API at `/__api/*` does.
+A **route** matches on `(method, path-pattern)` and runs a TypeScript handler that returns a response. Routes live inside a **group** (TTL-bounded — default 24h, sliding by default; explicit DELETE cascades all the group's state). The handler has access to two stores: a per-route key-value store and a per-group shared store. Groups + routes are addressed by ULIDs internally and by `{group}/{n}` slugs externally (e.g. `stripe-mock/7`). Mock traffic doesn't need a token; the admin API at `/api/*` does.
 
 ## Setup
 
@@ -116,7 +116,7 @@ spec file (CLI only); inline `source` works everywhere. Export errors on a
 wasm-only route (no source to emit). This is available on **every surface** —
 the MCP `import_group` / `export_group` tools take/return the same structured
 spec, the web UI has an import textarea + export download, and REST exposes
-`POST /__api/groups/import` + `GET /__api/groups/{group}/export`. State (kv/gkv)
+`POST /api/groups/import` + `GET /api/groups/{group}/export`. State (kv/gkv)
 is **not** part of the spec — seed it separately via `wm ... state` after import.
 
 ## Common patterns
@@ -183,7 +183,7 @@ For host-wide observation, the MCP server exposes two *live* streaming tools —
 - **No bulk state ops from inside handlers.** Handlers read/write individual keys but can't bulk-clear or bulk-seed. That's an *external* operation: `wm {routes,groups} state --set / --snapshot / --reset-from / --clear`. Values seeded externally are UTF-8 strings (or base64 for binary), capped at 1 MiB per key.
 - **Ownership.** Routes carry an `owner_id`; non-admin callers can read shared state but only modify their own routes. Admins bypass.
 - **Implicit groups.** If you `wm routes add` without `--group`, the host creates a single-route group with an auto-assigned **friendly DNS-safe name** (adjective-noun, e.g. `swift-otter`; ADR-0030) — it doubles as the group's subdomain. Useful for one-offs; filter them in or out with `wm groups list --implicit true|false`.
-- **Mock traffic is unauthenticated by design.** SUTs don't carry tokens; only the `/__api/*` surface and `/__ui/*` (when present) are gated. Don't put secrets in mock route paths.
+- **Mock traffic is unauthenticated by design.** SUTs don't carry tokens; only the `/api/*` surface and `/ui/*` (when present) are gated. Don't put secrets in mock route paths.
 - **Simulating a long upstream hang (past ~30s).** A buffered handler is capped at the ~30s wall-clock budget and traps if it sleeps longer, so it can't hold a connection open for a minute to test client timeout behavior. Use a *streaming* handler instead: commit the head with `host.responseStream({status, headers})` then `host.sleep(...)` without writing — that budget is ~5 minutes.
 
 ## When you need to debug
@@ -192,10 +192,10 @@ If you've created a route and your SUT still gets 404, the journal isn't showing
 
 ## Where to look for more
 
-- `wm capabilities [topic]` — the full handler API as markdown, fetched live from the connected host. Topics: `overview`, `request`, `response`, `store`, `log`, `clock`, `streaming`, `gotchas`. Always agrees with the host's actual capabilities (the CLI fetches `/__api/capabilities` rather than embedding a static copy). The same content is reachable via the MCP `get_capabilities` tool.
+- `wm capabilities [topic]` — the full handler API as markdown, fetched live from the connected host. Topics: `overview`, `request`, `response`, `store`, `log`, `clock`, `streaming`, `gotchas`. Always agrees with the host's actual capabilities (the CLI fetches `/api/capabilities` rather than embedding a static copy). The same content is reachable via the MCP `get_capabilities` tool.
 - `wm <command> --help` — the source of truth for command details. Always more current than this skill.
 - `wm --help` — the surface map.
 - `wm completion bash|zsh|fish|powershell` — emit a completion script for your shell. Pipe it into the appropriate location once.
-- The host's admin API at `/__api/*` is what `wm` wraps; if a script needs something the CLI doesn't surface yet, the REST API may have it.
-- The MCP server at `/__api/mcp` exposes most operations as tool calls for agents that prefer that surface. (User management is intentionally CLI-only — agents shouldn't be creating users.)
+- The host's admin API at `/api/*` is what `wm` wraps; if a script needs something the CLI doesn't surface yet, the REST API may have it.
+- The MCP server at `/api/mcp` exposes most operations as tool calls for agents that prefer that surface. (User management is intentionally CLI-only — agents shouldn't be creating users.)
 - For admin tasks (managing users, distributing tokens to teammates), `wm users` and `wm tokens` are the primary CLI surfaces.

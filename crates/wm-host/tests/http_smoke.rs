@@ -121,12 +121,12 @@ async fn unmatched_path_returns_404() {
 }
 
 #[tokio::test]
-async fn reserved_prefix_returns_404() {
+async fn unhandled_control_plane_path_returns_404() {
     let (addr, server) = start_empty().await;
-    // `/__api/routes` is mounted by the API router; verify that an
-    // unhandled reserved-prefix path doesn't fall through to the user
-    // route table.
-    let resp = reqwest::get(format!("http://{addr}/__api/typo"))
+    // `/api/*` is mounted by the API router (control-plane, served on the apex
+    // / direct access). An unhandled path under it 404s rather than falling
+    // through to mock dispatch (ADR-0033).
+    let resp = reqwest::get(format!("http://{addr}/api/typo"))
         .await
         .expect("get");
     assert_eq!(resp.status().as_u16(), 404);
@@ -134,9 +134,30 @@ async fn reserved_prefix_returns_404() {
 }
 
 #[tokio::test]
+async fn subdomain_can_mock_a_formerly_reserved_path() {
+    // ADR-0033: a group subdomain is pure mock space, so a route at `/health`
+    // (a control-plane path on the apex) is served as a mock there — the apex
+    // `/health` probe does not shadow it.
+    let (addr, group, server) = start_with_seeded_route(vec!["GET"], "/health").await;
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/health"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.expect("body");
+    assert_eq!(
+        body, "echo: GET /health",
+        "the subdomain serves the mock, not the control-plane probe"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn health_endpoint_returns_ok_without_auth() {
     let (addr, server) = start_empty().await;
-    let resp = reqwest::get(format!("http://{addr}/__health"))
+    let resp = reqwest::get(format!("http://{addr}/health"))
         .await
         .expect("get");
     assert_eq!(resp.status().as_u16(), 200);
@@ -149,7 +170,7 @@ async fn health_endpoint_returns_ok_without_auth() {
 #[tokio::test]
 async fn ready_endpoint_reports_dependencies_without_auth() {
     let (addr, server) = start_empty().await;
-    let resp = reqwest::get(format!("http://{addr}/__ready"))
+    let resp = reqwest::get(format!("http://{addr}/ready"))
         .await
         .expect("get");
     // In-memory storage is trivially ok.
@@ -164,9 +185,9 @@ async fn ready_endpoint_reports_dependencies_without_auth() {
 async fn mcp_endpoint_requires_bearer_token() {
     let (addr, server) = start_empty().await;
     // No Authorization header → 401. Confirms the MCP route shares the
-    // bearer-token gate with the rest of /__api/*.
+    // bearer-token gate with the rest of /api/*.
     let resp = reqwest::Client::new()
-        .post(format!("http://{addr}/__api/mcp"))
+        .post(format!("http://{addr}/api/mcp"))
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
         .body("{}")
@@ -245,19 +266,19 @@ async fn dispatch_accepts_body_below_limit() {
     server.abort();
 }
 
-// -- /__api/capabilities (ADR-0021 follow-up) -------------------------------
+// -- /api/capabilities (ADR-0021 follow-up) -------------------------------
 
 #[tokio::test]
 async fn capabilities_endpoint_lists_overview_and_topics() {
-    // GET /__api/capabilities → overview + topic list. Same content
+    // GET /api/capabilities → overview + topic list. Same content
     // the MCP `get_capabilities` tool returns, since both back to
     // `crate::capabilities`. Bearer-token gated like the rest of
-    // /__api/*; unauth gets 401.
+    // /api/*; unauth gets 401.
     let (addr, server) = start_empty().await;
 
     // Unauth → 401.
     let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/__api/capabilities"))
+        .get(format!("http://{addr}/api/capabilities"))
         .send()
         .await
         .expect("get");
@@ -265,7 +286,7 @@ async fn capabilities_endpoint_lists_overview_and_topics() {
 
     // Authed → 200 with overview content.
     let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/__api/capabilities"))
+        .get(format!("http://{addr}/api/capabilities"))
         .header("authorization", "Bearer wmt_test")
         .send()
         .await
@@ -302,12 +323,12 @@ async fn capabilities_endpoint_lists_overview_and_topics() {
 
 #[tokio::test]
 async fn capabilities_endpoint_returns_specific_topic() {
-    // GET /__api/capabilities/clock → the clock section, naming the
+    // GET /api/capabilities/clock → the clock section, naming the
     // three time primitives.
     let (addr, server) = start_empty().await;
 
     let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/__api/capabilities/clock"))
+        .get(format!("http://{addr}/api/capabilities/clock"))
         .header("authorization", "Bearer wmt_test")
         .send()
         .await
@@ -333,7 +354,7 @@ async fn capabilities_endpoint_unknown_topic_falls_back_to_overview() {
     let (addr, server) = start_empty().await;
 
     let resp = reqwest::Client::new()
-        .get(format!("http://{addr}/__api/capabilities/nonexistent"))
+        .get(format!("http://{addr}/api/capabilities/nonexistent"))
         .header("authorization", "Bearer wmt_test")
         .send()
         .await

@@ -69,12 +69,12 @@ async fn start() -> Harness {
 }
 
 async fn login_cookie(h: &Harness, client: &Client, user: &str) -> (String, String) {
-    let get = client.get(url(h, "/__auth/login")).send().await.unwrap();
+    let get = client.get(url(h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_set_cookie(&get, "wm_csrf").expect("csrf cookie");
     let body = get.text().await.unwrap();
     let csrf_value = extract_csrf_value(&body).expect("csrf value");
     let resp = client
-        .post(url(h, "/__auth/login/password"))
+        .post(url(h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
@@ -114,7 +114,7 @@ async fn route_new_form_renders_with_defaults() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(&h, "/__ui/routes/new"))
+        .get(url(&h, "/ui/routes/new"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -140,10 +140,7 @@ async fn route_new_form_honours_query_string_prefill() {
     let client = no_redirect_client();
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     let body = client
-        .get(url(
-            &h,
-            "/__ui/routes/new?method=PUT&path=/v1/charges/refund",
-        ))
+        .get(url(&h, "/ui/routes/new?method=PUT&path=/v1/charges/refund"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -171,7 +168,7 @@ async fn route_new_submit_creates_route_and_redirects() {
         "_csrf={csrf}&method=POST&path=/v1/charges&group=&language=typescript&source=function+handle(req%2C+route%2C+group)+%7B+return+%7Bstatus%3A+200%2C+headers%3A+%5B%5D%2C+body%3A+new+Uint8Array%28%29%7D%3B+%7D"
     );
     let resp = client
-        .post(url(&h, "/__ui/routes/new"))
+        .post(url(&h, "/ui/routes/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form_body)
@@ -186,35 +183,36 @@ async fn route_new_submit_creates_route_and_redirects() {
     );
     let loc = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(
-        loc.starts_with("/__ui/routes/"),
+        loc.starts_with("/ui/routes/"),
         "redirected to detail: {loc}"
     );
 }
 
 #[tokio::test]
-async fn route_new_submit_rejects_reserved_path() {
+async fn route_new_submit_allows_formerly_reserved_path() {
+    // ADR-0033: no reserved paths. A route at `/health` (a control-plane path
+    // on the apex) is mockable on its group's subdomain, so the form accepts it
+    // and 303s to the new route's detail page.
     let h = start().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
     let form_body = format!(
-        "_csrf={csrf}&method=POST&path=/__api/oops&group=&language=typescript&source=function+handle()+%7B%7D"
+        "_csrf={csrf}&method=GET&path=/health&group=&language=typescript&source=function+handle()+%7B+return+%7B+status%3A+200%2C+headers%3A+%5B%5D%2C+body%3A+new+Uint8Array()+%7D%3B+%7D"
     );
     let resp = client
-        .post(url(&h, "/__ui/routes/new"))
+        .post(url(&h, "/ui/routes/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form_body)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 400);
-    let body = resp.text().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 303, "create succeeds and redirects");
+    let loc = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(
-        body.contains("reserved prefix") || body.contains("Couldn"),
-        "reserved-path error visible: {body}"
+        loc.starts_with("/ui/routes/"),
+        "redirected to the new route detail: {loc}"
     );
-    // Form values preserved on re-render.
-    assert!(body.contains("value=\"&#x2f;__api&#x2f;oops\""));
 }
 
 #[tokio::test]
@@ -229,7 +227,7 @@ async fn route_new_submit_with_bad_source_reports_compile_failed() {
         "_csrf={csrf}&method=POST&path=/v1/charges&group=&language=typescript&source=function+handle(+%7B"
     );
     let resp = client
-        .post(url(&h, "/__ui/routes/new"))
+        .post(url(&h, "/ui/routes/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form_body)
@@ -248,7 +246,7 @@ async fn route_new_submit_without_csrf_is_forbidden() {
     let (cookie, _csrf) = login_cookie(&h, &client, "admin").await;
     // Note: omitted _csrf field entirely.
     let resp = client
-        .post(url(&h, "/__ui/routes/new"))
+        .post(url(&h, "/ui/routes/new"))
         .header("cookie", &cookie)
         .header("content-type", "application/x-www-form-urlencoded")
         .body("method=POST&path=/v1/x&group=&language=typescript&source=x")
