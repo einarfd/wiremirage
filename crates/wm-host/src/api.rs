@@ -585,16 +585,19 @@ pub(crate) async fn create_route_core(
                 ApiError::validation("source required when language=\"typescript\"")
             })?;
             let ts_source = source.clone();
-            let js =
-                tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
-                    .await
-                    .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
-                    .map_err(ApiError::compile_failed)?;
+            // Transpile now to surface compile errors at create time, but
+            // store the *original* TS — the engine-runnable JS is derived and
+            // cached at dispatch (ADR-0020; preserves the authored source so
+            // show_route_source / export return what the author wrote).
+            tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
+                .await
+                .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
+                .map_err(ApiError::compile_failed)?;
             (
                 Vec::new(),
                 "typescript".to_string(),
                 SUPPORTED_BINDINGS_VERSION.to_string(),
-                Some(js),
+                Some(source),
             )
         }
         other => {
@@ -937,16 +940,17 @@ pub(crate) async fn patch_route_core(
                     ApiError::validation("source required when language=\"typescript\"")
                 })?;
                 let ts_source = source.to_string();
-                let js =
-                    tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
-                        .await
-                        .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
-                        .map_err(ApiError::compile_failed)?;
+                // Validate (compile_failed) but store the original TS; the JS
+                // is derived + cached at dispatch (ADR-0020).
+                tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
+                    .await
+                    .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
+                    .map_err(ApiError::compile_failed)?;
                 (
                     Some(Vec::new()),
                     Some("typescript".to_string()),
                     Some(SUPPORTED_BINDINGS_VERSION.to_string()),
-                    Some(Some(js)),
+                    Some(Some(source.to_string())),
                 )
             }
             other => {

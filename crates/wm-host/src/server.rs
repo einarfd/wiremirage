@@ -750,19 +750,18 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let group_id = matched.route.group_id.clone();
     let route_id = matched.route.id.clone();
     let route_language = matched.route.language.clone();
-    let route_source = matched.route.source.clone();
 
     // Branch on language: source-language routes (ADR-0020) run
     // through the shared engine; everything else (`wasm` uploads,
     // future AOT languages) still goes through the per-route
-    // component cache. TS routes were transpiled to JS at create-
-    // time, so they're indistinguishable from JS routes at
-    // dispatch — both stored fields hold script-shape JS.
+    // component cache. The stored `source` is the *original* author
+    // source; `engine_source_for` returns the JS the engine runs
+    // (TS transpiled + cached, JS as-is).
     let use_engine = matches!(route_language.as_str(), "javascript" | "typescript");
-    let component = if use_engine {
-        None
+    let (component, route_source) = if use_engine {
+        (None, Some(state.routes.engine_source_for(&matched.route)?))
     } else {
-        Some(state.routes.component_for(&matched.route)?)
+        (Some(state.routes.component_for(&matched.route)?), None)
     };
 
     // spawn_blocking moves out of the async task's tracing context, so

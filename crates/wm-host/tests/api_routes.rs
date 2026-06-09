@@ -563,18 +563,20 @@ async fn list_routes_reflects_dispatch_hits() {
 // -- Validation / errors -------------------------------------------------------
 
 #[tokio::test]
-async fn typescript_source_path_creates_route_with_stored_source() {
-    // ADR-0020 slice B path: TS source is transpiled to JS in-host
-    // via swc, then stored. No external compiler — `language:
-    // "typescript"` just works.
+async fn typescript_source_path_preserves_original_source() {
+    // ADR-0020 + MCP field report #3: TS is transpiled to JS in-host to
+    // validate at create time (and again, cached, at dispatch), but the
+    // *original* author source is what's stored and returned by GET /source —
+    // type annotations, comments, and `export` intact, NOT the post-strip JS.
     let h = Harness::start().await;
 
+    let ts = "// a typescript handler\nexport function handle(req: unknown, _r: unknown, _g: unknown): unknown { return { status: 200, headers: [], body: new Uint8Array() }; }";
     let resp = h
         .create_route_body(json!({
             "methods": ["POST"],
             "path": "/v1/charges",
             "language": "typescript",
-            "source": "function handle(req: unknown, _r: unknown, _g: unknown) { return { status: 200, headers: [], body: new Uint8Array() }; }",
+            "source": ts,
         }))
         .await;
     assert_eq!(resp.status().as_u16(), 201);
@@ -583,8 +585,9 @@ async fn typescript_source_path_creates_route_with_stored_source() {
     let group = body["group"]["name"].as_str().unwrap().to_string();
     let number = body["number"].as_u64().unwrap();
 
-    // GET /source returns the post-strip JS — verifies the in-host
-    // transpile actually ran (types stripped, function body kept).
+    // GET /source returns the ORIGINAL TS verbatim — the transpiled JS that
+    // strips the types / comment / `export` is derived at dispatch and never
+    // stored.
     let resp = h
         .client
         .get(h.url(&format!("/api/routes/{group}/{number}/source")))
@@ -593,8 +596,13 @@ async fn typescript_source_path_creates_route_with_stored_source() {
         .expect("get source");
     let body: serde_json::Value = resp.json().await.expect("json");
     let stored = body["source"].as_str().expect("source string");
-    assert!(!stored.contains(": unknown"), "types stripped: {stored}");
-    assert!(stored.contains("function handle"));
+    assert_eq!(stored, ts, "original TS source preserved verbatim");
+    assert!(stored.contains(": unknown"), "type annotations kept");
+    assert!(stored.contains("// a typescript handler"), "comment kept");
+    assert!(
+        stored.contains("export function handle"),
+        "export keyword kept"
+    );
 }
 
 #[tokio::test]

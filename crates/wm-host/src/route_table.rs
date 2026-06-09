@@ -75,6 +75,11 @@ pub struct RouteTable {
     engine: Engine,
     routes: RwLock<Vec<Route>>,
     components: Mutex<HashMap<String, Arc<Component>>>,
+    /// Per-route transpiled-JS cache for `typescript` engine routes
+    /// (ADR-0020). The stored `source` is the *original* TS; the JS the
+    /// shared engine actually runs is derived once and cached here, keyed by
+    /// route id and evicted on update/delete exactly like `components`.
+    engine_js: Mutex<HashMap<String, Arc<str>>>,
 }
 
 impl RouteTable {
@@ -87,6 +92,7 @@ impl RouteTable {
             engine,
             routes: RwLock::new(routes),
             components: Mutex::new(HashMap::new()),
+            engine_js: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -269,6 +275,37 @@ impl RouteTable {
         Ok(arc)
     }
 
+    /// Return the JavaScript the shared engine should run for a source-
+    /// language route (ADR-0020). The stored `source` is the *original*
+    /// authored source: for `javascript` it's already JS; for `typescript`
+    /// it's TS, which we transpile to JS once and cache (keyed by route id,
+    /// evicted on update/delete like `components`). Preserving the original
+    /// source — rather than storing the transpiled JS — is what lets
+    /// `show_route_source` / `export_group` return what the author wrote.
+    pub fn engine_source_for(&self, route: &Route) -> Result<String> {
+        let source = route.source.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("source-language route {} has no source stored", route.id)
+        })?;
+        if route.language != "typescript" {
+            // `javascript` (and any future already-JS engine language): the
+            // stored source is dispatch-ready as-is.
+            return Ok(source.to_string());
+        }
+        {
+            let cache = self.engine_js.lock().expect("poisoned");
+            if let Some(js) = cache.get(&route.id) {
+                return Ok(js.to_string());
+            }
+        }
+        let js = crate::ts_transpile::transpile(source)
+            .map_err(|e| anyhow::anyhow!("transpile route {}: {e}", route.id))?;
+        self.engine_js
+            .lock()
+            .expect("poisoned")
+            .insert(route.id.clone(), Arc::from(js.as_str()));
+        Ok(js)
+    }
+
     pub fn refresh_after_create(&self, route: Route) {
         self.routes.write().expect("poisoned").push(route);
     }
@@ -279,6 +316,7 @@ impl RouteTable {
             .expect("poisoned")
             .retain(|r| r.id != route_id);
         self.components.lock().expect("poisoned").remove(route_id);
+        self.engine_js.lock().expect("poisoned").remove(route_id);
     }
 
     /// Replace the in-memory record for an updated route and drop its
@@ -302,6 +340,7 @@ impl RouteTable {
             }
         }
         self.components.lock().expect("poisoned").remove(&route_id);
+        self.engine_js.lock().expect("poisoned").remove(&route_id);
     }
 
     /// Drop every route in `group_id` from the in-memory cache. Used
@@ -325,8 +364,10 @@ impl RouteTable {
         routes.retain(|r| r.group_id != group_id);
         drop(routes);
         let mut cache = self.components.lock().expect("poisoned");
+        let mut js_cache = self.engine_js.lock().expect("poisoned");
         for id in &to_drop {
             cache.remove(id);
+            js_cache.remove(id);
         }
     }
 

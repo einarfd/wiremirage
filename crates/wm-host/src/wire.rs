@@ -27,6 +27,14 @@ pub enum WireBytes {
     Text(String),
     /// Base64-encoded bytes — for values that aren't valid UTF-8.
     Binary { base64: String },
+    /// A JSON value, serialized to its UTF-8 JSON bytes
+    /// (`{ "json": {"x":1} }` → the bytes `{"x":1}`). An **input-only**
+    /// convenience: agents think in JSON values, not byte encodings, and an
+    /// MCP client may "helpfully" parse a JSON-string argument into an object
+    /// on the wire — which matched neither `Text` nor `Binary` and errored
+    /// (ADR-0026 amendment). `from_bytes` never produces this variant; output
+    /// stays string-first (`Text` / `Binary`).
+    Json { json: serde_json::Value },
 }
 
 impl WireBytes {
@@ -36,6 +44,11 @@ impl WireBytes {
         match self {
             WireBytes::Text(s) => Ok(s.into_bytes()),
             WireBytes::Binary { base64 } => B64.decode(base64),
+            // `serde_json::Value` always re-serializes (it can't hold NaN or
+            // other non-representable values), so this is infallible.
+            WireBytes::Json { json } => {
+                Ok(serde_json::to_vec(&json).expect("serde_json::Value always serializes"))
+            }
         }
     }
 
@@ -96,4 +109,51 @@ pub fn decode_entries(
         out.insert(key, bytes);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WireBytes;
+
+    fn decode(v: serde_json::Value) -> Vec<u8> {
+        serde_json::from_value::<WireBytes>(v)
+            .expect("deserialize")
+            .into_bytes()
+            .expect("into_bytes")
+    }
+
+    #[test]
+    fn bare_string_is_utf8_text() {
+        assert_eq!(decode(serde_json::json!("hi")), b"hi");
+    }
+
+    #[test]
+    fn base64_object_decodes_binary() {
+        // base64("hi") == "aGk="
+        assert_eq!(decode(serde_json::json!({ "base64": "aGk=" })), b"hi");
+    }
+
+    #[test]
+    fn json_variant_serializes_value_to_bytes() {
+        // ADR-0026 amendment: a `{json: <value>}` input becomes the value's
+        // JSON bytes — the agent-friendly path around MCP-client coercion.
+        assert_eq!(
+            decode(serde_json::json!({ "json": {"x": 1} })),
+            br#"{"x":1}"#
+        );
+        assert_eq!(decode(serde_json::json!({ "json": [1, 2] })), b"[1,2]");
+    }
+
+    #[test]
+    fn from_bytes_stays_string_first() {
+        // Output never uses the json variant.
+        assert!(matches!(
+            WireBytes::from_bytes(b"plain"),
+            WireBytes::Text(_)
+        ));
+        assert!(matches!(
+            WireBytes::from_bytes(&[0xff, 0xfe]),
+            WireBytes::Binary { .. }
+        ));
+    }
 }
