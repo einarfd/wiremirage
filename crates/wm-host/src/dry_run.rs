@@ -355,12 +355,29 @@ async fn run_engine_in_snapshot(
     wit_request: WitRequest,
     snapshot_keys: u64,
 ) -> Result<RunOk, RunFail> {
-    let Some(source) = route.source.clone() else {
+    // The stored `source` is the original author source (ADR-0020); resolve
+    // the JS the engine runs (transpile TS, JS as-is). Dry-run is infrequent,
+    // so transpile inline rather than touching the dispatch JS cache.
+    let Some(original) = route.source.as_deref() else {
         return Err(RunFail {
             message: format!("source-language route {} has no source stored", route.id),
             logs: Vec::new(),
             snapshot_keys,
         });
+    };
+    let source = if route.language == "typescript" {
+        match crate::ts_transpile::transpile(original) {
+            Ok(js) => js,
+            Err(e) => {
+                return Err(RunFail {
+                    message: format!("transpile route {}: {e}", route.id),
+                    logs: Vec::new(),
+                    snapshot_keys,
+                });
+            }
+        }
+    } else {
+        original.to_string()
     };
 
     let (head_tx, mut head_rx) = tokio::sync::oneshot::channel::<crate::host_state::StreamHead>();
