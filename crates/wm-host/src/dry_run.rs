@@ -384,11 +384,17 @@ async fn run_engine_in_snapshot(
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
 
     let handle = tokio::task::spawn_blocking(move || {
-        let (engine_world, mut store, handles) =
-            match runtime.instantiate_engine_with_buckets(source, route_bucket, group_bucket) {
-                Ok(t) => t,
-                Err(e) => return (Err(format!("{e:#}")), Vec::new()),
-            };
+        // Dry-run never fires real callbacks (no network side effects in a
+        // test invocation), so callouts are always off here (ADR-0034).
+        let (engine_world, mut store, handles) = match runtime.instantiate_engine_with_buckets(
+            source,
+            route_bucket,
+            group_bucket,
+            false,
+        ) {
+            Ok(t) => t,
+            Err(e) => return (Err(format!("{e:#}")), Vec::new()),
+        };
         store.data_mut().set_response_stream_sink(head_tx, chunk_tx);
         let engine_req = crate::bindings::handler_request_to_engine(wit_request);
         let result = engine_world

@@ -41,6 +41,7 @@ use crate::store::{Bucket, Storage, StoreError};
 
 const HANDLED_TTL_SECONDS: u64 = 3600;
 const UNMATCHED_TTL_SECONDS: u64 = 3600;
+const CALLBACK_TTL_SECONDS: u64 = 3600;
 
 /// Bus capacity for live-tail subscribers. A slow consumer that lags
 /// further than this loses events (`broadcast` returns `Lagged(n)`),
@@ -189,6 +190,76 @@ pub enum UnmatchedNearMissReason {
         expected: String,
         got: String,
     },
+}
+
+/// One outbound-callback delivery attempt (ADR-0034). The host fires a
+/// callback scheduled by a handler on a background task, then records the
+/// outcome here so the agent/test can inspect it (it can't ride the original
+/// response — that already returned). Per-group, TTL'd like handled entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CallbackRecord {
+    pub id: String,
+    pub number: u32,
+    pub trace_id: Option<String>,
+    pub group_id: String,
+    pub group_name: String,
+    /// The route whose handler scheduled this callback.
+    pub route_id: String,
+    pub route_number: u32,
+    /// The callback request the host sent (what the handler asked for).
+    pub url: String,
+    pub method: String,
+    pub request_headers: Vec<(String, String)>,
+    #[serde(with = "crate::wire::bytes_field")]
+    #[schemars(with = "crate::wire::WireBytes")]
+    pub request_body: Vec<u8>,
+    pub request_body_truncated: bool,
+    pub request_body_size: usize,
+    /// Delay the handler requested before firing, in milliseconds.
+    pub delay_ms: u64,
+    /// What happened when the host fired it.
+    pub outcome: CallbackOutcome,
+    /// Wall-clock the fire (resolve + connect + request) took, in ms.
+    pub duration_ms: u64,
+    /// When the outcome was recorded — after the fire completed, so this
+    /// is `scheduled-at + delay + fire duration`, not request time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// The terminal disposition of a callback fire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CallbackOutcome {
+    /// The SUT received the callback and returned this status.
+    Delivered { status: u16 },
+    /// Blocked by the egress policy before anything was sent. `reason` is
+    /// the short policy reason; `resolved` lists the addresses checked
+    /// (the security-critical resolved-IP decision, ADR-0034).
+    EgressDenied {
+        reason: String,
+        resolved: Vec<String>,
+    },
+    /// Send failed: bad URL, DNS failure, connection refused, timeout.
+    Failed { error: String },
+}
+
+/// Inputs the firing path hands to the journal once a callback completes.
+#[derive(Debug, Clone)]
+pub struct NewCallbackEntry {
+    pub trace_id: Option<String>,
+    pub group_id: String,
+    pub group_name: String,
+    pub route_id: String,
+    pub route_number: u32,
+    pub url: String,
+    pub method: String,
+    pub request_headers: Vec<(String, String)>,
+    pub request_body: Vec<u8>,
+    pub request_body_truncated: bool,
+    pub request_body_size: usize,
+    pub delay_ms: u64,
+    pub outcome: CallbackOutcome,
+    pub duration_ms: u64,
 }
 
 /// Inputs the dispatcher hands to the journal at write time. Owned so
@@ -550,6 +621,113 @@ impl Journal {
     ) -> Result<UnmatchedRecord, JournalError> {
         let bytes = bucket
             .get(&format!("unmatched:{id}"))?
+            .ok_or(JournalError::NotFound)?;
+        serde_json::from_slice(&bytes).map_err(|e| JournalError::Malformed(format!("decode: {e}")))
+    }
+
+    // -- Outbound callbacks (ADR-0034) --------------------------------------
+
+    /// Record one callback delivery outcome. Per-group, numbered with its own
+    /// counter, TTL'd like handled entries. Best-effort, like the other writes.
+    pub fn record_callback(&self, entry: NewCallbackEntry) -> Result<CallbackRecord, JournalError> {
+        let mut bucket = self.bucket()?;
+        let n = bucket.hash_incr(
+            &format!("group:counters:{}", entry.group_id),
+            "next_callback_number",
+            1,
+        )? as u32;
+        let id = Ulid::new().to_string();
+        let record = CallbackRecord {
+            id: id.clone(),
+            number: n,
+            trace_id: entry.trace_id,
+            group_id: entry.group_id,
+            group_name: entry.group_name,
+            route_id: entry.route_id,
+            route_number: entry.route_number,
+            url: entry.url,
+            method: entry.method,
+            request_headers: entry.request_headers,
+            request_body: entry.request_body,
+            request_body_truncated: entry.request_body_truncated,
+            request_body_size: entry.request_body_size,
+            delay_ms: entry.delay_ms,
+            outcome: entry.outcome,
+            duration_ms: entry.duration_ms,
+            created_at: Utc::now(),
+        };
+        let key = format!("callback:{}:{}", record.group_id, record.id);
+        let json = serde_json::to_vec(&record)
+            .map_err(|e| JournalError::Malformed(format!("encode: {e}")))?;
+        bucket.set(&key, json)?;
+        bucket.set_ttl(&key, CALLBACK_TTL_SECONDS)?;
+        bucket.set(
+            &format!("callback:by-number:{}:{}", record.group_id, record.number),
+            record.id.as_bytes().to_vec(),
+        )?;
+        Ok(record)
+    }
+
+    pub fn get_callback(
+        &self,
+        group_id: &str,
+        number: u32,
+    ) -> Result<CallbackRecord, JournalError> {
+        let mut bucket = self.bucket()?;
+        self.get_callback_via_bucket(&mut bucket, group_id, number)
+    }
+
+    /// List recent callbacks for a group, newest-first, with the same cursor
+    /// pagination shape as `list_for_group`.
+    pub fn list_callbacks_for_group(
+        &self,
+        group_id: &str,
+        cursor: ListCursor,
+    ) -> Result<Vec<CallbackRecord>, JournalError> {
+        let mut bucket = self.bucket()?;
+        let highest = bucket
+            .hash_get(
+                &format!("group:counters:{group_id}"),
+                "next_callback_number",
+            )?
+            .and_then(|bytes| {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .unwrap_or(0);
+        let starting = match cursor.before {
+            Some(b) => b.saturating_sub(1),
+            None => highest,
+        };
+        if starting == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = cursor.limit.clamp(1, MAX_LIMIT);
+        let mut out = Vec::with_capacity(limit);
+        let mut n = starting;
+        while out.len() < limit && n > 0 {
+            if let Ok(record) = self.get_callback_via_bucket(&mut bucket, group_id, n) {
+                out.push(record);
+            }
+            n = n.saturating_sub(1);
+        }
+        Ok(out)
+    }
+
+    fn get_callback_via_bucket(
+        &self,
+        bucket: &mut Bucket,
+        group_id: &str,
+        number: u32,
+    ) -> Result<CallbackRecord, JournalError> {
+        let id_bytes = bucket
+            .get(&format!("callback:by-number:{group_id}:{number}"))?
+            .ok_or(JournalError::NotFound)?;
+        let id = String::from_utf8(id_bytes)
+            .map_err(|_| JournalError::Malformed("callback:by-number value".into()))?;
+        let bytes = bucket
+            .get(&format!("callback:{group_id}:{id}"))?
             .ok_or(JournalError::NotFound)?;
         serde_json::from_slice(&bytes).map_err(|e| JournalError::Malformed(format!("decode: {e}")))
     }

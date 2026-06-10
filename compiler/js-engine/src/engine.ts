@@ -45,6 +45,21 @@ declare module "wiremirage:handler/response-stream@0.1.0" {
   export function finish(): void;
 }
 
+declare module "wiremirage:handler/callback@0.1.0" {
+  /**
+   * Schedule an outbound callback (ADR-0034). Throws synchronously when
+   * callbacks aren't available (host egress off, or the group hasn't opted
+   * in). The host fires it once, after `delayMs`, after the response is sent.
+   */
+  export function schedule(
+    url: string,
+    method: string,
+    headers: [string, string][],
+    body: Uint8Array,
+    delayMs: bigint,
+  ): void;
+}
+
 declare module "wiremirage:handler/log@0.1.0" {
   /** Emit a handler log line; it attaches to this request's journal entry. */
   export function emit(
@@ -64,6 +79,7 @@ import {
   writeChunk as respWriteChunk,
   finish as respFinish,
 } from "wiremirage:handler/response-stream@0.1.0";
+import { schedule as cbSchedule } from "wiremirage:handler/callback@0.1.0";
 import { emit as logEmit } from "wiremirage:handler/log@0.1.0";
 
 // Expose the clock primitives to user code as a `host` global. The
@@ -100,6 +116,32 @@ function toBytes(chunk: unknown): Uint8Array {
       write: (chunk: unknown): boolean => respWriteChunk(toBytes(chunk)),
       close: (): void => respFinish(),
     };
+  },
+  // ADR-0034 outbound callbacks. `host.scheduleCallback({ url, method,
+  // headers, body, delayMs })` hands a webhook request to the host, which
+  // fires it ONCE after `delayMs`, after this response is sent. Throws
+  // synchronously if callbacks aren't enabled (host egress off, or this
+  // group hasn't set callout_enabled) so the handler can catch it. The
+  // delivery outcome lands in the group's callback journal, not the
+  // response (which has already returned). Defaults: POST, no headers,
+  // empty body, fire immediately. `body` may be a string (UTF-8 encoded)
+  // or bytes.
+  scheduleCallback: (init: {
+    url: string;
+    method?: string;
+    headers?: [string, string][];
+    body?: unknown;
+    delayMs?: number;
+  }): void => {
+    cbSchedule(
+      init.url,
+      (init.method ?? "POST").toUpperCase(),
+      init.headers ?? [],
+      init.body === undefined || init.body === null
+        ? new Uint8Array()
+        : toBytes(init.body),
+      BigInt(Math.max(0, Math.trunc(init.delayMs ?? 0))),
+    );
   },
 };
 

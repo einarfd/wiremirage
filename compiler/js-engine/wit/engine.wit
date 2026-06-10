@@ -31,12 +31,30 @@ interface response-stream {
   finish: func();
 }
 
+// Outbound-callback host import (ADR-0034). See the repo-root `wit/engine.wit`
+// copy for the full contract notes. The host fires the callback once, on a
+// background task, after `delay-ms`, after the response is sent. `schedule`
+// returns err synchronously when callbacks aren't available (host egress off,
+// or the group hasn't opted in); the per-IP egress check is at fire time.
+interface callback {
+  use http.{header};
+
+  schedule: func(
+    url: string,
+    method: string,
+    headers: list<header>,
+    body: list<u8>,
+    delay-ms: u64,
+  ) -> result<_, string>;
+}
+
 world engine {
   import store;
   import log;
   import clock;
   import engine-host;
   import response-stream;
+  import callback;
 
   use store.{bucket};
   use http.{request, response};
