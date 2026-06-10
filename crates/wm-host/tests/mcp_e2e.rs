@@ -235,6 +235,62 @@ async fn clear_journal_requires_confirm_and_succeeds() {
 }
 
 #[tokio::test]
+async fn clear_group_state_requires_confirm_and_succeeds() {
+    // Field-report shape finding: clear_group_state is the most destructive
+    // non-delete on the surface (wipes every route's kv + the shared gkv), so
+    // it must guard with `confirm: true` like its siblings.
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(wm_host::registry::NewGroup {
+            name: "gs-clear".into(),
+            owner_id: "someone".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Without confirm → rejected.
+    let denied = client
+        .call_tool(
+            CallToolRequestParams::new("clear_group_state").with_arguments(
+                serde_json::json!({ "group": "gs-clear" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    assert!(
+        denied.is_err(),
+        "clear_group_state without confirm must error"
+    );
+
+    // With confirm → cleared.
+    let ok = client
+        .call_tool(
+            CallToolRequestParams::new("clear_group_state").with_arguments(
+                serde_json::json!({ "group": "gs-clear", "confirm": true })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("clear_group_state");
+    let structured = ok.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("cleared").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+}
+
+#[tokio::test]
 async fn import_then_export_group_round_trips() {
     let h = start().await;
     let client = DummyClient
