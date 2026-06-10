@@ -5315,6 +5315,7 @@ dependencies = [
  "http",
  "http-body-util",
  "hyper",
+ "ipnet",
  "minijinja",
  "opentelemetry",
  "opentelemetry-otlp",
