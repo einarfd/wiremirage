@@ -36,12 +36,39 @@ interface response-stream {
   finish: func();
 }
 
+// Outbound-callback host import (ADR-0034). A handler computes a callback
+// request and hands it to the host; the host fires it ONCE on a background
+// task after `delay-ms`, *after* the original response is sent. This is the
+// async-webhook shape (mock receives a request, responds, then POSTs the SUT's
+// webhook URL). Like `response-stream`, it's engine-internal — only the shared
+// JS engine imports it; the user-facing `world handler` stays egress-free, and
+// the public handler input is source-language (TS/JS) only (ADR-0023).
+//
+// `schedule` returns `err(message)` synchronously when callbacks aren't
+// available: host egress is off (`WM_EGRESS`), or this group hasn't opted in
+// (`callout_enabled`). The per-IP egress decision (the security-critical
+// resolved-IP check) happens at fire time and is recorded in the journal, not
+// returned here. Single-attempt, best-effort: no retries, dropped on host
+// restart or group expiry (ADR-0034 — a deliberate non-goal, not a deferral).
+interface callback {
+  use http.{header};
+
+  schedule: func(
+    url: string,
+    method: string,
+    headers: list<header>,
+    body: list<u8>,
+    delay-ms: u64,
+  ) -> result<_, string>;
+}
+
 world engine {
   import store;
   import log;
   import clock;
   import engine-host;
   import response-stream;
+  import callback;
 
   use store.{bucket};
   use http.{request, response};

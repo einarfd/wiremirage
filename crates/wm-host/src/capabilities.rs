@@ -29,6 +29,7 @@ pub const TOPICS: &[(&str, &str)] = &[
     ("log", LOG),
     ("clock", CLOCK),
     ("streaming", STREAMING),
+    ("callbacks", CALLBACKS),
     ("gotchas", GOTCHAS),
 ];
 
@@ -90,6 +91,7 @@ Topics:
 - **`log`** — emitting log lines that attach to the journal entry
 - **`clock`** — `host.sleep`, wall-time, monotonic time (ADR-0021)
 - **`streaming`** — `host.responseStream` for SSE / chunked responses (ADR-0022)
+- **`callbacks`** — `host.scheduleCallback` for outbound webhooks (ADR-0034)
 - **`gotchas`** — bigint quirks, camelCase field names, and other footguns
 
 ## Key design points
@@ -434,6 +436,82 @@ export function handle(req, routeStore, groupStore) {
 - **Dry-run** (`wm routes test` / `dry_run_route`) collects the streamed
   chunks in-process and returns the concatenated body, so you can inspect
   a streaming handler without a real client.
+"#;
+
+const CALLBACKS: &str = r#"# Outbound callbacks — host.scheduleCallback
+
+Mocks normally only *respond* to the system-under-test (SUT). Some real
+services also *call back*: a payment API accepts a charge, responds 200,
+then later POSTs a webhook to the SUT's callback URL. `host.scheduleCallback`
+lets a handler model that — the mock plays the service end to end, including
+the async webhook (ADR-0034).
+
+## host.scheduleCallback({ url, method, headers, body, delayMs })
+
+```ts
+export function handle(req) {
+  const event = { id: "evt_123", type: "charge.succeeded" };
+  // Fire a webhook to the SUT ~500ms after we respond.
+  host.scheduleCallback({
+    url: "https://sut.internal/webhooks/stripe",
+    method: "POST",
+    headers: [["content-type", "application/json"]],
+    body: JSON.stringify(event),          // string (UTF-8) or bytes
+    delayMs: 500,
+  });
+  return { status: 200, headers: [], body: new TextEncoder().encode('{"ok":true}') };
+}
+```
+
+- The host fires the callback **once**, on a background task, **after**
+  `delayMs`, **after** the original response is sent. It's not an in-handler
+  `fetch` — the handler computes the request and hands it off; egress lives
+  in the host.
+- **Defaults:** `method` POST, no headers, empty body, `delayMs` 0.
+- Works for buffered **and** streaming handlers.
+
+## It can throw — catch it
+
+`scheduleCallback` throws synchronously when callbacks aren't available:
+
+- the host wasn't started with outbound egress enabled (`WM_EGRESS`), or
+- this **group** hasn't opted in (`callout_enabled` — set it with
+  `wm groups update <group> --callout`, the `update_group` MCP tool, or the
+  group-detail UI).
+
+```ts
+try {
+  host.scheduleCallback({ url, body });
+} catch (e) {
+  log.warn("callbacks not enabled: " + e.message);
+}
+```
+
+## Single-attempt, best-effort (by design)
+
+Fired once. **No retries, no durable queue** — if the host restarts or the
+group expires before a delayed callback fires, it's dropped. WireMirage is a
+mock fixture, not a webhook delivery system; a down SUT endpoint means the
+test is already broken, so retry buys nothing.
+
+## Where the outcome lands
+
+The callback can't surface on the original response (already returned), so
+its outcome is recorded in the group's **callback journal** — delivered (with
+the SUT's status), egress-denied, or failed (DNS / connect / timeout).
+
+## Egress is filtered
+
+Even with egress on, the target is checked against the policy on its
+**resolved IP**: special-use ranges (loopback, link-local incl. the
+`169.254.169.254` cloud-metadata IP, private, CGNAT, ULA) are denied by
+default, overridable by the operator's `WM_EGRESS_ALLOW`. Redirects aren't
+followed. A blocked target is recorded as `egress_denied` in the journal.
+
+- **Source-language only**, like streaming.
+- **Dry-run** (`wm routes test` / `dry_run_route`) never fires real
+  callbacks — a dry-run handler can call `scheduleCallback` without error,
+  but nothing is sent (no network side effects in a test invocation).
 "#;
 
 const GOTCHAS: &str = r#"# Gotchas

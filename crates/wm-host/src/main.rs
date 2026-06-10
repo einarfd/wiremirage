@@ -108,6 +108,21 @@ async fn main() -> anyhow::Result<()> {
             .with_mcp_allowed_hosts(hosts);
     }
 
+    // ADR-0034: outbound-callback egress policy. Off unless `WM_EGRESS` is
+    // set; even on, a hardcoded special-use default-deny applies and each
+    // group must opt in via `callout_enabled`. A malformed
+    // `WM_EGRESS_ALLOW`/`WM_EGRESS_DENY` list fails fast here.
+    let egress = wm_host::egress::EgressPolicy::from_env().context("parse WM_EGRESS* config")?;
+    if egress.is_enabled() {
+        tracing::info!(
+            "WM_EGRESS on: outbound handler callbacks available (per-group opt-in via \
+             callout_enabled; special-use ranges denied by default — ADR-0034)"
+        );
+    } else {
+        tracing::info!("WM_EGRESS off: outbound handler callbacks disabled (default; ADR-0034)");
+    }
+    state = state.with_egress(egress);
+
     // Shutdown signal that long-lived handlers (the SSE journal tail,
     // primarily) race against so a browser tab pointed at the live
     // view doesn't pin the host open during graceful shutdown.

@@ -44,6 +44,10 @@ type Outcome = (
     Vec<LogRecord>,
     ResourceUsage,
     Option<StreamSummary>,
+    // Outbound callbacks the handler scheduled (ADR-0034), drained from
+    // HostState before the store drops. Empty on the non-engine path and
+    // whenever the handler scheduled none.
+    Vec<crate::callout::ScheduledCallback>,
 );
 
 /// What a streaming handler produced, captured from `HostState` before
@@ -179,6 +183,11 @@ pub struct AppState {
     /// `/auth/start/github` + `/auth/callback` routes respond
     /// 503. Kept behind `Arc` so cloning `AppState` shares it.
     github_oauth: Option<Arc<crate::github_oauth::GitHubConfig>>,
+    /// Outbound-callback egress policy (ADR-0034). Default `disabled()` —
+    /// callbacks are off unless the operator sets `WM_EGRESS`. Behind an
+    /// `Arc` so cloning `AppState` (per request) is cheap and the firing
+    /// background tasks share one policy.
+    egress: Arc<crate::egress::EgressPolicy>,
 }
 
 impl AppState {
@@ -203,7 +212,19 @@ impl AppState {
             mcp_allowed_hosts: Vec::new(),
             apex_host: "localhost".to_string(),
             github_oauth: None,
+            egress: Arc::new(crate::egress::EgressPolicy::disabled()),
         }
+    }
+
+    /// Set the outbound-callback egress policy (ADR-0034). Wired from
+    /// `WM_EGRESS*` in `main.rs`; defaults to fully disabled.
+    pub fn with_egress(mut self, egress: crate::egress::EgressPolicy) -> Self {
+        self.egress = Arc::new(egress);
+        self
+    }
+
+    pub fn egress(&self) -> &Arc<crate::egress::EgressPolicy> {
+        &self.egress
     }
 
     pub fn with_secure_cookies(mut self, secure: bool) -> Self {
@@ -794,6 +815,21 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         (Some(state.routes.component_for(&matched.route)?), None)
     };
 
+    // ADR-0034: may this request's handler schedule outbound callbacks? Only
+    // on the source-language (engine) path, and only when the host has egress
+    // enabled at all — so the extra per-request group read (for the group's
+    // `callout_enabled` flag) is paid only in egress-on deployments, never in
+    // the default-off case. The per-IP egress decision still happens at fire
+    // time; this is the capability + per-group opt-in gate.
+    let callouts_allowed = use_engine
+        && state.egress().is_enabled()
+        && state
+            .routes()
+            .registry()
+            .read_group_by_ref(&group_id)
+            .map(|g| g.callout_enabled)
+            .unwrap_or(false);
+
     // spawn_blocking moves out of the async task's tracing context, so
     // capture the current span and re-enter it inside the closure to
     // keep the wasmtime spans children of the dispatch span. The
@@ -827,15 +863,24 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                         Vec::new(),
                         ResourceUsage::default(),
                         None,
+                        Vec::new(),
                     );
                 }
             };
             let instantiate_span =
                 tracing::info_span!("wasmtime.engine_instantiate", route.id = %route_id).entered();
             let (engine_world, mut store, handles) =
-                match runtime.instantiate_engine(&group_id, &route_id, source) {
+                match runtime.instantiate_engine(&group_id, &route_id, source, callouts_allowed) {
                     Ok(t) => t,
-                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default(), None),
+                    Err(e) => {
+                        return (
+                            Err(e),
+                            Vec::new(),
+                            ResourceUsage::default(),
+                            None,
+                            Vec::new(),
+                        );
+                    }
                 };
             drop(instantiate_span);
             let _call =
@@ -853,6 +898,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             let stream_summary =
                 StreamSummary::from_state(store.data().stream_stats(), result.is_ok());
             let logs = store.data_mut().take_logs();
+            // ADR-0034: drain any callbacks the handler scheduled, before
+            // the store drops. The dispatch task fires them after the
+            // response is sent.
+            let callbacks = store.data_mut().take_scheduled_callbacks();
             // Fuel is effectively unbounded on the engine path; we
             // still report consumed for the journal because the
             // wasmtime engine still tracks it. memory_peak_bytes is
@@ -863,7 +912,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 memory_peak_bytes: store.data().limits.peak_memory_bytes as u64,
                 wall_clock_ms: 0,
             };
-            (result, logs, resources, stream_summary)
+            (result, logs, resources, stream_summary, callbacks)
         } else {
             let component = component.expect("non-engine path requires a component");
             let instantiate_span =
@@ -871,7 +920,15 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
             let (handler, mut store, handles) =
                 match runtime.instantiate(&component, &group_id, &route_id) {
                     Ok(t) => t,
-                    Err(e) => return (Err(e), Vec::new(), ResourceUsage::default(), None),
+                    Err(e) => {
+                        return (
+                            Err(e),
+                            Vec::new(),
+                            ResourceUsage::default(),
+                            None,
+                            Vec::new(),
+                        );
+                    }
                 };
             drop(instantiate_span);
             let _call = tracing::info_span!("wasmtime.call_handle", route.id = %route_id).entered();
@@ -890,9 +947,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 wall_clock_ms: 0,
             };
             // Per-route components can't stream (the user-facing
-            // `world handler` has no response-stream import), so no
-            // summary on this path.
-            (result, logs, resources, None)
+            // `world handler` has no response-stream import) and can't
+            // schedule callbacks (no callback import), so no summary and
+            // no callbacks on this path.
+            (result, logs, resources, None, Vec::new())
         }
     });
 
@@ -965,7 +1023,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
 
     // The buffered path ignores the stream summary (None here — a
     // handler that streamed took the early return above).
-    let (call_result, handler_logs, mut resources, _stream_summary) = outcome;
+    let (call_result, handler_logs, mut resources, _stream_summary, scheduled_callbacks) = outcome;
     let duration_ms = started.elapsed().as_millis() as u64;
     resources.wall_clock_ms = duration_ms;
     let handler_log_entries: Vec<HandlerLogEntry> = handler_logs
@@ -1085,6 +1143,27 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         .refresh_group_if_sliding(&matched.route.group_id)
     {
         tracing::warn!(error = %e, "sliding TTL bump failed");
+    }
+
+    // ADR-0034: fire any callbacks the handler scheduled, on background
+    // tasks, now that the response is built and the request is journaled.
+    // Each task applies the egress filter against the resolved IP and
+    // records its own outcome in the group's callback journal. No-op when
+    // the handler scheduled none (the common case, and always so unless
+    // egress is on and the group opted in).
+    if !scheduled_callbacks.is_empty() {
+        crate::callout::spawn_callbacks(
+            state.journal().clone(),
+            state.egress().clone(),
+            crate::callout::CallbackContext {
+                trace_id: trace_id.clone(),
+                group_id: matched.route.group_id.clone(),
+                group_name: matched.route.group_name.clone(),
+                route_id: matched.route.id.clone(),
+                route_number: matched.route.number,
+            },
+            scheduled_callbacks,
+        );
     }
 
     let mut axum_response = axum_response;
@@ -1403,7 +1482,7 @@ fn spawn_streaming_journal(
             in_flight,
         } = ctx;
         let _in_flight = in_flight;
-        let (result, logs, mut resources, summary) = match join.await {
+        let (result, logs, mut resources, summary, scheduled_callbacks) = match join.await {
             Ok(o) => o,
             Err(e) => {
                 tracing::warn!(error = %e, "streaming handler task join failed");
@@ -1471,7 +1550,9 @@ fn spawn_streaming_journal(
             original_body_size: bytes as usize,
         };
         let entry = NewJournalEntry {
-            trace_id,
+            // Cloned (not moved) so the trace_id is still available for the
+            // callback context fired below (ADR-0034).
+            trace_id: trace_id.clone(),
             group_id: matched.route.group_id.clone(),
             group_name: matched.route.group_name.clone(),
             route_id: matched.route.id.clone(),
@@ -1503,6 +1584,23 @@ fn spawn_streaming_journal(
             .refresh_group_if_sliding(&matched.route.group_id)
         {
             tracing::warn!(error = %e, "sliding TTL bump failed (streaming)");
+        }
+        // ADR-0034: fire callbacks a streaming handler scheduled, same as
+        // the buffered path — once the stream has completed and the entry
+        // is journaled.
+        if !scheduled_callbacks.is_empty() {
+            crate::callout::spawn_callbacks(
+                state.journal().clone(),
+                state.egress().clone(),
+                crate::callout::CallbackContext {
+                    trace_id: trace_id.clone(),
+                    group_id: matched.route.group_id.clone(),
+                    group_name: matched.route.group_name.clone(),
+                    route_id: matched.route.id.clone(),
+                    route_number: matched.route.number,
+                },
+                scheduled_callbacks,
+            );
         }
     });
 }

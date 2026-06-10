@@ -9,6 +9,7 @@ pub mod api_filters;
 pub mod auth;
 pub mod auth_api;
 pub mod bindings;
+pub mod callout;
 pub mod capabilities;
 pub mod dry_run;
 pub mod egress;

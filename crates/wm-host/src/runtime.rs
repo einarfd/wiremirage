@@ -391,6 +391,7 @@ impl Runtime {
         group_ulid: &str,
         route_ulid: &str,
         source: String,
+        callouts_allowed: bool,
     ) -> Result<(EngineWorld, Store<HostState>, BucketHandles)> {
         let route_bucket = self
             .storage
@@ -400,7 +401,7 @@ impl Runtime {
             .storage
             .group_bucket(group_ulid)
             .map_err(|e| wasmtime::Error::msg(format!("open group bucket: {e}")))?;
-        self.instantiate_engine_with_buckets(source, route_bucket, group_bucket)
+        self.instantiate_engine_with_buckets(source, route_bucket, group_bucket, callouts_allowed)
     }
 
     pub fn instantiate_engine_with_buckets(
@@ -408,6 +409,7 @@ impl Runtime {
         source: String,
         route_bucket: Bucket,
         group_bucket: Bucket,
+        callouts_allowed: bool,
     ) -> Result<(EngineWorld, Store<HostState>, BucketHandles)> {
         let Some(engine) = &self.js_engine else {
             return Err(wasmtime::Error::msg(
@@ -416,6 +418,8 @@ impl Runtime {
         };
         let mut state = HostState::new(HandlerLimits::new(ENGINE_MAX_MEMORY_BYTES));
         state.set_current_source(source);
+        // ADR-0034: only when the dispatch path says this group may call out.
+        state.set_callouts_allowed(callouts_allowed);
         let mut store = Store::new(&self.engine, state);
         // Wider per-call budget for the interpreted path. Fuel is
         // effectively disabled (set to max); epoch is the

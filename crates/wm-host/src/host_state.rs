@@ -136,7 +136,20 @@ pub struct HostState {
     /// path wired it before the engine call; only the engine world
     /// imports `response-stream`, so per-route components never set it.
     stream: Option<StreamSink>,
+    /// Whether this request's handler is allowed to schedule outbound
+    /// callbacks (ADR-0034). The dispatch path sets this to `host egress
+    /// enabled && group.callout_enabled`. When false, `callback.schedule`
+    /// is rejected synchronously with a clear error.
+    callouts_allowed: bool,
+    /// Callbacks the handler scheduled via `callback.schedule`, drained by
+    /// the dispatch path after `handle` returns and fired on background
+    /// tasks (ADR-0034). Empty for the handler world (no callback import).
+    scheduled_callbacks: Vec<crate::callout::ScheduledCallback>,
 }
+
+/// Max callbacks a single handler invocation may schedule — a bound on
+/// fan-out abuse / a runaway loop scheduling callbacks (ADR-0034).
+const MAX_CALLBACKS_PER_REQUEST: usize = 16;
 
 impl HostState {
     pub fn new(limits: HandlerLimits) -> Self {
@@ -146,6 +159,8 @@ impl HostState {
             limits,
             current_source: None,
             stream: None,
+            callouts_allowed: false,
+            scheduled_callbacks: Vec::new(),
         }
     }
 
@@ -218,6 +233,19 @@ impl HostState {
     /// before the engine runs.
     pub fn set_current_source(&mut self, source: String) {
         self.current_source = Some(source);
+    }
+
+    /// Allow (or forbid) this invocation's handler from scheduling outbound
+    /// callbacks (ADR-0034). Set by the dispatch path from `host egress
+    /// enabled && group.callout_enabled` before the engine runs.
+    pub fn set_callouts_allowed(&mut self, allowed: bool) {
+        self.callouts_allowed = allowed;
+    }
+
+    /// Drain the callbacks the handler scheduled this request, for the
+    /// dispatch path to fire on background tasks. Leaves the buffer empty.
+    pub fn take_scheduled_callbacks(&mut self) -> Vec<crate::callout::ScheduledCallback> {
+        std::mem::take(&mut self.scheduled_callbacks)
     }
 }
 
@@ -457,6 +485,7 @@ impl ClockHost for HostState {
 // above; bucket + log methods delegate to the same fields. The
 // engine-world adds `engine-host.get-source` on top.
 
+use crate::bindings::engine_bindings::wiremirage::handler::callback::Host as EngineCallbackHost;
 use crate::bindings::engine_bindings::wiremirage::handler::clock::Host as EngineClockHost;
 use crate::bindings::engine_bindings::wiremirage::handler::engine_host::Host as EngineHostHost;
 use crate::bindings::engine_bindings::wiremirage::handler::http::Host as EngineHttpHost;
@@ -553,6 +582,46 @@ impl EngineLogHost for HostState {
         };
         self.logs.push_now(mapped, message);
         Ok(())
+    }
+}
+
+impl EngineCallbackHost for HostState {
+    fn schedule(
+        &mut self,
+        url: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        delay_ms: u64,
+    ) -> Result<std::result::Result<(), String>> {
+        // Synchronous rejections the handler can catch: the capability gates
+        // (host egress off / group not opted in) and basic shape. The per-IP
+        // egress decision is made at fire time and journaled — it can't be
+        // known here without resolving, and we don't block the handler on DNS.
+        if !self.callouts_allowed {
+            return Ok(Err(
+                "outbound callbacks are not enabled: the host must run with WM_EGRESS on and \
+                 this group must set callout_enabled"
+                    .to_string(),
+            ));
+        }
+        if url.trim().is_empty() {
+            return Ok(Err("callback url must not be empty".to_string()));
+        }
+        if self.scheduled_callbacks.len() >= MAX_CALLBACKS_PER_REQUEST {
+            return Ok(Err(format!(
+                "too many callbacks scheduled in one request (max {MAX_CALLBACKS_PER_REQUEST})"
+            )));
+        }
+        self.scheduled_callbacks
+            .push(crate::callout::ScheduledCallback {
+                url,
+                method,
+                headers,
+                body,
+                delay_ms,
+            });
+        Ok(Ok(()))
     }
 }
 

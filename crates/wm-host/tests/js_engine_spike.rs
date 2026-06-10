@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wm_host::bindings::engine_bindings::Engine as EngineWorld;
+use wm_host::bindings::engine_bindings::wiremirage::handler::callback::Host as CallbackHost;
 use wm_host::bindings::engine_bindings::wiremirage::handler::clock::Host as ClockHost;
 use wm_host::bindings::engine_bindings::wiremirage::handler::engine_host::Host as EngineHostTrait;
 use wm_host::bindings::engine_bindings::wiremirage::handler::http::{
@@ -86,6 +87,19 @@ impl ResponseStreamHost for EngineState {
     }
     fn finish(&mut self) -> wasmtime::Result<()> {
         Ok(())
+    }
+}
+impl CallbackHost for EngineState {
+    fn schedule(
+        &mut self,
+        _url: String,
+        _method: String,
+        _headers: Vec<(String, String)>,
+        _body: Vec<u8>,
+        _delay_ms: u64,
+    ) -> wasmtime::Result<std::result::Result<(), String>> {
+        // The spike test doesn't exercise callbacks; accept and discard.
+        Ok(Ok(()))
     }
 }
 impl LogHost for EngineState {
