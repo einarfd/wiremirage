@@ -44,6 +44,9 @@ hex.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 tower = "0.5"
+# Outbound-callback egress policy (ADR-0034): CIDR parsing + containment for the
+# special-use default-deny and the WM_EGRESS_ALLOW/DENY overrides (v4 + v6).
+ipnet = "2"
 # Local auth (slice 20): argon2id for password hashing, hmac+sha2 for
 # signed session cookies. argon2id is OWASP's recommendation; the
 # `argon2` crate is pure Rust and audit-friendly.

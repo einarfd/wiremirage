@@ -11,6 +11,7 @@ pub mod auth_api;
 pub mod bindings;
 pub mod capabilities;
 pub mod dry_run;
+pub mod egress;
 pub mod github_oauth;
 pub mod host_state;
 pub mod journal;
