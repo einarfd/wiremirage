@@ -896,6 +896,7 @@ async fn group_detail_page(
             .unwrap_or_else(|| short_id(&group.owner_id)),
         ttl_seconds: group.ttl_seconds,
         sliding_ttl: group.sliding_ttl,
+        callout_enabled: group.callout_enabled,
         last_activity_at: group.last_activity_at.map(|t| t.to_rfc3339()),
         created_at: group.created_at.to_rfc3339(),
     };
@@ -937,6 +938,7 @@ struct GroupDetailGroup {
     owner_name: String,
     ttl_seconds: u64,
     sliding_ttl: bool,
+    callout_enabled: bool,
     last_activity_at: Option<String>,
     created_at: String,
 }
@@ -967,6 +969,9 @@ struct EditGroupForm {
     ttl_seconds: Option<String>,
     /// "on" when checked; absent when unchecked (HTML form quirk).
     sliding_ttl: Option<String>,
+    /// "on" when checked; absent when unchecked. Toggles outbound-callback
+    /// opt-in for the group (ADR-0034).
+    callout_enabled: Option<String>,
     #[serde(rename = "_csrf")]
     _csrf: Option<String>,
 }
@@ -1025,32 +1030,41 @@ async fn group_edit_form(
             }
         },
     };
-    // HTML checkboxes only submit the field when checked; an
-    // unchecked box means "sliding off". So if the form arrived
-    // without ttl_seconds and without sliding_ttl, treat that as
-    // "no change". If sliding_ttl was explicitly present (or
-    // explicitly absent on a submit), wire the new value through.
+    // HTML checkboxes only submit the field when checked; an unchecked box is
+    // simply absent. The edit form always carries ttl_seconds, so any genuine
+    // submit makes the checkboxes explicit — an absent checkbox then means
+    // "off", not "no change". Same reasoning for the callout_enabled box.
     let sliding = form.sliding_ttl.as_deref().map(|v| {
         let v = v.trim();
         v == "on" || v == "true" || v == "1"
     });
-    // Always submit sliding_ttl change because the form *not having*
-    // the field means the checkbox was unchecked — but only treat the
-    // POST as setting it when the form mentioned the field at all.
-    // To distinguish, the template renders a hidden marker
-    // `sliding_ttl_marker=1` so we know the form was for editing.
-    let sliding_explicit = form.sliding_ttl.is_some() || ttl_seconds.is_some();
-    let sliding_to_set = if sliding_explicit {
+    let form_submit =
+        form.sliding_ttl.is_some() || form.callout_enabled.is_some() || ttl_seconds.is_some();
+    let sliding_to_set = if form_submit {
         Some(sliding.unwrap_or(false))
     } else {
         None
     };
+    let callout_to_set = if form_submit {
+        let on = form
+            .callout_enabled
+            .as_deref()
+            .map(|v| {
+                let v = v.trim();
+                v == "on" || v == "true" || v == "1"
+            })
+            .unwrap_or(false);
+        Some(on)
+    } else {
+        None
+    };
 
-    if let Err(e) = state
-        .routes()
-        .registry()
-        .patch_group(&group.id, ttl_seconds, sliding_to_set)
-    {
+    if let Err(e) = state.routes().registry().patch_group(
+        &group.id,
+        ttl_seconds,
+        sliding_to_set,
+        callout_to_set,
+    ) {
         return ui_error_500(&state, &auth, format!("edit: {e}"));
     }
     axum::response::Redirect::to(&format!("/ui/groups/{final_name}")).into_response()

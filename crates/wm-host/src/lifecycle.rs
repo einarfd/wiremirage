@@ -140,20 +140,11 @@ mod tests {
     /// Valkey TTL firing. We use the registry's storage handle via a
     /// helper crate of the test.
     fn wipe_group_record(registry: &Registry, group_id: &str, group_name: &str) {
+        // A Valkey TTL firing drops the whole hash key, not individual
+        // fields — delete the key outright so the simulation stays accurate
+        // as the group record grows new fields.
         let mut bucket = registry.admin_bucket_for_test();
-        for field in [
-            "id",
-            "name",
-            "implicit",
-            "created_at",
-            "owner_id",
-            "ttl_seconds",
-            "sliding_ttl",
-        ] {
-            bucket
-                .hash_delete(&format!("group:{group_id}"), field)
-                .unwrap();
-        }
+        bucket.delete(&format!("group:{group_id}")).unwrap();
         bucket
             .delete(&format!("group:by-name:{group_name}"))
             .unwrap();

@@ -1791,6 +1791,9 @@ struct PatchGroupBody {
     name: Option<String>,
     ttl_seconds: Option<u64>,
     sliding_ttl: Option<bool>,
+    /// Toggle outbound-callback opt-in for the group (ADR-0034). Omitted
+    /// from the wire leaves it unchanged.
+    callout_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1801,6 +1804,7 @@ struct GroupResponse {
     owner_id: String,
     ttl_seconds: u64,
     sliding_ttl: bool,
+    callout_enabled: bool,
     created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_activity_at: Option<String>,
@@ -1815,6 +1819,7 @@ impl From<&Group> for GroupResponse {
             owner_id: g.owner_id.clone(),
             ttl_seconds: g.ttl_seconds,
             sliding_ttl: g.sliding_ttl,
+            callout_enabled: g.callout_enabled,
             created_at: g.created_at.to_rfc3339(),
             last_activity_at: g.last_activity_at.map(|ts| ts.to_rfc3339()),
         }
@@ -2057,9 +2062,13 @@ async fn patch_group(
     Json(body): Json<PatchGroupBody>,
 ) -> Result<Json<GroupResponse>, ApiError> {
     let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
-    if body.name.is_none() && body.ttl_seconds.is_none() && body.sliding_ttl.is_none() {
+    if body.name.is_none()
+        && body.ttl_seconds.is_none()
+        && body.sliding_ttl.is_none()
+        && body.callout_enabled.is_none()
+    {
         return Err(ApiError::validation(
-            "PATCH body must include at least `name`, `ttl_seconds`, or `sliding_ttl`",
+            "PATCH body must include at least `name`, `ttl_seconds`, `sliding_ttl`, or `callout_enabled`",
         ));
     }
     // Rename first (it rewrites the by-name index + route slugs and changes
@@ -2073,11 +2082,16 @@ async fn patch_group(
             .routes()
             .refresh_after_group_rename(&group.id, &renamed.name);
     }
-    let updated = if body.ttl_seconds.is_some() || body.sliding_ttl.is_some() {
-        state
-            .routes()
-            .registry()
-            .patch_group(&group.id, body.ttl_seconds, body.sliding_ttl)?
+    let updated = if body.ttl_seconds.is_some()
+        || body.sliding_ttl.is_some()
+        || body.callout_enabled.is_some()
+    {
+        state.routes().registry().patch_group(
+            &group.id,
+            body.ttl_seconds,
+            body.sliding_ttl,
+            body.callout_enabled,
+        )?
     } else {
         // Rename-only: re-read so the response reflects the new name.
         state.routes().registry().read_group_by_ref(&group.id)?
@@ -2185,6 +2199,15 @@ pub(crate) async fn import_group_core(
         ttl_seconds: normalized.ttl_seconds,
         sliding_ttl: normalized.sliding,
     })?;
+    // callout_enabled isn't a create-surface field (toggle-via-patch only;
+    // ADR-0034 slice 2), so apply it as a follow-up patch when the spec asked
+    // for it. Skipped when absent so the common case writes nothing extra.
+    if let Some(flag) = normalized.callout {
+        state
+            .routes()
+            .registry()
+            .patch_group(&group.id, None, None, Some(flag))?;
+    }
     for (idx, r) in normalized.routes.iter().enumerate() {
         let body = CreateRouteBody {
             group: Some(group.name.clone()),
@@ -2253,6 +2276,9 @@ pub(crate) fn export_group_core(
         name: group.name.clone(),
         ttl: Some(wm_core::spec::format_duration(group.ttl_seconds)),
         sliding: Some(group.sliding_ttl),
+        // Emit only when on — keeps the common-case spec free of `callout:
+        // false` noise; an absent field imports as off (the default).
+        callout: group.callout_enabled.then_some(true),
         routes: route_specs,
     })
 }

@@ -247,6 +247,12 @@ pub struct UpdateGroupArgs {
     /// Disable sliding TTL.
     #[arg(long)]
     pub no_sliding: bool,
+    /// Allow this group's handlers to make outbound callbacks (ADR-0034).
+    #[arg(long, conflicts_with = "no_callout")]
+    pub callout: bool,
+    /// Disallow outbound callbacks for this group (the default).
+    #[arg(long)]
+    pub no_callout: bool,
 }
 
 #[derive(Debug, Subcommand)]
