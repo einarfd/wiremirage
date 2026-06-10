@@ -49,6 +49,10 @@ pub struct GroupSpec {
     pub ttl: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sliding: Option<bool>,
+    /// Whether handlers in this group may make outbound callbacks (ADR-0034).
+    /// Omitted when off (the default); present + `true` to opt the group in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callout: Option<bool>,
     #[serde(default)]
     pub routes: Vec<RouteSpec>,
 }
@@ -83,6 +87,7 @@ pub struct NormalizedSpec {
     pub name: String,
     pub ttl_seconds: Option<u64>,
     pub sliding: Option<bool>,
+    pub callout: Option<bool>,
     pub routes: Vec<NormalizedRoute>,
 }
 
@@ -131,6 +136,7 @@ pub fn normalize(spec: &GroupSpec) -> Result<NormalizedSpec> {
         name: spec.name.clone(),
         ttl_seconds,
         sliding: spec.sliding,
+        callout: spec.callout,
         routes,
     })
 }
@@ -388,6 +394,24 @@ mod tests {
         let n = normalize(&again).unwrap();
         assert_eq!(n.routes.len(), 1);
         assert_eq!(n.routes[0].source, "inline");
+    }
+
+    #[test]
+    fn callout_round_trips_and_defaults_off() {
+        // Present + true survives parse → render → parse → normalize.
+        let yaml = "name: g\ncallout: true\nroutes: []\n";
+        let again = {
+            let spec = parse_str(yaml, SpecFormat::Yaml).unwrap();
+            let rendered = render(&spec, SpecFormat::Yaml).unwrap();
+            parse_str(&rendered, SpecFormat::Yaml).unwrap()
+        };
+        assert_eq!(again.callout, Some(true));
+        assert_eq!(normalize(&again).unwrap().callout, Some(true));
+
+        // Absent → None → import treats it as off (the default).
+        let bare = parse_str("name: g\nroutes: []\n", SpecFormat::Yaml).unwrap();
+        assert_eq!(bare.callout, None);
+        assert_eq!(normalize(&bare).unwrap().callout, None);
     }
 
     #[test]

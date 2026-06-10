@@ -3087,6 +3087,61 @@ async fn patch_group_updates_ttl_and_sliding() {
 }
 
 #[tokio::test]
+async fn patch_group_toggles_callout_enabled() {
+    let h = Harness::start().await;
+    // Default off at create (ADR-0034 — callout is opt-in).
+    let created: serde_json::Value = h
+        .client
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "callout-grp" }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(created["callout_enabled"], false);
+
+    // Toggle on via PATCH.
+    let on: serde_json::Value = h
+        .client
+        .patch(h.url("/api/groups/callout-grp"))
+        .json(&json!({ "callout_enabled": true }))
+        .send()
+        .await
+        .expect("patch")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(on["callout_enabled"], true);
+
+    // And it survives a re-read (persisted to the group record).
+    let got: serde_json::Value = h
+        .client
+        .get(h.url("/api/groups/callout-grp"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(got["callout_enabled"], true);
+
+    // Toggle back off.
+    let off: serde_json::Value = h
+        .client
+        .patch(h.url("/api/groups/callout-grp"))
+        .json(&json!({ "callout_enabled": false }))
+        .send()
+        .await
+        .expect("patch")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(off["callout_enabled"], false);
+}
+
+#[tokio::test]
 async fn patch_group_with_no_fields_is_validation_failure() {
     let h = Harness::start().await;
     h.client
@@ -3370,6 +3425,82 @@ async fn import_creates_group_and_routes() {
         .await
         .expect("json");
     assert_eq!(routes["routes"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn import_export_round_trips_callout_flag() {
+    let h = Harness::start_with_engine().await;
+    // Import a group that opts into outbound callbacks.
+    let resp = h
+        .client
+        .post(h.url("/api/groups/import"))
+        .json(&json!({
+            "name": "callout-spec",
+            "callout": true,
+            "routes": [
+                {"method":"POST","path":"/v1/charges","language":"javascript","source": echo_source()}
+            ]
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 201);
+
+    // The flag actually landed on the group (not just accepted + dropped).
+    let g: serde_json::Value = h
+        .client
+        .get(h.url("/api/groups/callout-spec"))
+        .send()
+        .await
+        .expect("get")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(g["callout_enabled"], true);
+
+    // And export emits it so a re-import preserves it.
+    let exp: serde_json::Value = h
+        .client
+        .get(h.url("/api/groups/callout-spec/export"))
+        .send()
+        .await
+        .expect("export")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(exp["callout"], true);
+
+    // A group that didn't opt in exports without the field (no `callout:
+    // false` noise) — absent imports as off.
+    let plain: serde_json::Value = h
+        .client
+        .post(h.url("/api/groups/import"))
+        .json(&json!({
+            "name": "no-callout-spec",
+            "routes": [
+                {"method":"GET","path":"/ping","language":"javascript","source": echo_source()}
+            ]
+        }))
+        .send()
+        .await
+        .expect("post")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(plain["routes_created"], 1);
+    let exp2: serde_json::Value = h
+        .client
+        .get(h.url("/api/groups/no-callout-spec/export"))
+        .send()
+        .await
+        .expect("export")
+        .json()
+        .await
+        .expect("json");
+    assert!(
+        exp2.get("callout").is_none() || exp2["callout"].is_null(),
+        "callout omitted when off: {exp2}"
+    );
 }
 
 #[tokio::test]

@@ -37,6 +37,10 @@ pub struct GroupRecord {
     pub owner_id: String,
     pub ttl_seconds: u64,
     pub sliding_ttl: bool,
+    /// Whether handlers in this group may make outbound callbacks (ADR-0034).
+    /// Pre-feature hosts omit the field; default to `false`.
+    #[serde(default)]
+    pub callout_enabled: bool,
     pub created_at: String,
     /// Most recent matched dispatch against any route in the group.
     /// `None` for groups that have never seen traffic.
@@ -76,6 +80,10 @@ pub struct PatchGroupBody {
     pub ttl_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sliding_ttl: Option<bool>,
+    /// Toggle outbound-callback opt-in for the group (ADR-0034). Omitted from
+    /// the wire when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callout_enabled: Option<bool>,
 }
 
 // -- Routes ------------------------------------------------------------------

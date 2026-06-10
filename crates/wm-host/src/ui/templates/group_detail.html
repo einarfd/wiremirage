@@ -24,6 +24,8 @@
     <dd>{{ group.owner_name }}</dd>
     <dt>TTL</dt>
     <dd>{{ group.ttl_seconds }} s{% if group.sliding_ttl %} <span class="text-muted">· sliding</span>{% endif %}</dd>
+    <dt>Outbound callbacks</dt>
+    <dd>{% if group.callout_enabled %}enabled{% else %}<span class="text-muted">disabled</span>{% endif %}</dd>
     <dt>Last activity</dt>
     <dd>{% if group.last_activity_at %}<time datetime="{{ group.last_activity_at }}">{{ group.last_activity_at }}</time>{% else %}<span class="text-muted">never</span>{% endif %}</dd>
     <dt>Created</dt>
@@ -52,6 +54,10 @@
         <label class="filter-checkbox">
           <input type="checkbox" name="sliding_ttl" value="on"{% if group.sliding_ttl %} checked{% endif %}>
           <span>Sliding TTL (bump on traffic)</span>
+        </label>
+        <label class="filter-checkbox">
+          <input type="checkbox" name="callout_enabled" value="on"{% if group.callout_enabled %} checked{% endif %}>
+          <span>Allow outbound callbacks (ADR-0034)</span>
         </label>
         <button type="submit" class="btn btn--primary">Save</button>
       </form>

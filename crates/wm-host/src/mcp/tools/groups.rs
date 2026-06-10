@@ -26,6 +26,8 @@ pub struct GroupRecord {
     pub owner_id: String,
     pub ttl_seconds: u64,
     pub sliding_ttl: bool,
+    /// Whether handlers in this group may make outbound callbacks (ADR-0034).
+    pub callout_enabled: bool,
     pub implicit: bool,
     pub created_at: String,
     /// Most recent matched dispatch against any route in the group.
@@ -41,6 +43,7 @@ impl From<&Group> for GroupRecord {
             owner_id: g.owner_id.clone(),
             ttl_seconds: g.ttl_seconds,
             sliding_ttl: g.sliding_ttl,
+            callout_enabled: g.callout_enabled,
             implicit: g.implicit,
             created_at: g.created_at.to_rfc3339(),
             last_activity_at: g.last_activity_at.map(|ts| ts.to_rfc3339()),
@@ -153,6 +156,10 @@ pub struct UpdateGroupArgs {
     /// bumps the group's expiry; `false` = fixed-window expiry from
     /// the last refresh. Omit to leave the flag alone.
     pub sliding_ttl: Option<bool>,
+    /// Flip outbound-callback opt-in for the group (ADR-0034). `true` lets
+    /// this group's handlers make callouts (subject to the host egress
+    /// config). Omit to leave it alone.
+    pub callout_enabled: Option<bool>,
 }
 
 #[tool_router(router = groups_router, vis = "pub(crate)")]
@@ -329,7 +336,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "update_group",
-        description = "Update a group's mutable fields by name or ULID: `ttl_seconds` (re-arms the Valkey TTL) and/or `sliding_ttl` (toggle the sliding-expiry flag). Owner-or-admin only. At least one of the two fields must be set. Rename and owner-transfer aren't supported through this tool."
+        description = "Update a group's mutable fields by name or ULID: `name` (rename + subdomain change), `ttl_seconds` (re-arms the Valkey TTL), `sliding_ttl` (toggle the sliding-expiry flag), and/or `callout_enabled` (toggle outbound-callback opt-in; ADR-0034). Owner-or-admin only. At least one field must be set. Owner-transfer isn't supported through this tool."
     )]
     pub async fn update_group(
         &self,
@@ -338,9 +345,13 @@ impl WmMcpServer {
     ) -> Result<Json<GroupRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
         let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
-        if args.name.is_none() && args.ttl_seconds.is_none() && args.sliding_ttl.is_none() {
+        if args.name.is_none()
+            && args.ttl_seconds.is_none()
+            && args.sliding_ttl.is_none()
+            && args.callout_enabled.is_none()
+        {
             return Err(validation(
-                "update_group needs at least one of `name`, `ttl_seconds`, or `sliding_ttl`",
+                "update_group needs at least one of `name`, `ttl_seconds`, `sliding_ttl`, or `callout_enabled`",
             ));
         }
         // Rename first (rewrites the by-name index + route slugs, changes the
@@ -356,11 +367,19 @@ impl WmMcpServer {
                 .routes()
                 .refresh_after_group_rename(&group.id, &renamed.name);
         }
-        let updated = if args.ttl_seconds.is_some() || args.sliding_ttl.is_some() {
+        let updated = if args.ttl_seconds.is_some()
+            || args.sliding_ttl.is_some()
+            || args.callout_enabled.is_some()
+        {
             self.state
                 .routes()
                 .registry()
-                .patch_group(&group.id, args.ttl_seconds, args.sliding_ttl)
+                .patch_group(
+                    &group.id,
+                    args.ttl_seconds,
+                    args.sliding_ttl,
+                    args.callout_enabled,
+                )
                 .map_err(map_registry_error)?
         } else {
             self.state

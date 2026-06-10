@@ -58,6 +58,7 @@ pub fn render_group(g: &GroupRecord, format: Format) {
             println!("owner:       {}", g.owner_id);
             println!("ttl_seconds: {}", g.ttl_seconds);
             println!("sliding:     {}", g.sliding_ttl);
+            println!("callout:     {}", g.callout_enabled);
             println!("implicit:    {}", g.implicit);
             println!("created_at:  {}", g.created_at);
         }

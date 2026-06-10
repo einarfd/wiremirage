@@ -200,11 +200,16 @@ async fn handle_groups(
                 name: args.rename.clone(),
                 ttl_seconds: args.ttl_seconds,
                 sliding_ttl: sliding_flag(args.sliding, args.no_sliding),
+                callout_enabled: sliding_flag(args.callout, args.no_callout),
             };
-            if body.name.is_none() && body.ttl_seconds.is_none() && body.sliding_ttl.is_none() {
+            if body.name.is_none()
+                && body.ttl_seconds.is_none()
+                && body.sliding_ttl.is_none()
+                && body.callout_enabled.is_none()
+            {
                 return Err(ClientError::Validation(
                     "update requires at least one of --rename, --ttl-seconds, --sliding, \
-                     --no-sliding"
+                     --no-sliding, --callout, --no-callout"
                         .into(),
                 ));
             }

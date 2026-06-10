@@ -105,6 +105,11 @@ pub struct Group {
     /// default to `true` so they live as long as traffic flows;
     /// explicit groups default to `true` too but can opt out.
     pub sliding_ttl: bool,
+    /// Whether handlers in this group may make outbound callbacks
+    /// (ADR-0034). Off by default; an opt-in per group on top of the
+    /// host-level egress config. Toggled via `patch_group`, never set at
+    /// create.
+    pub callout_enabled: bool,
     /// Timestamp of the most recent matched dispatch against any
     /// route in this group. `None` for groups that have never seen
     /// traffic. Used as the default sort column on `GET /api/groups`.
@@ -290,6 +295,8 @@ impl Registry {
             owner_id: params.owner_id,
             ttl_seconds,
             sliding_ttl: params.sliding_ttl.unwrap_or(DEFAULT_GROUP_SLIDING_TTL),
+            // Callouts are opt-in per group (ADR-0034); enabled later via patch.
+            callout_enabled: false,
             last_activity_at: None,
         };
         write_group(&mut bucket, &group)?;
@@ -329,13 +336,15 @@ impl Registry {
 
     /// Patch a subset of mutable group fields. `ttl_seconds = Some(s)`
     /// validates against `MAX_GROUP_TTL_SECONDS` and re-arms the
-    /// Valkey TTL; `sliding_ttl = Some(b)` flips the flag. Rename and
-    /// owner-transfer aren't supported in this slice.
+    /// Valkey TTL; `sliding_ttl = Some(b)` flips the flag;
+    /// `callout_enabled = Some(b)` flips outbound-callback opt-in (ADR-0034).
+    /// Rename and owner-transfer aren't supported in this slice.
     pub fn patch_group(
         &self,
         group_id: &str,
         ttl_seconds: Option<u64>,
         sliding_ttl: Option<bool>,
+        callout_enabled: Option<bool>,
     ) -> Result<Group, RegistryError> {
         let mut bucket = self.bucket()?;
         let mut group = self.read_group(&mut bucket, group_id)?;
@@ -355,6 +364,14 @@ impl Registry {
             bucket.hash_set(
                 &format!("group:{group_id}"),
                 "sliding_ttl",
+                if flag { b"1".to_vec() } else { b"0".to_vec() },
+            )?;
+        }
+        if let Some(flag) = callout_enabled {
+            group.callout_enabled = flag;
+            bucket.hash_set(
+                &format!("group:{group_id}"),
+                "callout_enabled",
                 if flag { b"1".to_vec() } else { b"0".to_vec() },
             )?;
         }
@@ -676,6 +693,7 @@ impl Registry {
             owner_id: owner_id.to_string(),
             ttl_seconds: DEFAULT_GROUP_TTL_SECONDS,
             sliding_ttl: DEFAULT_GROUP_SLIDING_TTL,
+            callout_enabled: false,
             last_activity_at: None,
         };
         write_group(bucket, &group)?;
@@ -1136,6 +1154,11 @@ fn write_group(bucket: &mut Bucket, group: &Group) -> Result<(), RegistryError> 
         "sliding_ttl",
         if group.sliding_ttl { b"1" } else { b"0" }.to_vec(),
     )?;
+    bucket.hash_set(
+        &key,
+        "callout_enabled",
+        if group.callout_enabled { b"1" } else { b"0" }.to_vec(),
+    )?;
     bucket.set(
         &format!("group:by-name:{}", group.name),
         group.id.as_bytes().to_vec(),
@@ -1224,6 +1247,8 @@ fn decode_group(fields: &HashMap<String, Vec<u8>>) -> Result<Group, RegistryErro
             .parse()
             .map_err(|e| RegistryError::Malformed(format!("ttl_seconds: {e}")))?,
         sliding_ttl: utf8(fields, "sliding_ttl")? == "1",
+        // Optional — pre-ADR-0034 records won't have it; absent = off.
+        callout_enabled: utf8_opt(fields, "callout_enabled").as_deref() == Some("1"),
         // Activity fields are optional — pre-slice-17 records won't
         // have them. Treat absent as "never".
         last_activity_at: utf8_opt(fields, "last_activity_at")
