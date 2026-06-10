@@ -23,6 +23,8 @@ use crate::wire::{WireBytes, decode_entries};
 pub struct ClearGroupStateArgs {
     /// Group name or ULID.
     pub group: String,
+    /// Required guard. Must be `true`.
+    pub confirm: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -167,13 +169,18 @@ fn parse_route_slug(slug: &str) -> Result<(String, u32), ErrorData> {
 impl WmMcpServer {
     #[tool(
         name = "clear_group_state",
-        description = "Clear all per-route stores in a group plus the group's shared store. Routes themselves stay alive. Use between test phases when the whole group's state should reset."
+        description = "Clear all per-route stores in a group PLUS the group's shared store. Routes themselves stay alive. The most destructive non-delete on the surface (it wipes every route's kv, not just the shared gkv), so `confirm` must be `true`. Use between test phases when the whole group's state should reset. Owner-or-admin."
     )]
     pub async fn clear_group_state(
         &self,
         Extension(parts): Extension<http::request::Parts>,
         Parameters(args): Parameters<ClearGroupStateArgs>,
     ) -> Result<Json<ClearGroupStateResult>, ErrorData> {
+        if !args.confirm {
+            return Err(validation(
+                "clear_group_state requires `confirm: true` — set it explicitly to proceed",
+            ));
+        }
         let auth = auth_from(&parts)?;
         let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
         self.state
