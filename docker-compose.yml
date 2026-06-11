@@ -2,7 +2,7 @@
 #
 # Two services:
 #   - valkey  : the storage backend, always available
-#   - wm-host : the host binary, built from the repo's Dockerfile.
+#   - wm-host : the host binary, pulled from GHCR (the image CI publishes).
 #               Gated by the `full` profile so the default
 #               `docker compose up -d` matches the dev workflow
 #               (Valkey only; you `cargo run -p wm-host` against it).
@@ -14,10 +14,17 @@
 #     WM_STORAGE=redis://localhost:6379 \
 #     cargo run -p wm-host
 #
-# Quickstart — full stack (Valkey + host both in compose):
+# Quickstart — full stack (Valkey + host both in compose), pulling the
+# published image:
 #
 #   WM_BOOTSTRAP_TOKEN=wmt_dev_local \
-#     docker compose --profile full up -d --build
+#     docker compose --profile full up -d
+#
+# Build the host image from source instead (testing a local change to the
+# prod-shaped build) by layering the dev override — see docker-compose.dev.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     --profile full up -d --build      # (or: just run-web-docker)
 #
 # The host listens on 8080; Valkey on 6379. Source-language handlers
 # compile in-host (ADR-0020); no Node sidecar.
@@ -33,9 +40,12 @@ services:
 
   wm-host:
     profiles: [full]
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Pulled from GHCR (published by CI on pushes to main). Override the
+    # tag/registry with WM_IMAGE, e.g.
+    #   WM_IMAGE=ghcr.io/einarfd/wiremirage:sha-abc1234 docker compose ...
+    # To build from source instead, layer docker-compose.dev.yml (see the
+    # header comment / `just run-web-docker`).
+    image: ${WM_IMAGE:-ghcr.io/einarfd/wiremirage:latest}
     ports:
       - "8080:8080"
     # Container config comes from the curated `.env`, forwarded wholesale
