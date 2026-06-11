@@ -87,12 +87,14 @@ run-web-fast:
       SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
       cargo run -p wm-host
 
-# Run the full stack inside Docker — Valkey + wm-host both via
-# `docker compose --profile full`. Uses the same Dockerfile that will
-# build the release image, so this is the "is the prod-shaped build
-# still working" check, not the inner dev loop. For iterating on host
-# code, use `run-web` — cargo's incremental compile is ~5-15s versus
-# the ~30-60s warm Docker rebuild this triggers.
+# Run the full stack inside Docker — Valkey + wm-host both via compose,
+# building the host image from source (the docker-compose.dev.yml override).
+# Uses the same Dockerfile CI builds + publishes, so this is the "is the
+# prod-shaped build still working" check, not the inner dev loop. For
+# iterating on host code, use `run-web` — cargo's incremental compile is
+# ~5-15s versus the ~30-60s warm Docker rebuild this triggers. (The plain
+# `docker compose --profile full up` — no dev override — pulls the published
+# GHCR image instead of building.)
 #
 # After it starts, open http://localhost:8080/ui/ and log in as
 # `admin` / `devpassword`. Stop with `just stop-web-docker` (keeps
@@ -108,7 +110,7 @@ run-web-docker:
       'WM_LOCAL_AUTH=admin:devpassword:admin,user:devpassword' \
       'SESSION_SECRET=dev-only-session-secret-do-not-use-in-prod-32b' \
       > .env
-    docker compose --profile full up -d --build
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile full up -d --build
     echo "Waiting for wm-host to respond on http://localhost:8080/health ..."
     until curl -fsS http://localhost:8080/health >/dev/null 2>&1; do
       sleep 0.5

@@ -1,0 +1,20 @@
+# Dev override: build the wm-host image from source instead of pulling the
+# published GHCR image. Layer it on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     --profile full up -d --build
+#
+# (or simply `just run-web-docker`).
+#
+# This uses the same repo-root Dockerfile CI builds, so it's the
+# "is the prod-shaped image still good?" check — NOT the inner dev loop
+# (use `just run-web` + `cargo run` for that; it's ~5-15s vs a Docker
+# rebuild). The base file's `image:` is kept as the local build tag, so the
+# built image is named ghcr.io/einarfd/wiremirage:latest locally and a later
+# plain `up` reuses it rather than pulling.
+services:
+  wm-host:
+    profiles: [full]
+    build:
+      context: .
+      dockerfile: Dockerfile

@@ -85,7 +85,10 @@ wit/
 skill/
   wiremirage/             user-facing Anthropic Skill (SKILL.md + scripts)
   wiremirage-debug/       diagnostic sub-skill triggered on mock-debugging tasks
-docker-compose.yml        Valkey for local development
+docker-compose.yml        Valkey (always) + wm-host (pulls the published
+                          GHCR image, `full` profile)
+docker-compose.dev.yml    Dev override: build the wm-host image from source
+Dockerfile                Release image (built + published to GHCR by CI)
 ```
 
 ## Building
@@ -138,6 +141,26 @@ curl -X POST -H 'Host: demo.localhost' http://localhost:8080/v1/charges -d '{}'
 TypeScript and JavaScript source compile in-host — TS is transpiled via
 swc and dispatched through an embedded `js-engine.wasm` component (see
 ADR-0020). No Node sidecar.
+
+### Running the full stack in Docker
+
+CI builds the release image from the repo-root `Dockerfile` and publishes a
+multi-arch manifest to `ghcr.io/einarfd/wiremirage` (`latest` + a `sha-` tag)
+on every push to `main`. `docker-compose.yml`'s `wm-host` service (the `full`
+profile) pulls that image, so a deployment never builds on the host:
+
+```
+WM_BOOTSTRAP_TOKEN=wmt_dev_local docker compose --profile full up -d
+```
+
+Override the tag with `WM_IMAGE` (e.g. `WM_IMAGE=ghcr.io/einarfd/wiremirage:sha-abc1234`).
+To build the image from source instead — e.g. to test a local change to the
+prod-shaped build — layer the dev override (or run `just run-web-docker`):
+
+```
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  --profile full up -d --build
+```
 
 The host exposes two unauthenticated probe endpoints for orchestrators:
 `GET /health` (liveness, always 200) and `GET /ready` (readiness;
