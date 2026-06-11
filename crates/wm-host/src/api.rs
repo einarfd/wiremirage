@@ -548,6 +548,28 @@ pub(crate) async fn create_route_core(
     // ADR-0033: no reserved paths — a route lives on its group's subdomain,
     // which is pure mock space, so any path (incl. /health, /api/*) is fair game.
 
+    // Tenancy gate (ADR-0030): a route may only be added to an *existing*
+    // group you own (or as admin). The group is the tenancy boundary, so
+    // without this any authed user could inject a route into another tenant's
+    // group — it would serve on that group's subdomain, stay invisible to the
+    // owner (route lists are owner-scoped), and grant the injector read access
+    // to the group's whole journal (journal read is "admin or owns a route in
+    // the group"). Creating a brand-new named group or an implicit one (group
+    // omitted) stays open to everyone.
+    //
+    // A group you don't own returns the SAME `not_found` as a missing one
+    // (per rest-api.md `POST /api/routes`): group names are a global
+    // namespace, so a distinct 403 would leak that a name is taken by another
+    // tenant. (This is stricter than the route PATCH/DELETE gates, which 403
+    // on a slug you already had to know.)
+    if let Some(reference) = body.group.as_deref() {
+        match state.routes().registry().read_group_by_ref(reference) {
+            Ok(group) if group.owner_id == auth.user_id || auth.is_admin => {}
+            // Not yours, or doesn't exist → indistinguishable not_found.
+            _ => return Err(ApiError::not_found()),
+        }
+    }
+
     // Cheap conflict precheck so idempotent retries don't burn an
     // swc transpile per attempt — the same scan runs again inside
     // `registry.create_route()` after we have an artifact, but
