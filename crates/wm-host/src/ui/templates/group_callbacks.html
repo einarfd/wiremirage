@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <a href="/ui/groups">Groups</a>
+  <span class="breadcrumb__sep">›</span>
+  <a href="/ui/groups/{{ group_name }}">{{ group_name }}</a>
+  <span class="breadcrumb__sep">›</span>
+  <span aria-current="page">Callbacks</span>
+</nav>
+
+<section class="page-header">
+  <h1>Outbound callbacks — <code>{{ group_name }}</code></h1>
+  <p class="text-muted">
+    Delivery outcomes of webhooks this group's handlers scheduled via
+    <code>host.scheduleCallback</code> (ADR-0034). The host fires each one
+    after the response is sent, so the result lands here rather than on the
+    request's journal entry.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>{{ rows | length }} recent</h2>
+  </header>
+  {% if rows | length == 0 %}
+  <p class="empty-state">
+    No callbacks yet. A handler calls
+    <code>host.scheduleCallback({ url, body })</code>; the outcome (delivered,
+    egress-denied, or failed) shows up here. Callbacks need host egress on
+    (<code>WM_EGRESS</code>) and this group's <em>Allow outbound callbacks</em>
+    flag set.
+  </p>
+  {% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">#</th>
+        <th scope="col">Method</th>
+        <th scope="col">URL</th>
+        <th scope="col">Outcome</th>
+        <th scope="col">When</th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for r in rows %}
+      <tr>
+        <td>{{ r.number }}</td>
+        <td>{{ r.method }}</td>
+        <td><code>{{ r.url }}</code></td>
+        <td>
+          <span class="status status-{{ r.outcome_class }}">{{ r.outcome }}</span>
+        </td>
+        <td class="text-muted"><time datetime="{{ r.created_at }}">{{ r.created_at }}</time></td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  {% if next_before is not none %}
+  <p class="text-muted">
+    <a class="link" href="/ui/groups/{{ group_name }}/callbacks?before={{ next_before }}">Older →</a>
+  </p>
+  {% endif %}
+  {% endif %}
+</section>
+
+<footer class="page-footer">
+  <a class="link" href="/ui/groups/{{ group_name }}">&larr; Back to {{ group_name }}</a>
+</footer>
+{% endblock %}

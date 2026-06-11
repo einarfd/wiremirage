@@ -13,7 +13,7 @@ use serde_json::Value as JsonValue;
 
 use crate::api_filters::{glob_match, parse_since, validate_method};
 use crate::journal::{
-    JournalRecord, ListCursor, UnmatchedCursor, UnmatchedNearMiss, UnmatchedRecord,
+    CallbackRecord, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedNearMiss, UnmatchedRecord,
 };
 use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::mcp::context::auth_from;
@@ -193,6 +193,25 @@ pub struct ListJournalResult {
     pub entries: Vec<JournalRecord>,
     /// Cursor for the next page; absent when the returned page reached
     /// the oldest entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListCallbacksArgs {
+    /// Group name or ULID. Required — callbacks are per-group, gated
+    /// owner-or-admin of *this* group.
+    pub group: String,
+    /// Cursor for the next page: return entries with `number < before`.
+    /// Omit to start at the newest.
+    pub before: Option<u32>,
+    /// Max entries to return. Defaults to 50, capped at 200.
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListCallbacksResult {
+    pub entries: Vec<CallbackRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_before: Option<u32>,
 }
@@ -503,6 +522,53 @@ impl WmMcpServer {
             entries
         };
         Ok(Json(ListJournalResult {
+            entries,
+            next_before,
+        }))
+    }
+
+    #[tool(
+        name = "list_callbacks",
+        description = "List a group's outbound-callback delivery outcomes, newest first (ADR-0034). When a handler calls `host.scheduleCallback`, the host fires the webhook AFTER the response is sent, so the result can't ride the original journal entry — it lands here instead. Each record carries the request the host sent (url / method / headers / body), the requested `delay_ms`, and the `outcome`: `delivered` (with the SUT's `status`), `egress_denied` (blocked by policy, with the resolved IPs), or `failed` (DNS / connect / timeout). Cursor-paginated (`before` / `limit`). Owner-or-admin of the group."
+    )]
+    pub async fn list_callbacks(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ListCallbacksArgs>,
+    ) -> Result<Json<ListCallbacksResult>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let group = self
+            .state
+            .routes()
+            .registry()
+            .read_group_by_ref(&args.group)
+            .map_err(|_| not_found("group not found"))?;
+        // Owner-or-admin gate, matching the REST callbacks endpoint and the
+        // request journal: admin, or owns a route in the group.
+        if !auth.is_admin {
+            let owned = self
+                .state
+                .routes()
+                .registry()
+                .list_routes_by_owner(&auth.user_id)
+                .map_err(map_registry_error)?;
+            if !owned.iter().any(|r| r.group_id == group.id) {
+                return Err(forbidden(
+                    "must be admin or own a route in this group to read its callbacks",
+                ));
+            }
+        }
+        let cursor = ListCursor {
+            before: args.before,
+            limit: args.limit.unwrap_or(50).clamp(1, 200) as usize,
+        };
+        let entries = self
+            .state
+            .journal()
+            .list_callbacks_for_group(&group.id, cursor)
+            .map_err(map_journal_error)?;
+        let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+        Ok(Json(ListCallbacksResult {
             entries,
             next_before,
         }))

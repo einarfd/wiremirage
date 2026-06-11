@@ -20,10 +20,10 @@ use wm_core::{
 };
 
 use crate::cli::{
-    AddRouteArgs, Command, CreateGroupArgs, CreateTokenArgs, CreateUserArgs, ExportGroupArgs,
-    GroupsCommand, GroupsListArgs, JournalCommand, JournalListArgs, RoutesCommand, RoutesListArgs,
-    TestRouteArgs, TokensCommand, UnmatchedCommand, UnmatchedListArgs, UpdateRouteArgs,
-    UpdateUserArgs, UsersCommand,
+    AddRouteArgs, CallbacksCommand, Command, CreateGroupArgs, CreateTokenArgs, CreateUserArgs,
+    ExportGroupArgs, GroupsCommand, GroupsListArgs, JournalCommand, JournalListArgs, RoutesCommand,
+    RoutesListArgs, TestRouteArgs, TokensCommand, UnmatchedCommand, UnmatchedListArgs,
+    UpdateRouteArgs, UpdateUserArgs, UsersCommand,
 };
 use crate::format::{self, Format};
 use crate::spec::{self, LoadedSpec, SpecFormat};
@@ -76,6 +76,7 @@ pub async fn dispatch(
         Command::Groups(cmd) => handle_groups(&client, cmd, format).await,
         Command::Routes(cmd) => handle_routes(&client, cmd, format).await,
         Command::Journal(cmd) => handle_journal(&client, cmd, format).await,
+        Command::Callbacks(cmd) => handle_callbacks(&client, cmd, format).await,
         Command::Unmatched(cmd) => handle_unmatched(&client, cmd, format).await,
         Command::Tokens(cmd) => handle_tokens(&client, cmd, format).await,
         Command::Users(cmd) => handle_users(&client, cmd, format).await,
@@ -686,6 +687,26 @@ async fn handle_journal(
             let (group, number) = parse_journal_slug(&slug)?;
             let entry = client.get_journal_entry(group, number).await?;
             format::render_journal_entry(&entry, format);
+        }
+    }
+    Ok(())
+}
+
+async fn handle_callbacks(
+    client: &Client,
+    cmd: CallbacksCommand,
+    format: Format,
+) -> Result<(), ClientError> {
+    match cmd {
+        CallbacksCommand::List(args) => {
+            let list = client
+                .list_callbacks(&args.group, args.before, args.limit)
+                .await?;
+            format::render_callbacks_list(&list, format);
+        }
+        CallbacksCommand::Show { group, number } => {
+            let entry = client.get_callback_entry(&group, number).await?;
+            format::render_callback_entry(&entry, format);
         }
     }
     Ok(())

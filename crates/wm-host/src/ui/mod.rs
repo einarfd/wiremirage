@@ -74,6 +74,7 @@ impl UiTemplates {
         tmpl!("journal_entry.html", "templates/journal_entry.html");
         tmpl!("tokens.html", "templates/tokens.html");
         tmpl!("group_state.html", "templates/group_state.html");
+        tmpl!("group_callbacks.html", "templates/group_callbacks.html");
         tmpl!("route_state.html", "templates/route_state.html");
         tmpl!("route_dry_run.html", "templates/route_dry_run.html");
         tmpl!("route_source_edit.html", "templates/route_source_edit.html");
@@ -139,6 +140,7 @@ pub fn router(state: AppState) -> Router {
             "/ui/groups/{group}/journal/clear",
             axum::routing::post(group_journal_clear_form),
         )
+        .route("/ui/groups/{group}/callbacks", get(group_callbacks_page))
         .route("/ui/groups/{group}/match", get(group_match_page))
         .route("/ui/routes", get(routes_list_page))
         .route("/ui/routes/new", get(route_new_form).post(route_new_submit))
@@ -1939,6 +1941,84 @@ async fn group_state_clear_form(
         return ui_error_500(&state, &auth, format!("clear: {e}"));
     }
     axum::response::Redirect::to(&format!("/ui/groups/{}/state", group.name)).into_response()
+}
+
+/// One row in the group callbacks list (ADR-0034).
+#[derive(Serialize)]
+struct CallbackRow {
+    number: u32,
+    method: String,
+    url: String,
+    /// Short outcome label, e.g. "delivered 200" / "egress denied" / "failed".
+    outcome: String,
+    /// Maps to a `.status-Nxx` CSS class for colouring.
+    outcome_class: String,
+    created_at: String,
+}
+
+impl CallbackRow {
+    fn from_record(r: &crate::journal::CallbackRecord) -> Self {
+        use crate::journal::CallbackOutcome::*;
+        let (outcome, class) = match &r.outcome {
+            Delivered { status } => (
+                format!("delivered {status}"),
+                status_class_for(*status).to_string(),
+            ),
+            // Denied/failed never reached the SUT — colour them like client
+            // (4xx) and server (5xx) errors respectively.
+            EgressDenied { .. } => ("egress denied".to_string(), "4xx".to_string()),
+            Failed { .. } => ("failed".to_string(), "5xx".to_string()),
+        };
+        Self {
+            number: r.number,
+            method: r.method.clone(),
+            url: r.url.clone(),
+            outcome,
+            outcome_class: class,
+            created_at: r.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// `2xx`/`3xx`/`4xx`/`5xx` bucket for a status code (CSS class suffix).
+fn status_class_for(status: u16) -> &'static str {
+    match status / 100 {
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        _ => "5xx",
+    }
+}
+
+async fn group_callbacks_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group_ref): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let group = match resolve_owned_group(&state, &auth, &group_ref) {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    let before = q.get("before").and_then(|s| s.parse::<u32>().ok());
+    let cursor = crate::journal::ListCursor { before, limit: 50 };
+    let entries = match state.journal().list_callbacks_for_group(&group.id, cursor) {
+        Ok(e) => e,
+        Err(e) => return ui_error_500(&state, &auth, format!("list callbacks: {e}")),
+    };
+    let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+    let rows: Vec<CallbackRow> = entries.iter().map(CallbackRow::from_record).collect();
+    render(
+        &state,
+        "group_callbacks.html",
+        context! {
+            page_title => format!("Callbacks: {}", group.name),
+            user => UserBadge::from(&auth),
+            group_name => group.name,
+            rows => rows,
+            next_before => next_before,
+        },
+    )
 }
 
 async fn route_state_page(

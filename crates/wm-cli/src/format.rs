@@ -10,10 +10,11 @@
 
 use serde::Serialize;
 use wm_core::{
-    DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsResponse,
-    ListJournalResponse, ListRouteStateResponse, ListRoutesResponse, ListTokensResponse,
-    ListUnmatchedResponse, ListUsersResponse, MatchResponse, NearMiss, NearMissReason, RouteRecord,
-    RouteSourceResponse, TokenRecord, UnmatchedRecord, UserRecord,
+    CallbackOutcome, CallbackRecord, DryRunResult, GroupRecord, HealthResponse, JournalRecord,
+    ListCallbacksResponse, ListGroupsResponse, ListJournalResponse, ListRouteStateResponse,
+    ListRoutesResponse, ListTokensResponse, ListUnmatchedResponse, ListUsersResponse,
+    MatchResponse, NearMiss, NearMissReason, RouteRecord, RouteSourceResponse, TokenRecord,
+    UnmatchedRecord, UserRecord,
 };
 
 /// Output mode requested via the global `--json` flag.
@@ -220,6 +221,75 @@ pub fn render_journal_list(list: &ListJournalResponse, format: Format) {
                 })
                 .collect();
             print_table(&["NUMBER", "METHOD", "PATH", "STATUS", "DURATION"], &rows);
+            if let Some(b) = list.next_before {
+                println!("\n(next page: --before={b})");
+            }
+        }
+    }
+}
+
+// -- Callbacks (ADR-0034) ----------------------------------------------------
+
+/// One-line summary of a callback's terminal disposition.
+fn callback_outcome_summary(o: &CallbackOutcome) -> String {
+    match o {
+        CallbackOutcome::Delivered { status } => format!("delivered {status}"),
+        CallbackOutcome::EgressDenied { reason, .. } => format!("egress_denied ({reason})"),
+        CallbackOutcome::Failed { error } => format!("failed ({error})"),
+    }
+}
+
+pub fn render_callback_entry(c: &CallbackRecord, format: Format) {
+    match format {
+        Format::Json => print_json(c),
+        Format::Human => {
+            println!("number:      {}", c.number);
+            println!("trace_id:    {}", c.trace_id.as_deref().unwrap_or("-"));
+            println!("route:       {}/{}", c.group_name, c.route_number);
+            println!("request:     {} {}", c.method, c.url);
+            println!(
+                "body:        {} bytes{}",
+                c.request_body_size,
+                if c.request_body_truncated {
+                    ", truncated"
+                } else {
+                    ""
+                }
+            );
+            println!("delay_ms:    {}", c.delay_ms);
+            println!("outcome:     {}", callback_outcome_summary(&c.outcome));
+            if let CallbackOutcome::EgressDenied { resolved, .. } = &c.outcome
+                && !resolved.is_empty()
+            {
+                println!("resolved:    {}", resolved.join(", "));
+            }
+            println!("duration_ms: {}", c.duration_ms);
+            println!("created_at:  {}", c.created_at);
+        }
+    }
+}
+
+pub fn render_callbacks_list(list: &ListCallbacksResponse, format: Format) {
+    match format {
+        Format::Json => print_json(list),
+        Format::Human => {
+            if list.entries.is_empty() {
+                println!("(no callbacks)");
+                return;
+            }
+            let rows: Vec<[String; 4]> = list
+                .entries
+                .iter()
+                .map(|c| {
+                    [
+                        c.number.to_string(),
+                        c.method.clone(),
+                        c.url.clone(),
+                        callback_outcome_summary(&c.outcome),
+                    ]
+                })
+                .collect();
+            print_table(&["NUMBER", "METHOD", "URL", "OUTCOME"], &rows);
             if let Some(b) = list.next_before {
                 println!("\n(next page: --before={b})");
             }

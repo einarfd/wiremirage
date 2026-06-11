@@ -15,12 +15,13 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::models::{
-    ApiErrorBody, CreateGroupBody, CreateRouteBody, CreateTokenBody, CreateTokenResponse,
-    DryRunBody, DryRunResult, GroupRecord, HealthResponse, JournalRecord, ListGroupsParams,
-    ListGroupsResponse, ListJournalParams, ListJournalResponse, ListRouteStateResponse,
-    ListRoutesParams, ListRoutesResponse, ListTokensResponse, ListUnmatchedParams,
-    ListUnmatchedResponse, PatchGroupBody, PatchRouteBody, ReadyResponse, RouteRecord,
-    RouteSourceResponse, SetStateBody, StateSnapshotResponse, UnmatchedRecord, WireBytes,
+    ApiErrorBody, CallbackRecord, CreateGroupBody, CreateRouteBody, CreateTokenBody,
+    CreateTokenResponse, DryRunBody, DryRunResult, GroupRecord, HealthResponse, JournalRecord,
+    ListCallbacksResponse, ListGroupsParams, ListGroupsResponse, ListJournalParams,
+    ListJournalResponse, ListRouteStateResponse, ListRoutesParams, ListRoutesResponse,
+    ListTokensResponse, ListUnmatchedParams, ListUnmatchedResponse, PatchGroupBody, PatchRouteBody,
+    ReadyResponse, RouteRecord, RouteSourceResponse, SetStateBody, StateSnapshotResponse,
+    UnmatchedRecord, WireBytes,
 };
 
 const DEFAULT_USER_AGENT: &str = concat!("wm-cli/", env!("CARGO_PKG_VERSION"));
@@ -465,6 +466,48 @@ impl Client {
         self.send(
             Method::GET,
             &format!("/api/journal/{}/{number}", urlencode(group)),
+            None::<&()>,
+        )
+        .await
+    }
+
+    // -- Callbacks (ADR-0034) -------------------------------------------
+
+    /// List a group's outbound-callback delivery outcomes, newest-first.
+    /// Owner-or-admin of the group on the host side.
+    pub async fn list_callbacks(
+        &self,
+        group: &str,
+        before: Option<u32>,
+        limit: Option<usize>,
+    ) -> Result<ListCallbacksResponse, ClientError> {
+        let mut qs = Vec::new();
+        if let Some(b) = before {
+            qs.push(format!("before={b}"));
+        }
+        if let Some(l) = limit {
+            qs.push(format!("limit={l}"));
+        }
+        let path = if qs.is_empty() {
+            format!("/api/groups/{}/callbacks", urlencode(group))
+        } else {
+            format!(
+                "/api/groups/{}/callbacks?{}",
+                urlencode(group),
+                qs.join("&")
+            )
+        };
+        self.send(Method::GET, &path, None::<&()>).await
+    }
+
+    pub async fn get_callback_entry(
+        &self,
+        group: &str,
+        number: u32,
+    ) -> Result<CallbackRecord, ClientError> {
+        self.send(
+            Method::GET,
+            &format!("/api/groups/{}/callbacks/{number}", urlencode(group)),
             None::<&()>,
         )
         .await

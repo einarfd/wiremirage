@@ -155,6 +155,8 @@ mod tests {
             // Spec import/export parity
             "import_group",
             "export_group",
+            // ADR-0034 outbound callbacks
+            "list_callbacks",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");
