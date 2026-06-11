@@ -592,6 +592,35 @@ an upstream hang past the ~30s buffered budget via a streaming handler
 all three (`wm groups state` lists by default, `wm journal list`, and
 `--host` makes the base URL caller-supplied), so this was MCP-only.
 
+ADR-0034 added **outbound callbacks (webhooks)** — the first network
+egress out of the sandbox. A source handler calls
+`host.scheduleCallback({url, method, headers, body, delayMs})`; the host
+fires it **once**, on a background task, **after** the response is sent
+(the async-webhook shape: mock receives a request, responds, then POSTs
+the SUT's callback URL). Single-attempt best-effort, no retries/durable
+queue (a deliberate non-goal — WireMirage is a mock, not a delivery
+system). It's an **engine-internal** WIT import (a `callback` interface
+on the `engine` world, like `response-stream`), not on the user-facing
+`world handler` — source-language only. Deployment-gated: off unless the
+operator sets **`WM_EGRESS`** (`on`/`1`/`true`), and even then a
+hardcoded special-use **default-deny** (loopback, link-local incl. the
+`169.254.169.254` metadata IP, private, CGNAT, ULA, multicast) always
+applies as an accident guardrail; `WM_EGRESS_ALLOW` / `WM_EGRESS_DENY`
+(v4+v6 CIDRs) override it. The egress check is on the **resolved IP**
+(deny-if-any-resolved, IPv4-mapped-normalized, reqwest DNS pinned to the
+vetted addrs so a rebind can't slip past, redirects disallowed) — the
+security-critical piece (`crate::egress` + `crate::callout`). On top of
+the host capability, each **group opts in** via a `callout_enabled` flag
+(threaded through registry/REST/MCP `update_group`/CLI `wm groups update
+--callout`/UI edit form + the group-spec `callout` field for
+import/export). Delivery outcomes (`delivered`/`egress_denied`/`failed`)
+land in a per-group **callback journal** (can't ride the original
+response — it already returned), readable via `GET
+/api/groups/{group}/callbacks`, MCP `list_callbacks` (**32 tools now**),
+`wm callbacks list/show`, and a UI page at
+`/ui/groups/{group}/callbacks`. A `callbacks` `get_capabilities` topic
+documents the handler API. Dry-run never fires real callbacks.
+
 ## Where the design lives
 
 The design is captured as docs and ADRs in a private Arkiv workspace named

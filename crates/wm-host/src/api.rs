@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::api_filters::{FilterParseError, SortDir, glob_match, parse_since, validate_method};
 use crate::auth::{AuthContext, AuthError, Token, User};
-use crate::journal::{JournalError, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedRecord};
+use crate::journal::{
+    CallbackRecord, JournalError, JournalRecord, ListCursor, UnmatchedCursor, UnmatchedRecord,
+};
 use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::registry::{
     Group, NewGroup, NewRoute, PatchRoute, RegistryError, Route, RouteStateEntry, render_slug,
@@ -108,6 +110,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/groups/{group}/journal",
             axum::routing::delete(delete_group_journal),
+        )
+        // Outbound-callback journal (ADR-0034): the delivery outcomes of
+        // callbacks this group's handlers scheduled. Same owner-or-admin
+        // gate as the request journal.
+        .route("/api/groups/{group}/callbacks", get(list_callbacks))
+        .route(
+            "/api/groups/{group}/callbacks/{number}",
+            get(get_callback_entry),
         )
         // Handler-API capabilities. Returns the same markdown the MCP
         // tool and `wm capabilities` CLI command surface — single
@@ -1703,6 +1713,72 @@ async fn get_journal_entry(
         ));
     }
     let entry = state.journal().get(&group_record.id, number)?;
+    Ok(Json(entry))
+}
+
+// -- /api/groups/{group}/callbacks (ADR-0034) -------------------------------
+
+#[derive(Debug, Deserialize, Default)]
+struct CallbackListQuery {
+    /// Return entries strictly older than this callback number.
+    before: Option<u32>,
+    /// Cap on entries returned (journal clamps to its own max).
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListCallbacksResponse {
+    entries: Vec<CallbackRecord>,
+    next_before: Option<u32>,
+}
+
+async fn list_callbacks(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(group): Path<String>,
+    Query(q): Query<CallbackListQuery>,
+) -> Result<Json<ListCallbacksResponse>, ApiError> {
+    let group_record = state
+        .routes()
+        .registry()
+        .read_group_by_ref(&group)
+        .map_err(|_| ApiError::not_found())?;
+    // Same gate as the request journal: admin or owns a route in the group.
+    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+        return Err(ApiError::forbidden(
+            "must be an admin or own a route in this group to read its callbacks",
+        ));
+    }
+    let cursor = ListCursor {
+        before: q.before,
+        limit: q.limit.unwrap_or(100),
+    };
+    let entries = state
+        .journal()
+        .list_callbacks_for_group(&group_record.id, cursor)?;
+    let next_before = entries.last().filter(|e| e.number > 1).map(|e| e.number);
+    Ok(Json(ListCallbacksResponse {
+        entries,
+        next_before,
+    }))
+}
+
+async fn get_callback_entry(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((group, number)): Path<(String, u32)>,
+) -> Result<Json<CallbackRecord>, ApiError> {
+    let group_record = state
+        .routes()
+        .registry()
+        .read_group_by_ref(&group)
+        .map_err(|_| ApiError::not_found())?;
+    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+        return Err(ApiError::forbidden(
+            "must be an admin or own a route in this group to read its callbacks",
+        ));
+    }
+    let entry = state.journal().get_callback(&group_record.id, number)?;
     Ok(Json(entry))
 }
 

@@ -364,6 +364,53 @@ pub struct ListJournalResponse {
     pub next_before: Option<u32>,
 }
 
+// -- Callbacks (ADR-0034) ----------------------------------------------------
+
+/// One outbound-callback delivery outcome. Client-side mirror of the host's
+/// `CallbackRecord`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CallbackRecord {
+    pub id: String,
+    pub number: u32,
+    pub trace_id: Option<String>,
+    pub group_id: String,
+    pub group_name: String,
+    pub route_id: String,
+    pub route_number: u32,
+    pub url: String,
+    pub method: String,
+    pub request_headers: Vec<(String, String)>,
+    #[serde(with = "crate::models::bytes_field")]
+    pub request_body: Vec<u8>,
+    pub request_body_truncated: bool,
+    pub request_body_size: usize,
+    pub delay_ms: u64,
+    pub outcome: CallbackOutcome,
+    pub duration_ms: u64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CallbackOutcome {
+    Delivered {
+        status: u16,
+    },
+    EgressDenied {
+        reason: String,
+        resolved: Vec<String>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ListCallbacksResponse {
+    pub entries: Vec<CallbackRecord>,
+    pub next_before: Option<u32>,
+}
+
 // -- Unmatched ---------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

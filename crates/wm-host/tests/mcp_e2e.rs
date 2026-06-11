@@ -16,8 +16,8 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use serde_json::json;
 use wm_host::auth::Auth;
 use wm_host::journal::{
-    HandlerLogEntry, Journal, NewJournalEntry, NewUnmatchedEntry, RequestEnvelope, ResourceUsage,
-    ResponseEnvelope,
+    CallbackOutcome, HandlerLogEntry, Journal, NewCallbackEntry, NewJournalEntry,
+    NewUnmatchedEntry, RequestEnvelope, ResourceUsage, ResponseEnvelope,
 };
 use wm_host::registry::{NewGroup, Registry};
 use wm_host::route_table::RouteTable;
@@ -109,6 +109,25 @@ fn sample_handled(group_id: &str, group_name: &str, status: u16) -> NewJournalEn
     }
 }
 
+fn sample_callback(group_id: &str, group_name: &str, outcome: CallbackOutcome) -> NewCallbackEntry {
+    NewCallbackEntry {
+        trace_id: None,
+        group_id: group_id.into(),
+        group_name: group_name.into(),
+        route_id: "r1".into(),
+        route_number: 1,
+        url: "https://sut.example/hook".into(),
+        method: "POST".into(),
+        request_headers: vec![],
+        request_body: b"{}".to_vec(),
+        request_body_truncated: false,
+        request_body_size: 2,
+        delay_ms: 0,
+        outcome,
+        duration_ms: 3,
+    }
+}
+
 fn transport(
     base_url: &str,
     token: Option<&str>,
@@ -177,6 +196,8 @@ async fn list_tools_returns_all_expected_tools() {
         // Spec import/export parity
         "import_group",
         "export_group",
+        // ADR-0034 outbound callbacks
+        "list_callbacks",
     ];
     expected.sort();
     assert_eq!(names, expected);
@@ -1943,6 +1964,76 @@ async fn list_journal_returns_stored_entries_with_filter() {
             .and_then(|v| v.as_u64()),
         Some(503)
     );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn list_callbacks_returns_stored_outcomes() {
+    // ADR-0034 slice 4: outbound-callback outcomes are readable over MCP.
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "cb-group".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("cb-group")
+        .unwrap();
+
+    // One delivered, one egress-denied.
+    h.state
+        .journal()
+        .record_callback(sample_callback(
+            &group.id,
+            "cb-group",
+            CallbackOutcome::Delivered { status: 200 },
+        ))
+        .unwrap();
+    h.state
+        .journal()
+        .record_callback(sample_callback(
+            &group.id,
+            "cb-group",
+            CallbackOutcome::EgressDenied {
+                reason: "loopback".into(),
+                resolved: vec!["127.0.0.1".into()],
+            },
+        ))
+        .unwrap();
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("list_callbacks")
+                .with_arguments(json!({ "group": "cb-group" }).as_object().unwrap().clone()),
+        )
+        .await
+        .expect("list_callbacks");
+    let entries = res
+        .structured_content
+        .expect("structured")
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .expect("entries");
+    assert_eq!(entries.len(), 2);
+    // Newest-first: the egress-denied one was recorded last.
+    assert_eq!(entries[0]["outcome"]["kind"], "egress_denied");
+    assert_eq!(entries[1]["outcome"]["kind"], "delivered");
+    assert_eq!(entries[1]["outcome"]["status"], 200);
 
     client.cancel().await.expect("cancel");
 }

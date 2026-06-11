@@ -186,6 +186,35 @@ design — SUTs don't have credentials.
   `127.0.0.1` (combined with `WM_TRUSTED_PROXY` — see *Production
   hardening* below).
 
+### Outbound callbacks / egress (optional, ADR-0034)
+
+Handlers can schedule outbound webhooks with
+`host.scheduleCallback({url, method, headers, body, delayMs})` — the host fires
+the request once, after the mock's response is sent (the async-webhook shape:
+the mock plays a service that calls *back* to the system-under-test). This is
+the **only** network egress out of the otherwise-closed sandbox, so it's off by
+default and gated:
+
+- `WM_EGRESS` — set to `on` / `true` / `1` to enable callbacks host-wide.
+  Unset (default) → `scheduleCallback` is rejected with a catchable error.
+- `WM_EGRESS_ALLOW` — comma-separated IPv4/IPv6 CIDRs (or bare IPs) that
+  **override** the hardcoded special-use default-deny. Even with egress on,
+  loopback, link-local (incl. the `169.254.169.254` cloud-metadata IP),
+  private, CGNAT, ULA, and multicast ranges are denied unless allow-listed —
+  an accident guardrail against a buggy handler hitting the metadata endpoint.
+  The usual self-hosted/CI need is to *allow* the internal range the SUT lives
+  on, e.g. `WM_EGRESS_ALLOW=10.0.0.0/8`.
+- `WM_EGRESS_DENY` — extra ranges to block, for stricter operators.
+
+On top of the host capability, **each group opts in** via its `callout_enabled`
+flag (`wm groups update <group> --callout`, the `update_group` MCP tool, or the
+group-detail UI) — turning egress on host-wide does not auto-grant it to every
+tenant. The egress decision is enforced on the **resolved IP** (not the URL
+string), redirects aren't followed, and delivery is single-attempt
+best-effort. Outcomes land in a per-group callback journal
+(`GET /api/groups/{group}/callbacks`, `wm callbacks list <group>`, MCP
+`list_callbacks`, or `/ui/groups/{group}/callbacks`).
+
 ### API tokens — bootstrap (optional when a browser-login path is configured)
 
 `WM_BOOTSTRAP_TOKEN=wmt_<some-secret>` creates an admin user named `bootstrap`

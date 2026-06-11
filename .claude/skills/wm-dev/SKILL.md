@@ -633,6 +633,50 @@ it) doesn't need CIDR granularity.
     same setup but with the flag on; sixth attempt from
     a different XFF IP succeeds with 303.
 
+## Outbound callbacks (ADR-0034)
+
+The first network egress out of the sandbox. A source handler calls
+`host.scheduleCallback({url, method, headers, body, delayMs})`; the host
+fires it **once**, on a background task, **after** the response is sent.
+Single-attempt best-effort by design (no retries/durable queue — a
+non-goal, not a deferral).
+
+- **WIT**: a `callback` interface (`schedule(...) -> result<_, string>`)
+  + `import callback` on the **`engine`** world only (`wit/engine.wit` +
+  `compiler/js-engine/wit/engine.wit`), mirroring `response-stream`. Not
+  on `world handler` — source-language is the only public input
+  (ADR-0023), so a handler-world import would only force fixtures to
+  relink. The `js_engine_spike` test impls the new `callback::Host` on
+  its `EngineState`.
+- **engine.ts**: `host.scheduleCallback` shim over the import (throws on
+  the WIT `err`); `build.rs` rebuilds `js-engine.wasm`.
+- **`host_state.rs`**: buffers callbacks gated by a `callouts_allowed`
+  flag (rejects synchronously when off, caps 16/request);
+  `take_scheduled_callbacks()` drains them. Threaded through
+  `Runtime::instantiate_engine` (dry-run passes `false` — never fires).
+- **`egress.rs`** (policy) + **`callout.rs`** (fire): resolve the host,
+  `check_resolved` every IP (deny-if-any), pin reqwest DNS to the vetted
+  addrs (no rebinding window), redirects off, timeout. The resolved-IP
+  check is the security-critical part.
+- **dispatch** (`server.rs`): reads `group.callout_enabled` only when
+  `WM_EGRESS` is on (so the extra group read is paid only in egress-on
+  deployments), then fires drained callbacks after the response on both
+  the buffered and streaming paths.
+- **journal**: `CallbackRecord` + `CallbackOutcome`
+  (`delivered`/`egress_denied`/`failed`), `record_callback` +
+  `list_callbacks_for_group`, per-group + TTL'd.
+- **Surfaces (slice 4)**: REST `GET /api/groups/{group}/callbacks[/{n}]`,
+  MCP `list_callbacks` (**32 tools** — bump the three tool-list
+  assertions), CLI `wm callbacks list/show`, UI
+  `/ui/groups/{group}/callbacks`, and the per-group `callout_enabled`
+  flag on every group-config surface (registry/REST/MCP `update_group`/
+  CLI `wm groups update --callout`/UI edit form + group-spec `callout`).
+- **Config**: `WM_EGRESS` (master), `WM_EGRESS_ALLOW`/`WM_EGRESS_DENY`
+  (v4+v6 CIDRs), read once in `main.rs` onto `AppState.egress`.
+- **Tests**: `tests/callbacks.rs` (engine-backed: gate off, group not
+  opted in, real delivery to a local SUT + REST read-back, loopback
+  denied-by-default) and the `list_callbacks` MCP test.
+
 ## MCP update_group (slice 43)
 
 Closes the MCP/CLI/UI parity gap on group editing. CLI

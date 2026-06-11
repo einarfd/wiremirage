@@ -306,6 +306,22 @@ async fn callback_delivered_to_sut_and_journaled() {
         "SUT should have received exactly one callback"
     );
     assert_eq!(got[0], br#"{"event":"ping"}"#);
+
+    // The REST read surface (slice 4) returns the same outcome.
+    let listed: serde_json::Value = h
+        .client
+        .get(h.url(&format!("/api/groups/{group_name}/callbacks")))
+        .send()
+        .await
+        .expect("list callbacks")
+        .json()
+        .await
+        .expect("json");
+    let entries = listed["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["url"], sut_url);
+    assert_eq!(entries[0]["outcome"]["kind"], "delivered");
+    assert_eq!(entries[0]["outcome"]["status"], 200);
 }
 
 #[tokio::test]

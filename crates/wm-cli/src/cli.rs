@@ -57,6 +57,9 @@ pub enum Command {
     /// Inspect request journal entries.
     #[command(subcommand)]
     Journal(JournalCommand),
+    /// Inspect outbound-callback delivery outcomes for a group (ADR-0034).
+    #[command(subcommand)]
+    Callbacks(CallbacksCommand),
     /// Inspect unmatched-request entries for groups you own (an admin
     /// sees host-wide).
     #[command(subcommand)]
@@ -81,7 +84,8 @@ pub enum Command {
     /// Print handler-API documentation (same content as the MCP
     /// `get_capabilities` tool). Call without `topic` for the
     /// overview + topic list. Known topics: `overview`, `request`,
-    /// `response`, `store`, `log`, `clock`, `gotchas`.
+    /// `response`, `store`, `log`, `clock`, `streaming`, `callbacks`,
+    /// `gotchas`.
     Capabilities {
         /// Topic name. Omit for the overview. Unknown topics fall
         /// back to the overview.
@@ -507,6 +511,31 @@ pub struct JournalListArgs {
     /// Upper bound on `created_at`. Same format as `--since`.
     #[arg(long)]
     pub until: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CallbacksCommand {
+    /// List a group's outbound-callback outcomes, newest first.
+    List(CallbacksListArgs),
+    /// Show one callback record by its number.
+    Show {
+        /// Group name or ULID.
+        group: String,
+        /// Callback number (from `list`).
+        number: u32,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CallbacksListArgs {
+    /// Group name or ULID.
+    pub group: String,
+    /// Cursor for the next page: return entries with `number < before`.
+    #[arg(long)]
+    pub before: Option<u32>,
+    /// Max entries per page. Capped at 100 host-side.
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Subcommand)]
