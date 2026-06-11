@@ -26,7 +26,7 @@ pub struct GroupRecord {
     pub owner_id: String,
     pub ttl_seconds: u64,
     pub sliding_ttl: bool,
-    /// Whether handlers in this group may make outbound callbacks (ADR-0034).
+    /// Whether handlers in this group may make outbound callbacks.
     pub callout_enabled: bool,
     pub implicit: bool,
     pub created_at: String,
@@ -91,7 +91,7 @@ pub struct ShowGroupArgs {
 pub struct CreateGroupArgs {
     /// Canonical group name; doubles as the group's subdomain, so it must
     /// be a valid DNS label (lowercase a-z, 0-9, hyphen; no leading/trailing
-    /// hyphen). Optional — omit to be assigned a friendly name (ADR-0030).
+    /// hyphen). Optional — omit to be assigned a friendly name.
     /// Must be unique. Used in route slugs.
     pub name: Option<String>,
     /// TTL in seconds. Defaults to 24h. Capped at 30d.
@@ -145,7 +145,7 @@ pub struct UpdateGroupArgs {
     /// Group name or ULID.
     pub group: String,
     /// Rename the group to this name. Must be a valid DNS label (it's the
-    /// group's subdomain; ADR-0030) and changes the group's served base URL.
+    /// group's subdomain) and changes the group's served base URL.
     /// Omit to leave the name alone.
     pub name: Option<String>,
     /// New TTL in seconds. Capped at the host's `MAX_GROUP_TTL_SECONDS`
@@ -156,7 +156,7 @@ pub struct UpdateGroupArgs {
     /// bumps the group's expiry; `false` = fixed-window expiry from
     /// the last refresh. Omit to leave the flag alone.
     pub sliding_ttl: Option<bool>,
-    /// Flip outbound-callback opt-in for the group (ADR-0034). `true` lets
+    /// Flip outbound-callback opt-in for the group. `true` lets
     /// this group's handlers make callouts (subject to the host egress
     /// config). Omit to leave it alone.
     pub callout_enabled: Option<bool>,
@@ -336,7 +336,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "update_group",
-        description = "Update a group's mutable fields by name or ULID: `name` (rename + subdomain change), `ttl_seconds` (re-arms the Valkey TTL), `sliding_ttl` (toggle the sliding-expiry flag), and/or `callout_enabled` (toggle outbound-callback opt-in; ADR-0034). Owner-or-admin only. At least one field must be set. Owner-transfer isn't supported through this tool."
+        description = "Update a group's mutable fields by name or ULID: `name` (rename + subdomain change), `ttl_seconds` (re-arms the Valkey TTL), `sliding_ttl` (toggle the sliding-expiry flag), and/or `callout_enabled` (toggle outbound-callback opt-in). Owner-or-admin only. At least one field must be set. Owner-transfer isn't supported through this tool."
     )]
     pub async fn update_group(
         &self,

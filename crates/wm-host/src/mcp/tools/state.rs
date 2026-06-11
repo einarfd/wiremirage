@@ -61,7 +61,7 @@ pub struct RouteStateEntry {
     /// `"other"` for co-resident exotic types on Valkey.
     pub kind: String,
     /// Value bytes, present only when `kind == "bytes"`: a UTF-8 string,
-    /// or `{ "base64": "<...>" }` for binary (ADR-0026). Collection-typed
+    /// or `{ "base64": "<...>" }` for binary. Collection-typed
     /// values report cardinality via `length`.
     pub value: Option<WireBytes>,
     pub length: Option<u64>,
@@ -119,7 +119,7 @@ pub struct DryRunRouteArgs {
     /// Request headers as `[[key, value], ...]`. Defaults to none.
     pub headers: Option<Vec<(String, String)>>,
     /// Request body: a UTF-8 string, or `{ "base64": "<...>" }` for
-    /// binary (ADR-0026). Defaults to empty.
+    /// binary. Defaults to empty.
     pub body: Option<WireBytes>,
     /// Override the path-params list the handler sees. Defaults to
     /// none.

@@ -89,9 +89,9 @@ Topics:
 - **`response`** — the response shape and reserved headers
 - **`store`** — per-route and per-group state (kv + lists + hashes + sets)
 - **`log`** — emitting log lines that attach to the journal entry
-- **`clock`** — `host.sleep`, wall-time, monotonic time (ADR-0021)
-- **`streaming`** — `host.responseStream` for SSE / chunked responses (ADR-0022)
-- **`callbacks`** — `host.scheduleCallback` for outbound webhooks (ADR-0034)
+- **`clock`** — `host.sleep`, wall-time, monotonic time
+- **`streaming`** — `host.responseStream` for SSE / chunked responses
+- **`callbacks`** — `host.scheduleCallback` for outbound webhooks
 - **`gotchas`** — bigint quirks, camelCase field names, and other footguns
 
 ## Key design points
@@ -294,7 +294,7 @@ and `console.*` are the only way to surface anything from a handler.
 
 const CLOCK: &str = r#"# Clock — host.sleep, wall-time, monotonic time
 
-A `host` global exposes three time primitives (ADR-0021).
+A `host` global exposes three time primitives.
 
 ## host.sleep(ms)
 
@@ -374,7 +374,7 @@ const STREAMING: &str = r#"# Streaming responses — host.responseStream
 By default `handle` returns one buffered response. To stream a response
 incrementally — Server-Sent Events, chunked bodies, anything where the
 client should see bytes as they're produced — call `host.responseStream`
-instead of returning a response (ADR-0022). This is what you reach for to
+instead of returning a response. This is what you reach for to
 mock streaming LLM APIs (Vertex `streamGenerateContent`, OpenAI
 `chat/completions` with `stream: true`, Anthropic `messages`) and the MCP
 streamable-HTTP transport.
@@ -444,7 +444,7 @@ Mocks normally only *respond* to the system-under-test (SUT). Some real
 services also *call back*: a payment API accepts a charge, responds 200,
 then later POSTs a webhook to the SUT's callback URL. `host.scheduleCallback`
 lets a handler model that — the mock plays the service end to end, including
-the async webhook (ADR-0034).
+the async webhook.
 
 ## host.scheduleCallback({ url, method, headers, body, delayMs })
 
