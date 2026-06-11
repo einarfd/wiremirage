@@ -57,7 +57,7 @@ pub enum Command {
     /// Inspect request journal entries.
     #[command(subcommand)]
     Journal(JournalCommand),
-    /// Inspect outbound-callback delivery outcomes for a group (ADR-0034).
+    /// Inspect outbound-callback delivery outcomes for a group.
     #[command(subcommand)]
     Callbacks(CallbacksCommand),
     /// Inspect unmatched-request entries for groups you own (an admin
@@ -71,7 +71,7 @@ pub enum Command {
     #[command(subcommand)]
     Users(UsersCommand),
     /// Probe what would match a hypothetical request, within a group.
-    /// Matching is per-subdomain (ADR-0030), so a group is required.
+    /// Matching is per-subdomain, so a group is required.
     Match {
         /// Group (name or ULID) to probe within.
         #[arg(short, long)]
@@ -251,7 +251,7 @@ pub struct UpdateGroupArgs {
     /// Disable sliding TTL.
     #[arg(long)]
     pub no_sliding: bool,
-    /// Allow this group's handlers to make outbound callbacks (ADR-0034).
+    /// Allow this group's handlers to make outbound callbacks.
     #[arg(long, conflicts_with = "no_callout")]
     pub callout: bool,
     /// Disallow outbound callbacks for this group (the default).

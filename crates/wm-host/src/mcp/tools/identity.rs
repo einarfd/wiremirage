@@ -16,7 +16,7 @@ pub struct WhoAmIResult {
     pub user: WhoAmIUser,
     /// The public base URL this host is reached at (e.g.
     /// `https://wm.example.com`) — derived from the request, honoring
-    /// `X-Forwarded-*` when behind a trusted proxy (ADR-0027). Mock
+    /// `X-Forwarded-*` when behind a trusted proxy. Mock
     /// routes are served directly under it: a route at `/v1/charges`
     /// answers at `{base_url}/v1/charges`. The `/api/mcp` endpoint
     /// you're talking to right now is `{base_url}/api/mcp`.

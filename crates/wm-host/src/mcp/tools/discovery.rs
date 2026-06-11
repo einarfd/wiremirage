@@ -40,7 +40,7 @@ pub struct HostInfo {
     pub version: String,
     /// Public base URL this host is reached at (e.g.
     /// `https://wm.example.com`), derived from the request and honoring
-    /// `X-Forwarded-*` behind a trusted proxy (ADR-0027). Mock routes
+    /// `X-Forwarded-*` behind a trusted proxy. Mock routes
     /// answer directly under it (`{base_url}{route.path}`).
     pub base_url: String,
 }
@@ -56,7 +56,7 @@ pub struct GroupSummary {
     pub name: String,
     pub id: String,
     /// The group's mock-traffic base URL: `{scheme}://{name}.{apex}`
-    /// (ADR-0030 virtual-host routing). Send the SUT here; the apex
+    /// (virtual-host routing). Send the SUT here; the apex
     /// `base_url` on the parent result is control-plane (UI/API/MCP) only.
     pub base_url: String,
     pub owner_id: String,
@@ -95,14 +95,14 @@ pub struct ListRecentUnmatchedResult {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UnmatchedSummary {
     pub number: u64,
-    /// The group (subdomain) the request was addressed to (ADR-0030).
+    /// The group (subdomain) the request was addressed to.
     pub group: String,
     pub method: String,
     pub path: String,
     pub created_at: String,
     pub trace_id: Option<String>,
     /// Routes that nearly matched, populated by the dispatcher at
-    /// unmatched-write time (slice 35). Empty when no neighbour was
+    /// unmatched-write time. Empty when no neighbour was
     /// close enough — `[]`, not omitted, so agents can rely on the
     /// field being present.
     #[serde(default)]
@@ -118,7 +118,7 @@ pub struct ShowUnmatchedArgs {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FindRouteArgs {
     /// Group (name or ULID) to probe within. Required: matching is
-    /// per-subdomain under ADR-0030, so a probe names its tenant.
+    /// per-subdomain, so a probe names its tenant.
     pub group: String,
     /// HTTP method (e.g. `GET`, `POST`, `ANY`).
     pub method: String,
@@ -529,7 +529,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "list_callbacks",
-        description = "List a group's outbound-callback delivery outcomes, newest first (ADR-0034). When a handler calls `host.scheduleCallback`, the host fires the webhook AFTER the response is sent, so the result can't ride the original journal entry — it lands here instead. Each record carries the request the host sent (url / method / headers / body), the requested `delay_ms`, and the `outcome`: `delivered` (with the SUT's `status`), `egress_denied` (blocked by policy, with the resolved IPs), or `failed` (DNS / connect / timeout). Cursor-paginated (`before` / `limit`). Owner-or-admin of the group."
+        description = "List a group's outbound-callback delivery outcomes, newest first. When a handler calls `host.scheduleCallback`, the host fires the webhook AFTER the response is sent, so the result can't ride the original journal entry — it lands here instead. Each record carries the request the host sent (url / method / headers / body), the requested `delay_ms`, and the `outcome`: `delivered` (with the SUT's `status`), `egress_denied` (blocked by policy, with the resolved IPs), or `failed` (DNS / connect / timeout). Cursor-paginated (`before` / `limit`). Owner-or-admin of the group."
     )]
     pub async fn list_callbacks(
         &self,
@@ -576,7 +576,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "find_route",
-        description = "Probe what would match a hypothetical request **within a group**: a method + path pair, like an inbound HTTP request to that group's subdomain. Returns the matching route if there is one, or a list of near-misses explaining what almost matched. Near-miss detection is intentionally shallow: it catches a method mismatch (path pattern matches but methods don't) and a single-segment literal-prefix typo — it does NOT catch deeper edits like a transposed or misspelled segment, so an EMPTY near-miss list does not prove no similar route exists. Reach for this when debugging \"my mock isn't firing\" — it tells you whether any route exists in the group for the request, and if not, the closest candidates. Owner-or-admin of the group (ADR-0030: matching is per-subdomain)."
+        description = "Probe what would match a hypothetical request **within a group**: a method + path pair, like an inbound HTTP request to that group's subdomain. Returns the matching route if there is one, or a list of near-misses explaining what almost matched. Near-miss detection is intentionally shallow: it catches a method mismatch (path pattern matches but methods don't) and a single-segment literal-prefix typo — it does NOT catch deeper edits like a transposed or misspelled segment, so an EMPTY near-miss list does not prove no similar route exists. Reach for this when debugging \"my mock isn't firing\" — it tells you whether any route exists in the group for the request, and if not, the closest candidates. Owner-or-admin of the group (matching is per-subdomain)."
     )]
     pub async fn find_route(
         &self,

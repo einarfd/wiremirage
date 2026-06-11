@@ -28,7 +28,7 @@ pub struct RouteRecord {
     pub methods: Vec<String>,
     pub path: String,
     /// Full public URL the SUT calls: `{scheme}://{group}.{apex}{path}`
-    /// (ADR-0030 virtual-host routing). The path component is the route's
+    /// (virtual-host routing). The path component is the route's
     /// pattern verbatim, `{param}` segments and all.
     pub url: String,
     pub language: String,
@@ -342,7 +342,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "create_route",
-        description = "Create a new route from a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source`). TypeScript is transpiled to JS in-host via swc, then dispatched through the embedded js-engine.wasm per ADR-0020. Returns `compile_failed` with diagnostics if the source doesn't compile. **Before writing your first handler, call `get_capabilities()` to see the handler signature, request/response shape, store/log/clock API, and gotchas.**"
+        description = "Create a new route from a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source`). TypeScript is transpiled to JS in-host via swc, then dispatched through the embedded js-engine.wasm. Returns `compile_failed` with diagnostics if the source doesn't compile. **Before writing your first handler, call `get_capabilities()` to see the handler signature, request/response shape, store/log/clock API, and gotchas.**"
     )]
     pub async fn create_route(
         &self,
