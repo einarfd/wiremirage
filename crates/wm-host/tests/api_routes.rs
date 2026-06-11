@@ -3393,6 +3393,109 @@ async fn group_endpoints_require_auth() {
 // -- /api/groups spec import/export ---------------------------------------
 
 #[tokio::test]
+async fn route_create_requires_owning_the_target_group() {
+    // Tenancy gate (ADR-0030): a non-admin can't inject a route into a group
+    // another tenant owns. Engine-free — JS source is stored verbatim and the
+    // gate runs before any transpile.
+    let h = Harness::start().await;
+    let (_a_id, client_a) = h.provision_user("alice", false);
+    let (_b_id, client_b) = h.provision_user("bob", false);
+
+    // Alice creates a group and a route in it (she owns both).
+    let g = client_a
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "alice-team" }))
+        .send()
+        .await
+        .expect("create group");
+    assert!(g.status().is_success(), "alice creates her group");
+    let r = client_a
+        .post(h.url("/api/routes"))
+        .json(&json!({
+            "group": "alice-team", "methods": ["GET"], "path": "/a",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .send()
+        .await
+        .expect("alice route");
+    assert_eq!(
+        r.status().as_u16(),
+        201,
+        "alice adds a route to her own group"
+    );
+
+    // Bob can't add a route to Alice's group. It returns the SAME 404 as a
+    // missing group (no-leak: group names are a global namespace, so a 403
+    // would confirm "alice-team" is taken by another tenant).
+    let denied = client_b
+        .post(h.url("/api/routes"))
+        .json(&json!({
+            "group": "alice-team", "methods": ["GET"], "path": "/b",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .send()
+        .await
+        .expect("bob route into alice group");
+    assert_eq!(
+        denied.status().as_u16(),
+        404,
+        "bob can't inject into alice's group (indistinguishable from missing)"
+    );
+
+    // Admin (bootstrap) CAN add a route to Alice's group (owner-or-admin).
+    let admin_ok = h
+        .client
+        .post(h.url("/api/routes"))
+        .json(&json!({
+            "group": "alice-team", "methods": ["GET"], "path": "/admin",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .send()
+        .await
+        .expect("admin route");
+    assert_eq!(
+        admin_ok.status().as_u16(),
+        201,
+        "admin overrides group ownership"
+    );
+
+    // Bob is not blocked from his own groups — he can create one + a route.
+    let bg = client_b
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "bob-team" }))
+        .send()
+        .await
+        .expect("bob group");
+    assert!(bg.status().is_success());
+    let br = client_b
+        .post(h.url("/api/routes"))
+        .json(&json!({
+            "group": "bob-team", "methods": ["GET"], "path": "/b",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .send()
+        .await
+        .expect("bob own route");
+    assert_eq!(
+        br.status().as_u16(),
+        201,
+        "bob can route into his own group"
+    );
+
+    // An unknown named group still 404s (unchanged behavior).
+    let missing = client_b
+        .post(h.url("/api/routes"))
+        .json(&json!({
+            "group": "no-such-group", "methods": ["GET"], "path": "/x",
+            "language": "javascript", "source": echo_source(),
+        }))
+        .send()
+        .await
+        .expect("missing group");
+    assert_eq!(missing.status().as_u16(), 404, "unknown named group 404s");
+}
+
+#[tokio::test]
 async fn import_creates_group_and_routes() {
     let h = Harness::start_with_engine().await;
     let spec = json!({
