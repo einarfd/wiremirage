@@ -4,7 +4,7 @@
 //! and works on machines without Docker. CI enables the feature.
 //!
 //! Strategy: start one shared Valkey container (testcontainers-rs sync
-//! runner, `valkey/valkey:8`) on first test access, and every test gets
+//! runner, `valkey/valkey:9`) on first test access, and every test gets
 //! its own scope (unique group/route prefix) so they don't interfere when
 //! run in parallel.
 //!
@@ -49,7 +49,7 @@ struct SharedValkey {
 fn shared() -> &'static SharedValkey {
     static SHARED: OnceLock<SharedValkey> = OnceLock::new();
     SHARED.get_or_init(|| {
-        let container = GenericImage::new("valkey/valkey", "8")
+        let container = GenericImage::new("valkey/valkey", "9")
             .with_exposed_port(6379.tcp())
             .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
             .start()
