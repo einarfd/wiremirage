@@ -113,7 +113,16 @@ impl Drop for TelemetryGuard {
 ///   layered on. The W3C Trace Context propagator is installed so
 ///   incoming `traceparent` headers are honoured.
 pub fn init() -> anyhow::Result<TelemetryGuard> {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Default to `info`, but quiet the `rmcp` MCP-transport crate to `warn`.
+    // At `info` it emits ~7 session-lifecycle spans per MCP connection
+    // (`streamable_http_session`, `serve_inner`, `client initialized`, …) —
+    // pure library bookkeeping with no WireMirage diagnostic value, and on a
+    // host with an OTLP exporter wired up they dominate exported-span volume
+    // (and the bill) for nothing. Our own `mcp.tool` spans live on the
+    // `wm_host` target, so they're unaffected. Operators can override the
+    // whole filter via `RUST_LOG` (e.g. `RUST_LOG=info,rmcp=info` to restore).
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,rmcp=warn"));
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .json()
