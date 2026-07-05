@@ -198,6 +198,7 @@ async fn list_tools_returns_all_expected_tools() {
         "export_group",
         // ADR-0034 outbound callbacks
         "list_callbacks",
+        "show_callback",
     ];
     expected.sort();
     assert_eq!(names, expected);
@@ -2036,4 +2037,126 @@ async fn list_callbacks_returns_stored_outcomes() {
     assert_eq!(entries[1]["outcome"]["status"], 200);
 
     client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn show_callback_returns_one_entry() {
+    // ADR-0034: MCP show_callback fetches a single callback record by number.
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "cb-show".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("cb-show")
+        .unwrap();
+
+    let written = h
+        .state
+        .journal()
+        .record_callback(sample_callback(
+            &group.id,
+            "cb-show",
+            CallbackOutcome::Delivered { status: 201 },
+        ))
+        .unwrap();
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("show_callback").with_arguments(
+                json!({ "group": "cb-show", "number": written.number })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("show_callback");
+    let sc = res.structured_content.expect("structured");
+    assert_eq!(sc["number"], written.number);
+    assert_eq!(sc["group_name"], "cb-show");
+    assert_eq!(sc["outcome"]["kind"], "delivered");
+    assert_eq!(sc["outcome"]["status"], 201);
+    assert_eq!(sc["url"], "https://sut.example/hook");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
+async fn show_callback_forbidden_for_non_owner_non_admin() {
+    let h = start().await;
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "cb-403".into(),
+            owner_id: "admin-id".into(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("cb-403")
+        .unwrap();
+    let written = h
+        .state
+        .journal()
+        .record_callback(sample_callback(
+            &group.id,
+            "cb-403",
+            CallbackOutcome::Delivered { status: 200 },
+        ))
+        .unwrap();
+
+    // Alice is a non-admin with no routes in the group.
+    let alice = h
+        .state
+        .auth()
+        .create_user("alice", false)
+        .expect("alice user");
+    let (_token, alice_plain) = h
+        .state
+        .auth()
+        .create_token(&alice.id, "default", None)
+        .expect("alice token");
+    let alice_client = DummyClient
+        .serve(transport(&h.base_url, Some(&alice_plain)))
+        .await
+        .expect("alice connect");
+
+    let err = alice_client
+        .call_tool(
+            CallToolRequestParams::new("show_callback").with_arguments(
+                json!({ "group": "cb-403", "number": written.number })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect_err("non-owner can't read callbacks");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("forbidden"),
+        "owner-or-admin gate fires: {msg}"
+    );
+
+    alice_client.cancel().await.expect("alice cancel");
 }
