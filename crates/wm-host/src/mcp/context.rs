@@ -42,6 +42,37 @@ pub fn ensure_group_owner_or_admin(
     Ok(group)
 }
 
+/// Resolve a group reference and gate it with the journal-reader
+/// semantics used by `list_journal`, `list_callbacks`, and
+/// `show_callback`: admin passes; a non-admin must own at least one
+/// route in the group (the same gate as the REST journal/callback
+/// endpoints). Returns the resolved group so callers don't need a
+/// second lookup.
+pub fn ensure_journal_reader(
+    state: &AppState,
+    auth: &AuthContext,
+    group_ref: &str,
+) -> Result<Group, ErrorData> {
+    let group = state
+        .routes()
+        .registry()
+        .read_group_by_ref(group_ref)
+        .map_err(|_| not_found("group not found"))?;
+    if !auth.is_admin {
+        let owned = state
+            .routes()
+            .registry()
+            .list_routes_by_owner(&auth.user_id)
+            .map_err(map_registry_error)?;
+        if !owned.iter().any(|r| r.group_id == group.id) {
+            return Err(forbidden(
+                "must be admin or own a route in this group to read its journal",
+            ));
+        }
+    }
+    Ok(group)
+}
+
 /// Resolve a route slug `{group}/{n}` to its full record, returning
 /// `forbidden` for non-admin callers that don't own it.
 pub fn ensure_route_owner_or_admin(
