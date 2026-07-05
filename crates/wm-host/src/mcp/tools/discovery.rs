@@ -216,6 +216,15 @@ pub struct ListCallbacksResult {
     pub next_before: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ShowCallbackArgs {
+    /// Group name or ULID. Required — callbacks are per-group, gated
+    /// owner-or-admin of *this* group.
+    pub group: String,
+    /// The callback entry's `number` (from `list_callbacks`).
+    pub number: u32,
+}
+
 #[tool_router(router = discovery_router, vis = "pub(crate)")]
 impl WmMcpServer {
     #[tool(
@@ -572,6 +581,45 @@ impl WmMcpServer {
             entries,
             next_before,
         }))
+    }
+
+    #[tool(
+        name = "show_callback",
+        description = "Fetch one outbound-callback delivery record in full by its `number` — the complete request the host sent (url, method, headers, body), the requested `delay_ms`, and the `outcome` (`delivered` with the SUT's status, `egress_denied` with the resolved IPs, or `failed` with the error). `list_callbacks` returns all entries but you may want a single one by number for inspection. Owner-or-admin of the group."
+    )]
+    pub async fn show_callback(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ShowCallbackArgs>,
+    ) -> Result<Json<CallbackRecord>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let group = self
+            .state
+            .routes()
+            .registry()
+            .read_group_by_ref(&args.group)
+            .map_err(|_| not_found("group not found"))?;
+        // Owner-or-admin gate, matching list_callbacks and the REST
+        // callback endpoints.
+        if !auth.is_admin {
+            let owned = self
+                .state
+                .routes()
+                .registry()
+                .list_routes_by_owner(&auth.user_id)
+                .map_err(map_registry_error)?;
+            if !owned.iter().any(|r| r.group_id == group.id) {
+                return Err(forbidden(
+                    "must be admin or own a route in this group to read its callbacks",
+                ));
+            }
+        }
+        let record = self
+            .state
+            .journal()
+            .get_callback(&group.id, args.number)
+            .map_err(map_journal_error)?;
+        Ok(Json(record))
     }
 
     #[tool(
