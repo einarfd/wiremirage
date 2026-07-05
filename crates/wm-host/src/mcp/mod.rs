@@ -157,6 +157,7 @@ mod tests {
             "export_group",
             // ADR-0034 outbound callbacks
             "list_callbacks",
+            "show_callback",
         ];
         expected.sort();
         assert_eq!(names, expected, "tool list drifted from the design");
