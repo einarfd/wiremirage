@@ -18,7 +18,7 @@ use crate::journal::{
 use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::mcp::context::auth_from;
 use crate::mcp::error::{
-    forbidden, map_filter_error, map_journal_error, map_registry_error, not_found, validation,
+    forbidden, map_filter_error, map_journal_error, map_registry_error, validation,
 };
 use crate::mcp::server::WmMcpServer;
 use crate::mcp::tools::routes::RouteRecord;
@@ -214,6 +214,15 @@ pub struct ListCallbacksResult {
     pub entries: Vec<CallbackRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_before: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ShowCallbackArgs {
+    /// Group name or ULID. Required — callbacks are per-group, gated
+    /// owner-or-admin of *this* group.
+    pub group: String,
+    /// The callback entry's `number` (from `list_callbacks`).
+    pub number: u32,
 }
 
 #[tool_router(router = discovery_router, vis = "pub(crate)")]
@@ -429,29 +438,7 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListJournalArgs>,
     ) -> Result<Json<ListJournalResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        // Resolve the group ref (name or ULID); 404 so callers can't
-        // probe for groups they can't see.
-        let group = self
-            .state
-            .routes()
-            .registry()
-            .read_group_by_ref(&args.group)
-            .map_err(|_| not_found("group not found"))?;
-        // Owner-or-admin gate, matching the REST `/api/journal/{group}`
-        // endpoint: admin, or owns at least one route in the group.
-        if !auth.is_admin {
-            let owned = self
-                .state
-                .routes()
-                .registry()
-                .list_routes_by_owner(&auth.user_id)
-                .map_err(map_registry_error)?;
-            if !owned.iter().any(|r| r.group_id == group.id) {
-                return Err(forbidden(
-                    "must be admin or own a route in this group to read its journal",
-                ));
-            }
-        }
+        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
 
         let now = chrono::Utc::now();
         let route = args
@@ -537,27 +524,7 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListCallbacksArgs>,
     ) -> Result<Json<ListCallbacksResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = self
-            .state
-            .routes()
-            .registry()
-            .read_group_by_ref(&args.group)
-            .map_err(|_| not_found("group not found"))?;
-        // Owner-or-admin gate, matching the REST callbacks endpoint and the
-        // request journal: admin, or owns a route in the group.
-        if !auth.is_admin {
-            let owned = self
-                .state
-                .routes()
-                .registry()
-                .list_routes_by_owner(&auth.user_id)
-                .map_err(map_registry_error)?;
-            if !owned.iter().any(|r| r.group_id == group.id) {
-                return Err(forbidden(
-                    "must be admin or own a route in this group to read its callbacks",
-                ));
-            }
-        }
+        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
         let cursor = ListCursor {
             before: args.before,
             limit: args.limit.unwrap_or(50).clamp(1, 200) as usize,
@@ -572,6 +539,25 @@ impl WmMcpServer {
             entries,
             next_before,
         }))
+    }
+
+    #[tool(
+        name = "show_callback",
+        description = "Fetch one outbound-callback delivery record in full by its `number` — the complete request the host sent (url, method, headers, body), the requested `delay_ms`, and the `outcome` (`delivered` with the SUT's status, `egress_denied` with the resolved IPs, or `failed` with the error). `list_callbacks` returns all entries but you may want a single one by number for inspection. Owner-or-admin of the group."
+    )]
+    pub async fn show_callback(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<ShowCallbackArgs>,
+    ) -> Result<Json<CallbackRecord>, ErrorData> {
+        let auth = auth_from(&parts)?;
+        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
+        let record = self
+            .state
+            .journal()
+            .get_callback(&group.id, args.number)
+            .map_err(map_journal_error)?;
+        Ok(Json(record))
     }
 
     #[tool(

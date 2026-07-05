@@ -616,8 +616,8 @@ the host capability, each **group opts in** via a `callout_enabled` flag
 import/export). Delivery outcomes (`delivered`/`egress_denied`/`failed`)
 land in a per-group **callback journal** (can't ride the original
 response — it already returned), readable via `GET
-/api/groups/{group}/callbacks`, MCP `list_callbacks` (**32 tools now**),
-`wm callbacks list/show`, and a UI page at
+/api/groups/{group}/callbacks`, MCP `list_callbacks` / `show_callback`
+(**33 tools now**), `wm callbacks list/show`, and a UI page at
 `/ui/groups/{group}/callbacks`. A `callbacks` `get_capabilities` topic
 documents the handler API. Dry-run never fires real callbacks.
 
