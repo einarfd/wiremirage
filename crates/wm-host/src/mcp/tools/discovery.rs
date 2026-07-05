@@ -18,7 +18,7 @@ use crate::journal::{
 use crate::journal_filter::{JournalFilter, RouteSlug, StatusFilter};
 use crate::mcp::context::auth_from;
 use crate::mcp::error::{
-    forbidden, map_filter_error, map_journal_error, map_registry_error, not_found, validation,
+    forbidden, map_filter_error, map_journal_error, map_registry_error, validation,
 };
 use crate::mcp::server::WmMcpServer;
 use crate::mcp::tools::routes::RouteRecord;
@@ -438,29 +438,7 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListJournalArgs>,
     ) -> Result<Json<ListJournalResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        // Resolve the group ref (name or ULID); 404 so callers can't
-        // probe for groups they can't see.
-        let group = self
-            .state
-            .routes()
-            .registry()
-            .read_group_by_ref(&args.group)
-            .map_err(|_| not_found("group not found"))?;
-        // Owner-or-admin gate, matching the REST `/api/journal/{group}`
-        // endpoint: admin, or owns at least one route in the group.
-        if !auth.is_admin {
-            let owned = self
-                .state
-                .routes()
-                .registry()
-                .list_routes_by_owner(&auth.user_id)
-                .map_err(map_registry_error)?;
-            if !owned.iter().any(|r| r.group_id == group.id) {
-                return Err(forbidden(
-                    "must be admin or own a route in this group to read its journal",
-                ));
-            }
-        }
+        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
 
         let now = chrono::Utc::now();
         let route = args
@@ -546,27 +524,7 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListCallbacksArgs>,
     ) -> Result<Json<ListCallbacksResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = self
-            .state
-            .routes()
-            .registry()
-            .read_group_by_ref(&args.group)
-            .map_err(|_| not_found("group not found"))?;
-        // Owner-or-admin gate, matching the REST callbacks endpoint and the
-        // request journal: admin, or owns a route in the group.
-        if !auth.is_admin {
-            let owned = self
-                .state
-                .routes()
-                .registry()
-                .list_routes_by_owner(&auth.user_id)
-                .map_err(map_registry_error)?;
-            if !owned.iter().any(|r| r.group_id == group.id) {
-                return Err(forbidden(
-                    "must be admin or own a route in this group to read its callbacks",
-                ));
-            }
-        }
+        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
         let cursor = ListCursor {
             before: args.before,
             limit: args.limit.unwrap_or(50).clamp(1, 200) as usize,
@@ -593,27 +551,7 @@ impl WmMcpServer {
         Parameters(args): Parameters<ShowCallbackArgs>,
     ) -> Result<Json<CallbackRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = self
-            .state
-            .routes()
-            .registry()
-            .read_group_by_ref(&args.group)
-            .map_err(|_| not_found("group not found"))?;
-        // Owner-or-admin gate, matching list_callbacks and the REST
-        // callback endpoints.
-        if !auth.is_admin {
-            let owned = self
-                .state
-                .routes()
-                .registry()
-                .list_routes_by_owner(&auth.user_id)
-                .map_err(map_registry_error)?;
-            if !owned.iter().any(|r| r.group_id == group.id) {
-                return Err(forbidden(
-                    "must be admin or own a route in this group to read its callbacks",
-                ));
-            }
-        }
+        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
         let record = self
             .state
             .journal()
