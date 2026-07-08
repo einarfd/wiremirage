@@ -7,6 +7,7 @@ use wm_host::github_oauth::GitHubConfig;
 use wm_host::journal::Journal;
 use wm_host::lifecycle::Sweeper;
 use wm_host::local_auth::LocalAuth;
+use wm_host::oidc::OidcConfig;
 use wm_host::registry::Registry;
 use wm_host::route_table::RouteTable;
 use wm_host::session::SessionStore;
@@ -73,6 +74,37 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(
             "WM_GITHUB_CLIENT_ID is not set; the login page will not offer GitHub login"
         );
+    }
+
+    // Generic OIDC (ADR-0035). Optional. When configured, the login
+    // page shows a "Continue with {display name}" button and the
+    // `/auth/start/oidc` + `/auth/callback/oidc` routes are live.
+    // The issuer's discovery document is fetched here, once — an
+    // unreachable or mismatched IdP refuses startup instead of
+    // 503ing the first user who clicks the button.
+    if let Some(oidc_config) = OidcConfig::from_env().context("parse OIDC config")? {
+        if state.sessions().is_none() {
+            return Err(anyhow!(
+                "WM_OIDC_ISSUER is set but SESSION_SECRET is missing. \
+                 OIDC login can't mint cookies without a signing key — \
+                 set SESSION_SECRET to at least 32 bytes of secret material."
+            ));
+        }
+        let provider = oidc_config
+            .discover()
+            .await
+            .context("resolve OIDC discovery document (is the IdP reachable and WM_OIDC_ISSUER exactly its issuer URL?)")?;
+        tracing::info!(
+            issuer = %provider.config.issuer,
+            display_name = %provider.config.display_name,
+            allow_emails = provider.config.allow_emails.len(),
+            allow_domains = provider.config.allow_domains.len(),
+            allow_groups = provider.config.allow_groups.len(),
+            "OIDC login configured"
+        );
+        state = state.with_oidc(provider);
+    } else {
+        tracing::info!("WM_OIDC_ISSUER is not set; the login page will not offer OIDC login");
     }
 
     // Final fail-fast: refuse to come up if no users exist AND no
@@ -323,6 +355,7 @@ fn bootstrap_admin_if_requested(auth: &Auth) -> anyhow::Result<()> {
 ///     by [`configure_local_auth`]).
 ///   - GitHub OAuth is configured (parsed into `state.github_config()`
 ///     by `GitHubConfig::from_env()` in main).
+///   - OIDC login is configured (`WM_OIDC_ISSUER` etc., ADR-0035).
 ///
 /// First-login-creates-first-user covers the bootstrap gap for the
 /// browser-login paths, so an operator who only wants GitHub OAuth
@@ -338,13 +371,19 @@ fn ensure_login_method_available(state: &AppState) -> anyhow::Result<()> {
     }
     let has_local = !state.local_auth().is_empty();
     let has_github = state.github_oauth().is_some();
-    if has_local || has_github {
-        let methods = match (has_local, has_github) {
-            (true, true) => "local-password and GitHub OAuth",
-            (true, false) => "local-password",
-            (false, true) => "GitHub OAuth",
-            (false, false) => unreachable!(),
-        };
+    let has_oidc = state.oidc().is_some();
+    if has_local || has_github || has_oidc {
+        let mut methods = Vec::new();
+        if has_local {
+            methods.push("local-password");
+        }
+        if has_github {
+            methods.push("GitHub OAuth");
+        }
+        if has_oidc {
+            methods.push("OIDC");
+        }
+        let methods = methods.join(" and ");
         tracing::info!(
             "no users exist yet; first browser login ({methods}) will create the first user"
         );
@@ -354,9 +393,10 @@ fn ensure_login_method_available(state: &AppState) -> anyhow::Result<()> {
         "no users exist and no login method is configured. \
          Either set WM_BOOTSTRAP_TOKEN=wmt_<plaintext> to provision a \
          bearer-token admin named {BOOTSTRAP_USER_NAME:?}, or configure \
-         WM_LOCAL_AUTH or GitHub OAuth (WM_GITHUB_CLIENT_ID + \
-         WM_GITHUB_CLIENT_SECRET + allow rules) so a browser login can \
-         create the first user."
+         WM_LOCAL_AUTH, GitHub OAuth (WM_GITHUB_CLIENT_ID + \
+         WM_GITHUB_CLIENT_SECRET + allow rules), or OIDC \
+         (WM_OIDC_ISSUER + client credentials + allow rules) so a \
+         browser login can create the first user."
     ))
 }
 

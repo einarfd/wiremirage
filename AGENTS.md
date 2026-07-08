@@ -621,6 +621,25 @@ response — it already returned), readable via `GET
 `/ui/groups/{group}/callbacks`. A `callbacks` `get_capabilities` topic
 documents the handler API. Dry-run never fires real callbacks.
 
+ADR-0035 added **generic OIDC browser login** — one relying-party
+module (`crates/wm-host/src/oidc.rs`) covers every OIDC-compliant IdP
+(Pocket ID, Keycloak, Authentik, Zitadel, Dex, Okta, Google, ...);
+GitHub remains the only hand-rolled non-OIDC adapter. Configured
+entirely by env (`WM_OIDC_ISSUER` + `WM_OIDC_CLIENT_ID/_SECRET`, at
+least one of `WM_OIDC_ALLOW_EMAILS`/`_ALLOW_DOMAINS`/`_ALLOW_GROUPS`,
+optional `_ADMIN_EMAILS`/`_ADMIN_GROUPS`/`_DISPLAY_NAME`/
+`_GROUPS_CLAIM`/`_EXTRA_SCOPES`); endpoints come from the issuer's
+discovery document, fetched fail-fast at startup (issuer-mismatch =
+refuse to start). Code flow + PKCE (S256) at `/auth/start/oidc` →
+`/auth/callback/oidc`; identity from the **userinfo endpoint** (no
+JWT/JWKS machinery — see the ADR); provisioning via the existing
+`upsert_oauth_user("oidc", sub, ...)` with `preferred_username` (email
+local-part fallback) as the username. Hand-rolled on reqwest like the
+GitHub module, deliberately not the `openidconnect` crate. The login
+page shows a "Continue with {display name}" button alongside GitHub /
+local. Tier-2: `tests/oidc_e2e.rs` (in-process mock issuer incl.
+discovery + PKCE round-trip); unit tests in `oidc::tests`.
+
 ## Where the design lives
 
 The design is captured as docs and ADRs in a private Arkiv workspace named

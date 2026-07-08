@@ -40,6 +40,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         // generate and validate it ourselves).
         .route("/auth/start/github", get(start_github))
         .route("/auth/callback", get(github_callback))
+        // Generic OIDC (ADR-0035). Same two-GET shape as GitHub; the
+        // callback path is provider-specific so the redirect URI
+        // registered at the IdP names the flow it belongs to.
+        .route("/auth/start/oidc", get(start_oidc))
+        .route("/auth/callback/oidc", get(oidc_callback))
         // Every form-bearing endpoint in this router is `/auth/*`,
         // so we can blanket-CSRF the lot. The login GET mints the
         // cookie; the POSTs (login + logout) validate it. The
@@ -71,6 +76,11 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
     // gets injected into the template context by `ui::render`.
     let local_enabled = !state.local_auth().is_empty();
     let github_enabled = state.github_oauth().is_some();
+    let oidc_enabled = state.oidc().is_some();
+    let oidc_display_name = state
+        .oidc()
+        .map(|p| p.config.display_name.clone())
+        .unwrap_or_default();
     let next = q
         .next
         .filter(|n| n.starts_with('/') && !n.starts_with("//"));
@@ -80,6 +90,8 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
         context! {
             local_enabled => local_enabled,
             github_enabled => github_enabled,
+            oidc_enabled => oidc_enabled,
+            oidc_display_name => oidc_display_name,
             next => next,
             error => Option::<String>::None,
         },
@@ -508,6 +520,274 @@ async fn github_callback(
         .expect("ascii cookie header"),
     );
     redirect
+}
+
+// -- Generic OIDC (ADR-0035) --------------------------------------------------
+//
+// Same two-step shape as GitHub:
+//   GET /auth/start/oidc      → 302 to the IdP's authorization endpoint
+//   GET /auth/callback/oidc   → exchange code, mint session, 302 to next
+//
+// Differences from the GitHub flow: PKCE (S256) on top of the state
+// nonce, and the server-side state record carries the PKCE verifier
+// alongside the post-login `next` path (as JSON, at
+// `oidc_state:{nonce}` — a separate key prefix so the two flows can't
+// consume each other's state).
+
+#[derive(Debug, Deserialize)]
+struct StartOidcQuery {
+    next: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    /// RFC 6749 error response, e.g. `access_denied` when the user
+    /// cancels at the IdP.
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// The server-side state record for an in-flight OIDC login.
+#[derive(serde::Serialize, Deserialize)]
+struct OidcStateRecord {
+    next: String,
+    pkce_verifier: String,
+}
+
+async fn start_oidc(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StartOidcQuery>,
+) -> Response {
+    let Some(oidc) = state.oidc() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OIDC login not configured; set WM_OIDC_ISSUER, WM_OIDC_CLIENT_ID, and WM_OIDC_CLIENT_SECRET",
+        )
+            .into_response();
+    };
+
+    let next = q
+        .next
+        .as_deref()
+        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+        .unwrap_or("/ui/")
+        .to_string();
+
+    use base64::Engine as _;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let (pkce_verifier, pkce_challenge) = crate::oidc::pkce_pair();
+
+    let record = OidcStateRecord {
+        next,
+        pkce_verifier,
+    };
+    let value = serde_json::to_vec(&record).expect("state record serializes");
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open admin bucket for oidc state");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+    let key = format!("oidc_state:{nonce}");
+    if let Err(e) = bucket.set(&key, value) {
+        tracing::error!(error = %e, "persist oidc state");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+    }
+    // Best-effort TTL, same reasoning as the GitHub flow: a stale
+    // record can't mint a session without a valid code + verifier.
+    let _ = bucket.set_ttl(&key, OAUTH_STATE_TTL_SECONDS);
+
+    let redirect_uri = derive_oidc_redirect_uri(&headers, state.trust_forwarded_headers());
+    let authorize = oidc.authorize_url(&redirect_uri, &nonce, &pkce_challenge);
+    Redirect::to(&authorize).into_response()
+}
+
+async fn oidc_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<OidcCallbackQuery>,
+) -> Response {
+    let Some(oidc) = state.oidc() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "OIDC login not configured").into_response();
+    };
+
+    if let Some(err) = q.error {
+        // User cancelled at the IdP, or the IdP rejected the request.
+        // Surface the IdP-supplied description verbatim — operators
+        // need "access_denied" vs "invalid_redirect_uri" legible.
+        let desc = q.error_description.unwrap_or_default();
+        tracing::warn!(error = %err, description = %desc, "OIDC callback returned error");
+        return (
+            StatusCode::UNAUTHORIZED,
+            format!("OIDC login failed: {err} ({desc})"),
+        )
+            .into_response();
+    }
+
+    let Some(code) = q.code else {
+        return (StatusCode::BAD_REQUEST, "missing `code` parameter").into_response();
+    };
+    let Some(state_nonce) = q.state else {
+        return (StatusCode::BAD_REQUEST, "missing `state` parameter").into_response();
+    };
+
+    let record = match consume_oidc_state(&state, &state_nonce) {
+        Ok(r) => r,
+        Err(StateError::NotFound) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "invalid or expired `state` parameter; restart the login flow",
+            )
+                .into_response();
+        }
+        Err(StateError::Storage(e)) => {
+            tracing::error!(error = %e, "load oidc state");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    };
+
+    let Some(sessions) = state.sessions() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session store not configured; set SESSION_SECRET",
+        )
+            .into_response();
+    };
+
+    let redirect_uri = derive_oidc_redirect_uri(&headers, state.trust_forwarded_headers());
+    let access_token = match oidc
+        .exchange_code(&code, &redirect_uri, &record.pkce_verifier)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "oidc code exchange failed");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "OIDC login failed (code exchange)",
+            )
+                .into_response();
+        }
+    };
+    let identity = match oidc.fetch_identity(&access_token).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(error = %e, "oidc identity fetch failed");
+            return (
+                StatusCode::UNAUTHORIZED,
+                "OIDC login failed (identity fetch)",
+            )
+                .into_response();
+        }
+    };
+    if let Err(deny) = oidc.check_allow(&identity) {
+        tracing::warn!(subject = %identity.subject, email = ?identity.email, groups = ?identity.groups,
+            "oidc login denied by allow-rules");
+        return (StatusCode::FORBIDDEN, format!("{deny}")).into_response();
+    }
+
+    let Some(username) = identity.username() else {
+        tracing::warn!(subject = %identity.subject,
+            "oidc userinfo carried neither preferred_username nor a usable email");
+        return (
+            StatusCode::UNAUTHORIZED,
+            "OIDC login failed: the IdP returned neither `preferred_username` nor a \
+             verified `email`, so no username can be derived. Configure the IdP to \
+             include one of those claims.",
+        )
+            .into_response();
+    };
+
+    let is_admin = oidc.is_admin(&identity);
+    let user = match state
+        .auth()
+        .upsert_oauth_user("oidc", &identity.subject, &username, is_admin)
+    {
+        Ok(u) => u,
+        Err(crate::auth::AuthError::NameTaken(n)) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "OIDC login {n:?} collides with an existing user. \
+                     Rename or delete that user, then re-try login."
+                ),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "upsert oauth user");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error (user upsert)",
+            )
+                .into_response();
+        }
+    };
+
+    let ip_str = client_ip(&headers, state.trust_forwarded_headers()).to_string();
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let (_session, cookie_value) = match sessions.create(&user.id, "oidc", &ip_str, &user_agent) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!(error = %e, "session create");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error (session mint)",
+            )
+                .into_response();
+        }
+    };
+
+    let mut redirect: Response = Redirect::to(&record.next).into_response();
+    redirect.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format_set_cookie(
+            &cookie_value,
+            sessions.ttl_seconds(),
+            state.secure_cookies(),
+        ))
+        .expect("ascii cookie header"),
+    );
+    redirect
+}
+
+fn consume_oidc_state(state: &AppState, nonce: &str) -> Result<OidcStateRecord, StateError> {
+    let mut bucket = state
+        .auth()
+        .storage()
+        .admin_bucket()
+        .map_err(StateError::Storage)?;
+    let key = format!("oidc_state:{nonce}");
+    let Some(bytes) = bucket.get(&key).map_err(StateError::Storage)? else {
+        return Err(StateError::NotFound);
+    };
+    // One-shot — delete before the code exchange so a parallel attempt
+    // with the same state can't ride along.
+    let _ = bucket.delete(&key);
+    let mut record: OidcStateRecord =
+        serde_json::from_slice(&bytes).map_err(|_| StateError::NotFound)?;
+    // Re-validate `next` the same way `start_oidc` did.
+    if !record.next.starts_with('/') || record.next.starts_with("//") {
+        record.next = "/ui/".to_string();
+    }
+    Ok(record)
+}
+
+fn derive_oidc_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
+    format!(
+        "{}/auth/callback/oidc",
+        public_base_url(headers, trust_forwarded)
+    )
 }
 
 enum StateError {
