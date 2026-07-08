@@ -140,6 +140,7 @@ fn config_for(issuer: &str) -> OidcConfig {
         client_id: "test-cid".into(),
         client_secret: "test-csec".into(),
         display_name: "Pocket ID".into(),
+        allow_all: false,
         allow_emails: vec![],
         allow_domains: vec!["acme.example".into()],
         allow_groups: vec![],

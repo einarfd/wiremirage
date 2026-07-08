@@ -185,7 +185,7 @@ in any combination:
 | Path | Used by | Required env vars |
 |---|---|---|
 | **API tokens (bearer)** | `wm` CLI, MCP server, scripts, agents | `WM_BOOTSTRAP_TOKEN` (first start) |
-| **OIDC** | Browser users with any OIDC IdP (Pocket ID, Keycloak, Authentik, Okta, ...) | `WM_OIDC_ISSUER`, `WM_OIDC_CLIENT_ID`, `WM_OIDC_CLIENT_SECRET`, at least one `WM_OIDC_ALLOW_*` rule, `SESSION_SECRET` |
+| **OIDC** | Browser users with any OIDC IdP (Pocket ID, Keycloak, Authentik, Okta, ...) | `WM_OIDC_ISSUER`, `WM_OIDC_CLIENT_ID`, `WM_OIDC_CLIENT_SECRET`, an allow posture (`WM_OIDC_ALLOW_ALL` or `WM_OIDC_ALLOW_*` rules), `SESSION_SECRET` |
 | **GitHub OAuth** | Browser users | `WM_GITHUB_CLIENT_ID`, `WM_GITHUB_CLIENT_SECRET`, `WM_GITHUB_ALLOW_USERS` and/or `WM_GITHUB_ALLOW_ORGS`, `SESSION_SECRET` |
 | **Local password** | Testing / trusted-network only (ADR-0018) | `WM_LOCAL_AUTH`, `SESSION_SECRET` |
 
@@ -293,13 +293,25 @@ Then set on the host:
   IdP, so a bad URL surfaces at deploy time rather than as a broken login.
 - `WM_OIDC_CLIENT_ID` / `WM_OIDC_CLIENT_SECRET` — the registered client's
   credentials. Both or neither; treat the secret as a credential.
-- Allow rules — **at least one required** (they OR together):
-  - `WM_OIDC_ALLOW_EMAILS` — comma-separated exact emails.
-  - `WM_OIDC_ALLOW_DOMAINS` — comma-separated email domains
-    (`acme.example` allows `anyone@acme.example`).
-  - `WM_OIDC_ALLOW_GROUPS` — comma-separated group names, matched against
-    the IdP's groups claim. Emails marked `email_verified: false` by the
-    IdP never satisfy the email/domain rules.
+- Allow rules — **exactly one posture required**:
+  - `WM_OIDC_ALLOW_ALL=true` — every user the issuer authenticates is
+    allowed. The right posture for a **private IdP** (Pocket ID,
+    closed-registration Keycloak, corporate Okta): you own the user table,
+    so account existence already is the authorization decision, and
+    per-app restrictions belong in the IdP (e.g. Pocket ID's per-client
+    allowed groups). **Never** set this against a public issuer like
+    Google — there "authenticated" means anyone on the internet.
+  - Or per-identity rules (they OR together), for public issuers or when
+    you'd rather hold the list on the WireMirage side:
+    - `WM_OIDC_ALLOW_EMAILS` — comma-separated exact emails.
+    - `WM_OIDC_ALLOW_DOMAINS` — comma-separated email domains
+      (`acme.example` allows `anyone@acme.example`).
+    - `WM_OIDC_ALLOW_GROUPS` — comma-separated group names, matched against
+      the IdP's groups claim. Emails marked `email_verified: false` by the
+      IdP never satisfy the email/domain rules.
+  - Setting both `WM_OIDC_ALLOW_ALL` and per-identity rules refuses
+    startup — the combination usually means the operator believes the
+    rules still restrict something they don't.
 - `WM_OIDC_ADMIN_EMAILS` / `WM_OIDC_ADMIN_GROUPS` — optional; matching
   users are promoted to admin on login (and demoted on next login if
   removed, same contract as the other login paths).
@@ -324,11 +336,16 @@ Example — Pocket ID: create the OIDC client in Pocket ID's admin UI
 ```sh
 WM_OIDC_ISSUER=https://id.example.com \
 WM_OIDC_CLIENT_ID=... WM_OIDC_CLIENT_SECRET=... \
-WM_OIDC_ALLOW_GROUPS=wiremirage \
+WM_OIDC_ALLOW_ALL=true \
 WM_OIDC_ADMIN_GROUPS=wiremirage-admins \
 SESSION_SECRET=$(openssl rand -base64 48) \
   wm-host
 ```
+
+(`WM_OIDC_ALLOW_ALL=true` because Pocket ID is a private IdP — everyone
+with an account there is yours. To restrict which Pocket ID users may use
+WireMirage at all, use the client's allowed-groups setting in Pocket ID
+itself, or switch to `WM_OIDC_ALLOW_GROUPS` on this side.)
 
 ### Browser login — GitHub OAuth (recommended for production)
 
