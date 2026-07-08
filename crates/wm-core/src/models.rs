@@ -660,6 +660,10 @@ pub struct CreateTokenBody {
 pub struct UserRecord {
     pub id: String,
     pub name: String,
+    /// Verified email used as the cross-provider identity-linking key;
+    /// `None` for bootstrap/local users.
+    #[serde(default)]
+    pub primary_email: Option<String>,
     pub is_admin: bool,
     pub created_at: String,
 }

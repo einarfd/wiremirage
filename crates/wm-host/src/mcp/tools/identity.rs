@@ -27,6 +27,9 @@ pub struct WhoAmIResult {
 pub struct WhoAmIUser {
     pub id: String,
     pub name: String,
+    /// Verified email used as the cross-provider identity-linking key;
+    /// null for bootstrap/local users.
+    pub primary_email: Option<String>,
     pub is_admin: bool,
 }
 
@@ -43,10 +46,20 @@ impl WmMcpServer {
         let auth = auth_from(&parts)?;
         let base_url =
             crate::auth_api::public_base_url(&parts.headers, self.state.trust_forwarded_headers());
+        // AuthContext doesn't carry the email; one record read is fine
+        // for an identity-inspection tool. Best-effort — a race with a
+        // concurrent user-delete just yields null.
+        let primary_email = self
+            .state
+            .auth()
+            .get_user_by_id(&auth.user_id)
+            .ok()
+            .and_then(|u| u.primary_email);
         Ok(Json(WhoAmIResult {
             user: WhoAmIUser {
                 id: auth.user_id,
                 name: auth.user_name,
+                primary_email,
                 is_admin: auth.is_admin,
             },
             base_url,

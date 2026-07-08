@@ -1369,6 +1369,10 @@ struct PatchUserBody {
 struct UserRecord {
     id: String,
     name: String,
+    /// The verified email used as the cross-provider identity-linking
+    /// key (user-model.md). `null` for bootstrap/local users and
+    /// records that predate the field.
+    primary_email: Option<String>,
     is_admin: bool,
     created_at: String,
 }
@@ -1378,6 +1382,7 @@ impl From<&User> for UserRecord {
         Self {
             id: u.id.clone(),
             name: u.name.clone(),
+            primary_email: u.primary_email.clone(),
             is_admin: u.is_admin,
             created_at: u.created_at.to_rfc3339(),
         }

@@ -641,6 +641,20 @@ GitHub module, deliberately not the `openidconnect` crate. The login
 page shows a "Continue with {display name}" button alongside GitHub /
 local. Tier-2: `tests/oidc_e2e.rs` (in-process mock issuer incl.
 discovery + PKCE round-trip); unit tests in `oidc::tests`.
+A follow-up implemented **cross-provider identity linking by verified
+email** (the user-model.md design that had been unbuilt): `User` gains
+`primary_email` (set from the provider's verified email at first OAuth
+provisioning, backfilled once on older records, never auto-updated),
+and `upsert_oauth_user` links a first-seen `(provider, subject)` whose
+verified email matches an existing user's `primary_email` to that user
+— so the same human via GitHub and via an OIDC IdP is ONE account, in
+either arrival order. No verified email → no linking (account-takeover
+guard) → the old name-collision rules apply, with an honest 409
+message. `primary_email` surfaces on REST user records, `wm users
+list/show`, and MCP `who_am_i`. Tier-2:
+`github_and_oidc_logins_link_to_one_user_by_email` in
+`tests/oidc_e2e.rs`; the linking matrix is unit-tested in
+`auth::tests`.
 
 ## Where the design lives
 
