@@ -10,6 +10,13 @@
 <main class="auth-card">
 <h1 class="auth-title">Sign in to WireMirage</h1>
 
+{% if oidc_enabled %}
+<a class="btn btn--primary auth-oauth-btn"
+   href="/auth/start/oidc{% if next %}?next={{ next }}{% endif %}">
+  Continue with {{ oidc_display_name }}
+</a>
+{%- endif %}
+
 {% if github_enabled %}
 <a class="btn btn--primary auth-oauth-btn"
    href="/auth/start/github{% if next %}?next={{ next }}{% endif %}">
@@ -17,7 +24,7 @@
 </a>
 {%- endif %}
 
-{% if github_enabled and local_enabled %}
+{% if (github_enabled or oidc_enabled) and local_enabled %}
 <p class="auth-divider"><span>or</span></p>
 {%- endif %}
 
@@ -41,11 +48,12 @@
   <button type="submit" class="btn btn--primary">Sign in</button>
 </form>
 <p class="auth-hint">Local-account login. Configured users only.</p>
-{%- elif not github_enabled %}
+{%- elif not github_enabled and not oidc_enabled %}
 <p class="auth-error">
-  No login methods configured. Set <code>WM_GITHUB_CLIENT_ID</code>
-  (with allow rules) or <code>WM_LOCAL_AUTH</code> plus
-  <code>SESSION_SECRET</code> to enable login.
+  No login methods configured. Set <code>WM_OIDC_ISSUER</code> or
+  <code>WM_GITHUB_CLIENT_ID</code> (with allow rules) or
+  <code>WM_LOCAL_AUTH</code> plus <code>SESSION_SECRET</code> to
+  enable login.
 </p>
 {%- endif %}
 </main>

@@ -179,17 +179,18 @@ All configuration is via environment variables — no config file. The host
 fails fast on missing required values rather than silently falling back, so
 a misconfigured deploy surfaces at startup, not on the first failed request.
 
-Authentication splits into **three independent paths** that can be enabled
+Authentication splits into **four independent paths** that can be enabled
 in any combination:
 
 | Path | Used by | Required env vars |
 |---|---|---|
 | **API tokens (bearer)** | `wm` CLI, MCP server, scripts, agents | `WM_BOOTSTRAP_TOKEN` (first start) |
+| **OIDC** | Browser users with any OIDC IdP (Pocket ID, Keycloak, Authentik, Okta, ...) | `WM_OIDC_ISSUER`, `WM_OIDC_CLIENT_ID`, `WM_OIDC_CLIENT_SECRET`, at least one `WM_OIDC_ALLOW_*` rule, `SESSION_SECRET` |
 | **GitHub OAuth** | Browser users | `WM_GITHUB_CLIENT_ID`, `WM_GITHUB_CLIENT_SECRET`, `WM_GITHUB_ALLOW_USERS` and/or `WM_GITHUB_ALLOW_ORGS`, `SESSION_SECRET` |
 | **Local password** | Testing / trusted-network only (ADR-0018) | `WM_LOCAL_AUTH`, `SESSION_SECRET` |
 
-API tokens always work. GitHub OAuth and local password are independent —
-enable either, both, or neither. Mock traffic (everything not under a
+API tokens always work. The three browser-login paths are independent —
+enable any combination, or none. Mock traffic (everything not under a
 reserved `/api/`, `/ui/`, `/auth/` prefix) is always unauthenticated by
 design — SUTs don't have credentials.
 
@@ -248,9 +249,9 @@ bootstrap user still exists*.
 The host **refuses to start** when no users exist AND no login method is
 configured at all — that prevents a fresh deployment from coming up
 unreachable. "Login method configured" means *any* of: `WM_BOOTSTRAP_TOKEN`
-is set, `WM_LOCAL_AUTH` is non-empty, or GitHub OAuth is configured. So a
-deployment that wires up GitHub OAuth from day one (allow-list and admin
-list both populated) doesn't need a bootstrap token — the first GitHub
+is set, `WM_LOCAL_AUTH` is non-empty, or GitHub OAuth / OIDC is configured.
+So a deployment that wires up OAuth from day one (allow-list and admin
+list both populated) doesn't need a bootstrap token — the first browser
 login provisions the first user.
 
 Generate one with `openssl rand -hex 32` (prefix with `wmt_` to match the
@@ -268,6 +269,66 @@ the env var stays set after you delete the bootstrap user, the *next*
 host restart silently re-creates it with the same token. Always unset the
 env var when retiring the bootstrap user; treat the two as a paired
 operation.
+
+### Browser login — OIDC (any standards-compliant IdP)
+
+One generic OIDC client covers every compliant provider — Pocket ID,
+Keycloak, Authentik, Authelia, Zitadel, Dex, Okta, Auth0, Google,
+Microsoft Entra (ADR-0035). Everything is driven by the issuer's
+discovery document; there is no per-provider code or configuration
+beyond the env vars below.
+
+At the IdP, register a **confidential** OAuth/OIDC client (WireMirage
+authenticates with a client secret) with the callback / redirect URI
+`https://wm.example.com/auth/callback/oidc` — exact match, including the
+path. PKCE (S256) is always sent; leave it enabled or required at the
+IdP.
+
+Then set on the host:
+
+- `WM_OIDC_ISSUER` — the issuer URL, e.g. `https://id.example.com`. Must be
+  *exactly* what the IdP advertises in its discovery document
+  (`{issuer}/.well-known/openid-configuration`) — the host fetches that
+  document at startup and refuses to start on a mismatch or an unreachable
+  IdP, so a bad URL surfaces at deploy time rather than as a broken login.
+- `WM_OIDC_CLIENT_ID` / `WM_OIDC_CLIENT_SECRET` — the registered client's
+  credentials. Both or neither; treat the secret as a credential.
+- Allow rules — **at least one required** (they OR together):
+  - `WM_OIDC_ALLOW_EMAILS` — comma-separated exact emails.
+  - `WM_OIDC_ALLOW_DOMAINS` — comma-separated email domains
+    (`kindly.example` allows `anyone@kindly.example`).
+  - `WM_OIDC_ALLOW_GROUPS` — comma-separated group names, matched against
+    the IdP's groups claim. Emails marked `email_verified: false` by the
+    IdP never satisfy the email/domain rules.
+- `WM_OIDC_ADMIN_EMAILS` / `WM_OIDC_ADMIN_GROUPS` — optional; matching
+  users are promoted to admin on login (and demoted on next login if
+  removed, same contract as the other login paths).
+- `WM_OIDC_DISPLAY_NAME` — optional login-button label (e.g. `Pocket ID`);
+  defaults to the issuer's hostname.
+- `WM_OIDC_GROUPS_CLAIM` — optional; the claim carrying group membership
+  (default `groups`). The groups claim is the one non-standardized corner
+  of OIDC — most self-hosted IdPs call it `groups`, but check yours.
+- `WM_OIDC_EXTRA_SCOPES` — optional extra scopes appended to
+  `openid profile email` (some IdPs only include the groups claim when a
+  dedicated scope is requested).
+- `SESSION_SECRET` — as under GitHub OAuth below.
+
+Usernames come from the IdP's `preferred_username` claim, falling back to
+the email's local part. Identity is keyed on the stable `sub` claim, so a
+username or email change at the IdP doesn't create a duplicate WireMirage
+user.
+
+Example — Pocket ID: create the OIDC client in Pocket ID's admin UI
+(callback URL as above), then:
+
+```sh
+WM_OIDC_ISSUER=https://id.example.com \
+WM_OIDC_CLIENT_ID=... WM_OIDC_CLIENT_SECRET=... \
+WM_OIDC_ALLOW_GROUPS=wiremirage \
+WM_OIDC_ADMIN_GROUPS=wiremirage-admins \
+SESSION_SECRET=$(openssl rand -base64 48) \
+  wm-host
+```
 
 ### Browser login — GitHub OAuth (recommended for production)
 

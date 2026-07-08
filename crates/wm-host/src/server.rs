@@ -183,6 +183,11 @@ pub struct AppState {
     /// `/auth/start/github` + `/auth/callback` routes respond
     /// 503. Kept behind `Arc` so cloning `AppState` shares it.
     github_oauth: Option<Arc<crate::github_oauth::GitHubConfig>>,
+    /// Generic OIDC provider (ADR-0035), populated when `WM_OIDC_ISSUER`
+    /// is set and discovery succeeded at startup. `None` means the login
+    /// page hides the OIDC button and the `/auth/start/oidc` +
+    /// `/auth/callback/oidc` routes respond 503.
+    oidc: Option<Arc<crate::oidc::OidcProvider>>,
     /// Outbound-callback egress policy (ADR-0034). Default `disabled()` —
     /// callbacks are off unless the operator sets `WM_EGRESS`. Behind an
     /// `Arc` so cloning `AppState` (per request) is cheap and the firing
@@ -212,6 +217,7 @@ impl AppState {
             mcp_allowed_hosts: Vec::new(),
             apex_host: "localhost".to_string(),
             github_oauth: None,
+            oidc: None,
             egress: Arc::new(crate::egress::EgressPolicy::disabled()),
         }
     }
@@ -294,6 +300,11 @@ impl AppState {
         self
     }
 
+    pub fn with_oidc(mut self, provider: crate::oidc::OidcProvider) -> Self {
+        self.oidc = Some(Arc::new(provider));
+        self
+    }
+
     pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
     }
@@ -320,6 +331,10 @@ impl AppState {
 
     pub fn github_oauth(&self) -> Option<&crate::github_oauth::GitHubConfig> {
         self.github_oauth.as_deref()
+    }
+
+    pub fn oidc(&self) -> Option<&crate::oidc::OidcProvider> {
+        self.oidc.as_deref()
     }
 
     pub fn login_throttle(&self) -> &crate::login_throttle::LoginThrottle {
