@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(
             issuer = %provider.config.issuer,
             display_name = %provider.config.display_name,
+            allow_all = provider.config.allow_all,
             allow_emails = provider.config.allow_emails.len(),
             allow_domains = provider.config.allow_domains.len(),
             allow_groups = provider.config.allow_groups.len(),

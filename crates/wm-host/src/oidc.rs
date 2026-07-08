@@ -15,12 +15,13 @@
 //!
 //! Configuration is env-only, fail-fast on partial config (mirrors
 //! [`crate::github_oauth`]): `WM_OIDC_ISSUER` + `WM_OIDC_CLIENT_ID` +
-//! `WM_OIDC_CLIENT_SECRET`, at least one allow rule
-//! (`WM_OIDC_ALLOW_EMAILS` / `WM_OIDC_ALLOW_DOMAINS` /
-//! `WM_OIDC_ALLOW_GROUPS`), optional admin promotion
-//! (`WM_OIDC_ADMIN_EMAILS` / `WM_OIDC_ADMIN_GROUPS`), plus
-//! `WM_OIDC_DISPLAY_NAME`, `WM_OIDC_GROUPS_CLAIM`, and
-//! `WM_OIDC_EXTRA_SCOPES` knobs.
+//! `WM_OIDC_CLIENT_SECRET`, an allow posture — `WM_OIDC_ALLOW_ALL=true`
+//! (private IdP: the issuer's user base is the allow-list) or at least
+//! one per-identity rule (`WM_OIDC_ALLOW_EMAILS` /
+//! `WM_OIDC_ALLOW_DOMAINS` / `WM_OIDC_ALLOW_GROUPS`), never both —
+//! optional admin promotion (`WM_OIDC_ADMIN_EMAILS` /
+//! `WM_OIDC_ADMIN_GROUPS`), plus `WM_OIDC_DISPLAY_NAME`,
+//! `WM_OIDC_GROUPS_CLAIM`, and `WM_OIDC_EXTRA_SCOPES` knobs.
 
 use std::env;
 use std::time::Duration;
@@ -43,6 +44,15 @@ pub struct OidcConfig {
     /// Login-button label, e.g. "Pocket ID". Defaults to the issuer's
     /// host so an unconfigured label is still meaningful.
     pub display_name: String,
+    /// Every user the issuer authenticates is allowed — the right
+    /// posture for a *private* IdP (Pocket ID, closed-registration
+    /// Keycloak, corporate Okta) where account existence already IS
+    /// the authorization decision, and per-app restrictions live in
+    /// the IdP. Explicit opt-in; mutually exclusive with the
+    /// per-identity rules below so the config states one intent.
+    /// Never set this against a public issuer (Google, ...) — there
+    /// "authenticated" means anyone on the internet.
+    pub allow_all: bool,
     /// Exact emails allowed to log in. OR'd with the other allow rules.
     pub allow_emails: Vec<String>,
     /// Email domains allowed to log in (matched against the part
@@ -96,6 +106,7 @@ impl OidcConfig {
             client_id: env::var("WM_OIDC_CLIENT_ID").ok(),
             client_secret: env::var("WM_OIDC_CLIENT_SECRET").ok(),
             display_name: env::var("WM_OIDC_DISPLAY_NAME").ok(),
+            allow_all: env::var("WM_OIDC_ALLOW_ALL").ok(),
             allow_emails: env::var("WM_OIDC_ALLOW_EMAILS").unwrap_or_default(),
             allow_domains: env::var("WM_OIDC_ALLOW_DOMAINS").unwrap_or_default(),
             allow_groups: env::var("WM_OIDC_ALLOW_GROUPS").unwrap_or_default(),
@@ -147,16 +158,44 @@ impl OidcConfig {
             }
         };
 
+        let allow_all = match values.allow_all.as_deref() {
+            None | Some("") => false,
+            Some(v)
+                if v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("on") =>
+            {
+                true
+            }
+            Some(other) => {
+                return Err(anyhow!(
+                    "WM_OIDC_ALLOW_ALL must be true/1/on (or unset), got {other:?}"
+                ));
+            }
+        };
         let allow_emails = parse_csv(&values.allow_emails);
         let allow_domains = parse_csv(&values.allow_domains);
         let allow_groups = parse_csv(&values.allow_groups);
-        if allow_emails.is_empty() && allow_domains.is_empty() && allow_groups.is_empty() {
+        let has_identity_rules =
+            !allow_emails.is_empty() || !allow_domains.is_empty() || !allow_groups.is_empty();
+        if allow_all && has_identity_rules {
+            // Redundant config usually means the operator thinks the
+            // per-identity rules still restrict something. State one
+            // intent or the other.
+            return Err(anyhow!(
+                "WM_OIDC_ALLOW_ALL=true admits every user the issuer authenticates, \
+                 which makes WM_OIDC_ALLOW_EMAILS/_DOMAINS/_GROUPS meaningless. \
+                 Set either WM_OIDC_ALLOW_ALL or the per-identity rules, not both."
+            ));
+        }
+        if !allow_all && !has_identity_rules {
             return Err(anyhow!(
                 "OIDC login is configured but no allow rules are set. \
                  Set WM_OIDC_ALLOW_EMAILS=a@x.com,b@x.com and/or \
-                 WM_OIDC_ALLOW_DOMAINS=x.com and/or WM_OIDC_ALLOW_GROUPS=team; \
-                 without one, no account can log in (refusing to start so this \
-                 misconfiguration surfaces fast rather than silently denying every login)."
+                 WM_OIDC_ALLOW_DOMAINS=x.com and/or WM_OIDC_ALLOW_GROUPS=team — \
+                 or WM_OIDC_ALLOW_ALL=true if this is a private IdP whose whole \
+                 user base should be allowed (account existence as the \
+                 authorization decision). Without one, no account can log in \
+                 (refusing to start so this misconfiguration surfaces fast \
+                 rather than silently denying every login)."
             ));
         }
 
@@ -170,6 +209,7 @@ impl OidcConfig {
             client_id,
             client_secret,
             display_name,
+            allow_all,
             allow_emails,
             allow_domains,
             allow_groups,
@@ -347,6 +387,11 @@ impl OidcProvider {
     /// least one rule; `Err` with a reason that names what the user
     /// *does* have, so an operator reading logs can fix the rule.
     pub fn check_allow(&self, identity: &OidcIdentity) -> Result<(), AllowFailure> {
+        if self.config.allow_all {
+            // Private-IdP posture: the issuer's user base is the
+            // allow-list; per-app restrictions live in the IdP.
+            return Ok(());
+        }
         if let Some(email) = &identity.email {
             let email_lc = email.to_ascii_lowercase();
             if self
@@ -418,6 +463,7 @@ struct EnvValues {
     client_id: Option<String>,
     client_secret: Option<String>,
     display_name: Option<String>,
+    allow_all: Option<String>,
     allow_emails: String,
     allow_domains: String,
     allow_groups: String,
@@ -602,6 +648,7 @@ mod tests {
             client_id: "cid".into(),
             client_secret: "csec".into(),
             display_name: "Example ID".into(),
+            allow_all: false,
             allow_emails: vec!["alice@corp.example".into()],
             allow_domains: vec!["kindly.example".into()],
             allow_groups: vec!["mockers".into()],
@@ -692,6 +739,21 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("eve@other.example"), "{msg}");
         assert!(msg.contains("randos"), "{msg}");
+    }
+
+    #[test]
+    fn allow_all_admits_any_identity() {
+        let mut c = cfg();
+        c.allow_all = true;
+        c.allow_emails.clear();
+        c.allow_domains.clear();
+        c.allow_groups.clear();
+        let p = provider(c);
+        assert!(p.check_allow(&identity(None, vec![])).is_ok());
+        assert!(
+            p.check_allow(&identity(Some("anyone@anywhere.example"), vec![]))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -812,6 +874,47 @@ mod tests {
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("WM_OIDC_ALLOW_"), "{msg}");
+    }
+
+    #[test]
+    fn from_env_accepts_allow_all_alone() {
+        let cfg = OidcConfig::from_env_values(EnvValues {
+            issuer: Some("https://id.example.com".into()),
+            client_id: Some("x".into()),
+            client_secret: Some("y".into()),
+            allow_all: Some("true".into()),
+            ..EnvValues::default()
+        })
+        .unwrap()
+        .unwrap();
+        assert!(cfg.allow_all);
+    }
+
+    #[test]
+    fn from_env_rejects_allow_all_combined_with_identity_rules() {
+        let err = OidcConfig::from_env_values(EnvValues {
+            issuer: Some("https://id.example.com".into()),
+            client_id: Some("x".into()),
+            client_secret: Some("y".into()),
+            allow_all: Some("true".into()),
+            allow_domains: "kindly.example".into(),
+            ..EnvValues::default()
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not both"));
+    }
+
+    #[test]
+    fn from_env_rejects_garbage_allow_all_value() {
+        let err = OidcConfig::from_env_values(EnvValues {
+            issuer: Some("https://id.example.com".into()),
+            client_id: Some("x".into()),
+            client_secret: Some("y".into()),
+            allow_all: Some("banana".into()),
+            ..EnvValues::default()
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("WM_OIDC_ALLOW_ALL"));
     }
 
     #[test]

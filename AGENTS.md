@@ -625,10 +625,12 @@ ADR-0035 added **generic OIDC browser login** — one relying-party
 module (`crates/wm-host/src/oidc.rs`) covers every OIDC-compliant IdP
 (Pocket ID, Keycloak, Authentik, Zitadel, Dex, Okta, Google, ...);
 GitHub remains the only hand-rolled non-OIDC adapter. Configured
-entirely by env (`WM_OIDC_ISSUER` + `WM_OIDC_CLIENT_ID/_SECRET`, at
-least one of `WM_OIDC_ALLOW_EMAILS`/`_ALLOW_DOMAINS`/`_ALLOW_GROUPS`,
-optional `_ADMIN_EMAILS`/`_ADMIN_GROUPS`/`_DISPLAY_NAME`/
-`_GROUPS_CLAIM`/`_EXTRA_SCOPES`); endpoints come from the issuer's
+entirely by env (`WM_OIDC_ISSUER` + `WM_OIDC_CLIENT_ID/_SECRET`, an
+allow posture — `WM_OIDC_ALLOW_ALL=true` for private IdPs where the
+issuer's user base IS the allow-list, or per-identity
+`WM_OIDC_ALLOW_EMAILS`/`_ALLOW_DOMAINS`/`_ALLOW_GROUPS`; both at once
+refuses startup — plus optional `_ADMIN_EMAILS`/`_ADMIN_GROUPS`/
+`_DISPLAY_NAME`/`_GROUPS_CLAIM`/`_EXTRA_SCOPES`); endpoints come from the issuer's
 discovery document, fetched fail-fast at startup (issuer-mismatch =
 refuse to start). Code flow + PKCE (S256) at `/auth/start/oidc` →
 `/auth/callback/oidc`; identity from the **userinfo endpoint** (no
