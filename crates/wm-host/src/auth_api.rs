@@ -468,6 +468,10 @@ async fn github_callback(
         "github",
         &identity.id.to_string(),
         &identity.login,
+        // The primary verified email (github_oauth::assemble picks
+        // verified entries first; an unverified-only account yields
+        // None) — the cross-provider linking key.
+        identity.email.as_deref(),
         is_admin,
     ) {
         Ok(u) => u,
@@ -475,8 +479,12 @@ async fn github_callback(
             return (
                 StatusCode::CONFLICT,
                 format!(
-                    "GitHub login {n:?} collides with an existing local user. \
-                     Rename or delete the local user, then re-try login."
+                    "GitHub login {n:?} collides with an existing user with a \
+                     different (or no) verified email. If both accounts are \
+                     yours, give them the same email at both providers and log \
+                     in with the existing account's provider once so its email \
+                     is on record; otherwise an admin can delete the colliding \
+                     user."
                 ),
             )
                 .into_response();
@@ -705,17 +713,26 @@ async fn oidc_callback(
     };
 
     let is_admin = oidc.is_admin(&identity);
-    let user = match state
-        .auth()
-        .upsert_oauth_user("oidc", &identity.subject, &username, is_admin)
-    {
+    let user = match state.auth().upsert_oauth_user(
+        "oidc",
+        &identity.subject,
+        &username,
+        // Already verified-filtered: OidcIdentity drops emails the
+        // IdP marked email_verified=false.
+        identity.email.as_deref(),
+        is_admin,
+    ) {
         Ok(u) => u,
         Err(crate::auth::AuthError::NameTaken(n)) => {
             return (
                 StatusCode::CONFLICT,
                 format!(
-                    "OIDC login {n:?} collides with an existing user. \
-                     Rename or delete that user, then re-try login."
+                    "OIDC login {n:?} collides with an existing user with a \
+                     different (or no) verified email. If both accounts are \
+                     yours, give them the same email at both providers and log \
+                     in with the existing account's provider once so its email \
+                     is on record; otherwise an admin can delete the colliding \
+                     user."
                 ),
             )
                 .into_response();

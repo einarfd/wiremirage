@@ -29,6 +29,7 @@ use reqwest::Client;
 use reqwest::redirect::Policy;
 use serde_json::json;
 use wm_host::auth::Auth;
+use wm_host::github_oauth::{GitHubConfig, GitHubEndpoints};
 use wm_host::journal::Journal;
 use wm_host::oidc::OidcConfig;
 use wm_host::registry::Registry;
@@ -425,6 +426,155 @@ async fn callback_surfaces_idp_error() {
     assert_eq!(cb.status(), 401);
     let body = cb.text().await.unwrap_or_default();
     assert!(body.contains("access_denied"), "names the error: {body}");
+}
+
+/// Cross-provider identity linking (user-model.md): the same human
+/// logging in via GitHub and via OIDC — different providers, different
+/// usernames, same verified email — lands in ONE WireMirage account.
+#[tokio::test]
+async fn github_and_oidc_logins_link_to_one_user_by_email() {
+    // Mock GitHub returning login "einarw" with the same verified
+    // email the mock OIDC issuer uses ("einar@kindly.example").
+    async fn gh_token() -> impl axum::response::IntoResponse {
+        axum::Json(json!({ "access_token": "gh_tok", "token_type": "bearer" }))
+    }
+    async fn gh_user() -> impl axum::response::IntoResponse {
+        axum::Json(json!({ "id": 4242, "login": "einarw", "name": "Einar W" }))
+    }
+    async fn gh_emails() -> impl axum::response::IntoResponse {
+        axum::Json(json!([
+            { "email": "einar@kindly.example", "primary": true, "verified": true }
+        ]))
+    }
+    let gh_app = Router::new()
+        .route("/login/oauth/access_token", post(gh_token))
+        .route("/user", get(gh_user))
+        .route("/user/emails", get(gh_emails));
+    let gh_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock github");
+    let gh_base = format!("http://{}", gh_listener.local_addr().unwrap());
+    let gh_server = tokio::spawn(async move {
+        axum::serve(gh_listener, gh_app).await.expect("gh serve");
+    });
+
+    let mock_issuer = start_mock_issuer(einar_claims(), None).await;
+    let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    let journal = Journal::new(storage.clone());
+    let provider = config_for(&mock_issuer.base)
+        .discover()
+        .await
+        .expect("discovery");
+    let github = GitHubConfig {
+        client_id: "cid".into(),
+        client_secret: "csec".into(),
+        allow_users: vec!["einarw".into()],
+        allow_orgs: vec![],
+        admin_users: vec![],
+        endpoints: GitHubEndpoints {
+            authorize_url: format!("{gh_base}/login/oauth/authorize"),
+            token_url: format!("{gh_base}/login/oauth/access_token"),
+            api_base_url: gh_base,
+        },
+    };
+    let state = AppState::new(runtime, routes, auth, journal)
+        .with_sessions(SessionStore::new(storage, SECRET).expect("session store"))
+        .with_github_oauth(github)
+        .with_oidc(provider);
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind host");
+    let addr = listener.local_addr().unwrap().to_string();
+    let host_server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let h_url = |p: &str| format!("http://{addr}{p}");
+    let client = no_redirect_client();
+
+    // Login 1: GitHub. Provisions the user (name einarw) and stores
+    // the verified email as primary_email.
+    let start = client
+        .get(h_url("/auth/start/github"))
+        .send()
+        .await
+        .expect("gh start");
+    let loc = start.headers()["location"].to_str().unwrap();
+    let gh_state = reqwest::Url::parse(loc)
+        .unwrap()
+        .query_pairs()
+        .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+        .unwrap();
+    let cb = client
+        .get(h_url(&format!("/auth/callback?code=x&state={gh_state}")))
+        .send()
+        .await
+        .expect("gh callback");
+    assert_eq!(cb.status(), 303, "github login succeeds");
+    let gh_cookie = pick_cookie_value(&cb, COOKIE_NAME).expect("gh session");
+    let me: serde_json::Value = client
+        .get(h_url("/api/users/me"))
+        .header("cookie", format!("{COOKIE_NAME}={gh_cookie}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let github_user_id = me["id"].as_str().unwrap().to_string();
+    assert_eq!(me["name"], "einarw");
+    assert_eq!(me["primary_email"], "einar@kindly.example");
+
+    // Login 2: OIDC, different provider and different username
+    // ("einar" via preferred_username) but the same verified email —
+    // must land in the SAME account.
+    let start = client
+        .get(h_url("/auth/start/oidc"))
+        .send()
+        .await
+        .expect("oidc start");
+    let loc = start.headers()["location"].to_str().unwrap();
+    let oidc_state = reqwest::Url::parse(loc)
+        .unwrap()
+        .query_pairs()
+        .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+        .unwrap();
+    let cb = client
+        .get(h_url(&format!(
+            "/auth/callback/oidc?code=x&state={oidc_state}"
+        )))
+        .send()
+        .await
+        .expect("oidc callback");
+    assert_eq!(
+        cb.status(),
+        303,
+        "oidc login links instead of colliding; body: {}",
+        cb.text().await.unwrap_or_default()
+    );
+    let oidc_cookie = pick_cookie_value(&cb, COOKIE_NAME).expect("oidc session");
+    let me: serde_json::Value = client
+        .get(h_url("/api/users/me"))
+        .header("cookie", format!("{COOKIE_NAME}={oidc_cookie}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        me["id"].as_str().unwrap(),
+        github_user_id,
+        "both providers resolve to one user"
+    );
+    assert_eq!(me["name"], "einarw", "original name kept");
+
+    host_server.abort();
+    gh_server.abort();
 }
 
 #[tokio::test]
