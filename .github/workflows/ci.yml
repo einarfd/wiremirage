@@ -41,8 +41,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ci-setup
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+
       - name: Test (host)
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --profile ci
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Test (Valkey-backed, tier-3)
         # Spins up real `valkey/valkey:9` containers via testcontainers-rs.
         # GitHub-hosted runners have Docker available; ryuk reaps stragglers.
