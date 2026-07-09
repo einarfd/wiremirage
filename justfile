@@ -17,14 +17,22 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Run tests with nextest. Parallel test binaries give ~27% speedup over
+# `cargo test` on this workspace (2:50 → 2:04 measured). Requires
+# `cargo-nextest` installed (`cargo install cargo-nextest --locked`).
+# Valkey/Docker tier-3 tests are excluded — those use a shared container
+# via OnceLock that breaks under nextest's process-per-test model; use
+# `just test-valkey` (still on `cargo test`) for those.
 test:
-    cargo test --workspace
+    cargo nextest run --workspace
 
 # Tier-3: real Valkey container via testcontainers-rs. Needs Docker.
-# Reaps stragglers on exit — testcontainers-rs 0.27 has no ryuk
-# integration, and the shared `OnceLock<SharedValkey>` in
-# `valkey_storage.rs` leaks at process exit because Rust doesn't run
-# Drop on statics. The label filter only matches containers
+# Uses `cargo test` (not nextest) because the shared `OnceLock<SharedValkey>`
+# pattern boots one container for the whole test binary — nextest's
+# process-per-test model would spawn one container per test (~35x startup
+# cost). Reaps stragglers on exit — testcontainers-rs 0.27 has no ryuk
+# integration, and the `OnceLock` leaks at process exit because Rust
+# doesn't run Drop on statics. The label filter only matches containers
 # testcontainers itself spawned, so the dev compose stack
 # (`docker compose up`) is left alone.
 test-valkey:
