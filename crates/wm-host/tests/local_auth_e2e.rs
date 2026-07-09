@@ -282,7 +282,11 @@ async fn logout_invalidates_the_cookie() {
         .send()
         .await
         .expect("logout");
-    assert_eq!(logout.status().as_u16(), 204);
+    assert_eq!(logout.status().as_u16(), 303, "logout redirects to login");
+    assert_eq!(
+        logout.headers()["location"].to_str().unwrap(),
+        "/auth/login?signed_out=1"
+    );
 
     // Subsequent call with the now-invalidated cookie → 401.
     let after = client

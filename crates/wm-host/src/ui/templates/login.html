@@ -10,6 +10,10 @@
 <main class="auth-card">
 <h1 class="auth-title">Sign in to WireMirage</h1>
 
+{% if signed_out %}
+<p class="auth-notice" role="status">You have been signed out.</p>
+{%- endif %}
+
 {% if oidc_enabled %}
 <a class="btn btn--primary auth-oauth-btn"
    href="/auth/start/oidc{% if next %}?next={{ next }}{% endif %}">

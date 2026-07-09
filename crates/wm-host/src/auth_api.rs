@@ -66,6 +66,8 @@ struct LoginPageQuery {
     /// `/ui/*` navigation. Validated as host-relative when the
     /// form posts (see `password_login`).
     next: Option<String>,
+    /// Set by the logout redirect; renders a "signed out" notice.
+    signed_out: Option<String>,
 }
 
 async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuery>) -> Response {
@@ -84,6 +86,7 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
     let next = q
         .next
         .filter(|n| n.starts_with('/') && !n.starts_with("//"));
+    let signed_out = q.signed_out.is_some();
     crate::ui::render(
         &state,
         "login.html",
@@ -93,6 +96,7 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
             oidc_enabled => oidc_enabled,
             oidc_display_name => oidc_display_name,
             next => next,
+            signed_out => signed_out,
             error => Option::<String>::None,
         },
     )
@@ -226,7 +230,10 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     {
         let _ = sessions.delete_by_cookie(&cookie);
     }
-    let mut resp = StatusCode::NO_CONTENT.into_response();
+    // Industry-standard logout shape: redirect to the login page with
+    // a signed-out notice, rather than a bare 204 that leaves the
+    // browser sitting on a page it's no longer authorized for.
+    let mut resp: Response = Redirect::to("/auth/login?signed_out=1").into_response();
     // The clear-cookie response carries the same attributes as the
     // mint-cookie response so browsers don't keep a `Secure` cookie
     // alive thinking it's a different cookie. `Max-Age=0` is what
