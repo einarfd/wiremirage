@@ -1,0 +1,23 @@
+# nextest configuration for wiremirage.
+# See: https://nexte.st/docs/configuration
+
+[store]
+# Keep test artifacts between runs for faster re-test cycles.
+dir = "target/nextest"
+
+# ── Default profile ──────────────────────────────────────────────────────────
+# Used by `cargo nextest run`. The CI profile below inherits from this.
+
+[profile.default]
+# Parallel test binaries are the main win over `cargo test` — don't
+# artificially limit them.
+test-threads = "num-cpus"
+# Process-per-test isolation is nextest's default; keep it.
+
+# ── CI profile ───────────────────────────────────────────────────────────────
+# Inherits from default. Use with: cargo nextest run --profile ci
+# Writes JUnit XML to target/nextest/ci/junit.xml for CI integration.
+
+[profile.ci]
+[profile.ci.junit]
+path = "junit.xml"
