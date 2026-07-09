@@ -440,7 +440,7 @@ impl FromRequestParts<AppState> for AuthContext {
                 .map_err(|_| ApiError::unauthorized("session refers to a deleted user"))?;
             return Ok(AuthContext {
                 user_id: user.id,
-                user_name: user.name,
+                user_email: user.email,
                 is_admin: user.is_admin,
                 credential_kind: crate::auth::CredentialKind::Session,
                 credential_id: session.id,
@@ -1358,7 +1358,7 @@ async fn patch_token(
 
 #[derive(Debug, Deserialize)]
 struct CreateUserBody {
-    name: String,
+    email: String,
     #[serde(default)]
     is_admin: bool,
 }
@@ -1371,11 +1371,11 @@ struct PatchUserBody {
 #[derive(Debug, Serialize)]
 struct UserRecord {
     id: String,
-    name: String,
-    /// The verified email used as the cross-provider identity-linking
-    /// key (user-model.md). `null` for bootstrap/local users and
-    /// records that predate the field.
-    primary_email: Option<String>,
+    /// The account identifier and cross-provider identity-linking key
+    /// (user-model.md): a verified email. Legacy records that predate
+    /// email-only identity surface their old name handle here until a
+    /// login/bootstrap backfills the real email.
+    email: String,
     is_admin: bool,
     created_at: String,
 }
@@ -1384,8 +1384,7 @@ impl From<&User> for UserRecord {
     fn from(u: &User) -> Self {
         Self {
             id: u.id.clone(),
-            name: u.name.clone(),
-            primary_email: u.primary_email.clone(),
+            email: u.email.clone(),
             is_admin: u.is_admin,
             created_at: u.created_at.to_rfc3339(),
         }
@@ -1411,10 +1410,13 @@ async fn create_user(
     Json(body): Json<CreateUserBody>,
 ) -> Result<Response, ApiError> {
     require_admin(&auth)?;
-    if body.name.trim().is_empty() {
-        return Err(ApiError::validation("user name must not be empty"));
+    let email = body.email.trim();
+    if email.is_empty() || !email.contains('@') {
+        return Err(ApiError::validation(
+            "user email must be a non-empty email address",
+        ));
     }
-    let user = state.auth().create_user(&body.name, body.is_admin)?;
+    let user = state.auth().create_user(email, body.is_admin)?;
     Ok((StatusCode::CREATED, Json(UserRecord::from(&user))).into_response())
 }
 
@@ -1443,7 +1445,7 @@ async fn get_user(
 ) -> Result<Json<UserRecord>, ApiError> {
     let user = state
         .auth()
-        .get_user_by_selector(&selector)?
+        .get_user_by_email(&selector)?
         .ok_or_else(ApiError::not_found)?;
     if !auth.is_admin && user.id != auth.user_id {
         return Err(ApiError::forbidden(
@@ -1462,7 +1464,7 @@ async fn patch_user(
     require_admin(&auth)?;
     let user = state
         .auth()
-        .get_user_by_selector(&selector)?
+        .get_user_by_email(&selector)?
         .ok_or_else(ApiError::not_found)?;
     let Some(target_admin) = body.is_admin else {
         // Nothing to patch right now — only `is_admin` is supported. A
@@ -1489,7 +1491,7 @@ async fn delete_user(
     require_admin(&auth)?;
     let user = state
         .auth()
-        .get_user_by_selector(&selector)?
+        .get_user_by_email(&selector)?
         .ok_or_else(ApiError::not_found)?;
     if user.id == auth.user_id {
         return Err(ApiError::forbidden(

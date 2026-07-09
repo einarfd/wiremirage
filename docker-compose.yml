@@ -11,13 +11,14 @@
 #
 #   docker compose up -d
 #   WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+#     WM_BOOTSTRAP_EMAIL=admin@local \
 #     WM_STORAGE=redis://localhost:6379 \
 #     cargo run -p wm-host
 #
 # Quickstart — full stack (Valkey + host both in compose), pulling the
 # published image:
 #
-#   WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+#   WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_BOOTSTRAP_EMAIL=admin@local \
 #     docker compose --profile full up -d
 #
 # Build the host image from source instead (testing a local change to the

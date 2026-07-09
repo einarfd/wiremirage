@@ -53,15 +53,17 @@ fn no_redirect_client() -> Client {
 async fn start() -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
-    auth.create_user("admin", true).expect("admin");
-    auth.create_user("alice", false).expect("alice");
+    auth.create_user("admin@test.example", true).expect("admin");
+    auth.create_user("alice@test.example", false)
+        .expect("alice");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
     let state = AppState::new(runtime, routes, auth, journal)
         .with_local_auth(
-            LocalAuth::parse("admin:devpassword:admin,alice:devpassword").expect("auth"),
+            LocalAuth::parse("admin@test.example:devpassword:admin,alice@test.example:devpassword")
+                .expect("auth"),
         )
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
     let app = router(state);
@@ -94,7 +96,7 @@ async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
-            "_csrf={csrf_value}&username={user}&password=devpassword"
+            "_csrf={csrf_value}&email={user}%40test.example&password=devpassword"
         ))
         .send()
         .await

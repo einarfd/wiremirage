@@ -145,13 +145,16 @@ Bearer tokens gate every `/api/*` endpoint. Mock-traffic dispatch
 don't have tokens. The unauthenticated probes `GET /health` and
 `GET /ready` are explicitly public.
 
-- **Bootstrap.** On first startup, set `WM_BOOTSTRAP_TOKEN=wmt_...`. The
-  host creates an admin user named `bootstrap` whose API token is the
-  supplied plaintext. Subsequent starts with the same env var are
-  no-ops; rotate by deleting the bootstrap user or revoking via
-  `/api/tokens`. The host **refuses to start** if no users exist and
-  `WM_BOOTSTRAP_TOKEN` is unset — this prevents a fresh deployment from
-  silently coming up with no way to authenticate.
+- **Bootstrap.** On first startup, set `WM_BOOTSTRAP_TOKEN=wmt_...` plus
+  `WM_BOOTSTRAP_EMAIL=<email>` (required together — accounts are keyed
+  by email). The host creates an admin user identified by that email
+  whose API token is the supplied plaintext; a browser login with the
+  same verified email later reaches the same account. Subsequent starts
+  with the same env vars are no-ops; a legacy pre-email `bootstrap`
+  record is adopted in place (gains the email, token keeps working).
+  Rotate by revoking via `/api/tokens`. The host **refuses to start**
+  if no users exist and no login method is configured — this prevents a
+  fresh deployment from silently coming up with no way to authenticate.
 - **Token shape.** Plaintext: `wmt_<base64-url-no-pad-of-32-random-bytes>`,
   per ADR-0012. Hashed at rest as SHA-256(plaintext); plaintext appears
   exactly once, in the response to `POST /api/tokens`.
@@ -1854,7 +1857,8 @@ end-to-end before the detail pages land.
 - **`just run-web`** convenience target: brings up Valkey via
   `docker compose up -d`, waits for it to be reachable, then runs
   the host locally with `WM_STORAGE=redis://localhost:6379`,
-  `WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword'`,
+  `WM_LOCAL_AUTH='admin@local:devpassword:admin,user@local:devpassword'`
+  + `WM_BOOTSTRAP_EMAIL=admin@local`,
   fixed `SESSION_SECRET`, then `cargo run -p wm-host`. Data
   persists across host restarts in the Valkey volume
   (`docker compose down -v` to wipe). Visit
@@ -1883,9 +1887,9 @@ whole purpose is to mint a session, and a session without a login
 method to mint it isn't useful.
 
 - **`crates/wm-host/src/local_auth.rs`** — parses
-  `WM_LOCAL_AUTH=alice:hunter2:admin,bob:pw,...` into a
-  `LocalAuth { username → { argon2id_hash, role } }` map. Fail-fast
-  on duplicate names, empty fields, or an unknown role. `verify()`
+  `WM_LOCAL_AUTH=alice@corp.example:hunter2:admin,bob@corp.example:pw,...`
+  into a `LocalAuth { email → { argon2id_hash, role } }` map. Fail-fast
+  on non-email identifiers, duplicates, empty fields, or an unknown role. `verify()`
   returns `Invalid` for both wrong-password and unknown-user — we
   don't distinguish, by design. argon2id chosen over bcrypt per
   OWASP guidance; ADR-0018's hashing-note section records the
@@ -1927,10 +1931,11 @@ method to mint it isn't useful.
 - **`AppState` extended** — gained `local_auth`, `sessions`
   (`Option`), and `login_throttle` fields with matching
   `with_local_auth`, `with_sessions` builders and read accessors.
-- **`Auth::upsert_local_user`** — first-login flow. Creates a user
-  if missing, or updates the existing `is_admin` flag to match the
-  env-var role (per ADR-0018: "Admin role lives in the env var").
-  Writes `user:by-identity:local:{username}` as the lookup index.
+- **`Auth::upsert_local_user`** — first-login flow. Links to an
+  existing account with the same email (or creates one), and syncs
+  the `is_admin` flag to match the env-var role (per ADR-0018:
+  "Admin role lives in the env var").
+  Writes `user:by-identity:local:{email}` as the lookup index.
 - **`main.rs` wiring** — `configure_local_auth` reads
   `WM_LOCAL_AUTH` + `SESSION_SECRET` after `AppState::new`. Both
   optional individually; setting `WM_LOCAL_AUTH` without

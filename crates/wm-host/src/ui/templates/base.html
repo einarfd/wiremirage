@@ -22,7 +22,7 @@
     </nav>
     {% if user %}
     <div class="app-user">
-      <span class="app-user__name">{{ user.name }}</span>
+      <span class="app-user__name">{{ user.email }}</span>
       {%- if user.is_admin %}<span class="badge badge--admin">admin</span>{% endif %}
       <form method="post" action="/auth/logout" class="logout-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">

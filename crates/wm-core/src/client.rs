@@ -556,12 +556,12 @@ impl Client {
         self.send(Method::GET, "/api/users", None::<&()>).await
     }
 
-    /// Show one user by name. Admin can see any user; non-admin can
+    /// Show one user by email. Admin can see any user; non-admin can
     /// see their own record only (the host enforces).
-    pub async fn get_user(&self, name: &str) -> Result<crate::models::UserRecord, ClientError> {
+    pub async fn get_user(&self, email: &str) -> Result<crate::models::UserRecord, ClientError> {
         self.send(
             Method::GET,
-            &format!("/api/users/{}", urlencode(name)),
+            &format!("/api/users/{}", urlencode(email)),
             None::<&()>,
         )
         .await
@@ -585,12 +585,12 @@ impl Client {
     /// Admin-only for cross-user updates.
     pub async fn patch_user(
         &self,
-        name: &str,
+        email: &str,
         body: &crate::models::PatchUserBody,
     ) -> Result<crate::models::UserRecord, ClientError> {
         self.send(
             Method::PATCH,
-            &format!("/api/users/{}", urlencode(name)),
+            &format!("/api/users/{}", urlencode(email)),
             Some(body),
         )
         .await
@@ -598,8 +598,8 @@ impl Client {
 
     /// Delete a user. Admin-only. The host refuses to delete the
     /// last admin or a user that owns routes.
-    pub async fn delete_user(&self, name: &str) -> Result<(), ClientError> {
-        self.send_no_body(Method::DELETE, &format!("/api/users/{}", urlencode(name)))
+    pub async fn delete_user(&self, email: &str) -> Result<(), ClientError> {
+        self.send_no_body(Method::DELETE, &format!("/api/users/{}", urlencode(email)))
             .await
     }
 

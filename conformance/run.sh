@@ -37,7 +37,8 @@ BASE="http://localhost:${PORT}"
 TOKEN="wmt_conformance_$$"
 
 # --- boot the host (native, in-memory) ---
-( cd "$ROOT" && WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" WM_LISTEN_ADDR="127.0.0.1:${PORT}" \
+( cd "$ROOT" && WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" \
+    WM_BOOTSTRAP_EMAIL=conformance@local WM_LISTEN_ADDR="127.0.0.1:${PORT}" \
     cargo run -q -p wm-host ) &
 HOST_PID=$!
 trap 'kill "$HOST_PID" 2>/dev/null || true' EXIT

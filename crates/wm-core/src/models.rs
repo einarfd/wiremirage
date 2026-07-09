@@ -659,11 +659,11 @@ pub struct CreateTokenBody {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserRecord {
     pub id: String,
-    pub name: String,
-    /// Verified email used as the cross-provider identity-linking key;
-    /// `None` for bootstrap/local users.
-    #[serde(default)]
-    pub primary_email: Option<String>,
+    /// The account identifier: a verified email, also the
+    /// cross-provider identity-linking key. Legacy records that
+    /// predate email-only identity surface their old name handle here
+    /// until a login/bootstrap backfills the real email.
+    pub email: String,
     pub is_admin: bool,
     pub created_at: String,
 }
@@ -675,7 +675,7 @@ pub struct ListUsersResponse {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateUserBody {
-    pub name: String,
+    pub email: String,
     #[serde(default)]
     pub is_admin: bool,
 }

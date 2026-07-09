@@ -67,7 +67,7 @@ fn client(host_url: &str) -> Client {
 fn bootstrap_user_id(h: &Harness) -> String {
     h.state
         .auth()
-        .get_user_by_name("bootstrap")
+        .get_user_by_email("bootstrap")
         .expect("read bootstrap user")
         .expect("bootstrap user exists")
         .id
@@ -543,27 +543,30 @@ async fn user_full_round_trip_admin() {
     // Bootstrap user is the only one until we create more.
     let initial = admin.list_users().await.expect("list");
     assert_eq!(initial.users.len(), 1);
-    assert_eq!(initial.users[0].name, "bootstrap");
+    assert_eq!(initial.users[0].email, "bootstrap");
     assert!(initial.users[0].is_admin);
 
     // Create alice as non-admin.
     let alice = admin
         .create_user(&CreateUserBody {
-            name: "alice".into(),
+            email: "alice@test.example".into(),
             is_admin: false,
         })
         .await
         .expect("create alice");
     assert!(!alice.is_admin);
 
-    // Show by name.
-    let shown = admin.get_user("alice").await.expect("get alice");
-    assert_eq!(shown.name, "alice");
+    // Show by email.
+    let shown = admin
+        .get_user("alice@test.example")
+        .await
+        .expect("get alice");
+    assert_eq!(shown.email, "alice@test.example");
 
     // Promote.
     let promoted = admin
         .patch_user(
-            "alice",
+            "alice@test.example",
             &PatchUserBody {
                 is_admin: Some(true),
             },
@@ -576,7 +579,7 @@ async fn user_full_round_trip_admin() {
     // still have bootstrap, so this is fine).
     let demoted = admin
         .patch_user(
-            "alice",
+            "alice@test.example",
             &PatchUserBody {
                 is_admin: Some(false),
             },
@@ -586,7 +589,10 @@ async fn user_full_round_trip_admin() {
     assert!(!demoted.is_admin);
 
     // Delete.
-    admin.delete_user("alice").await.expect("delete alice");
+    admin
+        .delete_user("alice@test.example")
+        .await
+        .expect("delete alice");
     let after = admin.list_users().await.expect("list after");
     assert_eq!(after.users.len(), 1);
 }
@@ -641,6 +647,6 @@ async fn me_works_for_any_authed_user() {
         .build()
         .expect("build alice");
     let me = alice.get_me().await.expect("get me");
-    assert_eq!(me.name, "alice");
+    assert_eq!(me.email, "alice");
     assert!(!me.is_admin);
 }

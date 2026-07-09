@@ -853,25 +853,25 @@ async fn handle_users(
             let list = client.list_users().await?;
             format::render_user_list(&list, format);
         }
-        UsersCommand::Show { name } => {
-            let user = client.get_user(&name).await?;
+        UsersCommand::Show { email } => {
+            let user = client.get_user(&email).await?;
             format::render_user(&user, format);
         }
         UsersCommand::Me => {
             let user = client.get_me().await?;
             format::render_user(&user, format);
         }
-        UsersCommand::Create(CreateUserArgs { name, admin }) => {
+        UsersCommand::Create(CreateUserArgs { email, admin }) => {
             let user = client
                 .create_user(&CreateUserBody {
-                    name,
+                    email,
                     is_admin: admin,
                 })
                 .await?;
             format::render_user(&user, format);
         }
         UsersCommand::Update(UpdateUserArgs {
-            name,
+            email,
             admin,
             no_admin,
         }) => {
@@ -886,13 +886,13 @@ async fn handle_users(
                 );
                 return Ok(());
             }
-            let user = client.patch_user(&name, &body).await?;
+            let user = client.patch_user(&email, &body).await?;
             format::render_user(&user, format);
         }
-        UsersCommand::Delete { name, force: _ } => {
-            client.delete_user(&name).await?;
+        UsersCommand::Delete { email, force: _ } => {
+            client.delete_user(&email).await?;
             if matches!(format, Format::Human) {
-                println!("deleted user {name}");
+                println!("deleted user {email}");
             }
         }
     }

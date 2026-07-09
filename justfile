@@ -61,7 +61,7 @@ run-host:
 # Run wm-host with the full realistic stack: Valkey (Docker) for
 # persistence + the host locally via cargo with local auth + browser
 # sessions. After it starts, open http://localhost:8080/ui/ and log
-# in as `admin` / `devpassword`. Data persists across restarts in the
+# in as `admin@local` / `devpassword`. Data persists across restarts in the
 # Valkey volume — `docker compose down -v` to wipe. The `WM_LOCAL_AUTH`
 # setting is for local dev only — never use these credentials on a
 # publicly-reachable host (see ADR-0018). Source-language handlers
@@ -76,12 +76,13 @@ run-web:
       sleep 0.2
     done
     echo "Valkey ready. Starting host ..."
-    echo "  Control plane (UI/API/MCP): http://localhost:8080/ui/  (log in admin / devpassword)"
+    echo "  Control plane (UI/API/MCP): http://localhost:8080/ui/  (log in admin@local / devpassword)"
     echo "  Mock traffic is per-group (ADR-0030): http://{group}.localhost:8080/...  "
     echo "    e.g. curl -H 'Host: my-group.localhost' http://localhost:8080/v1/charges"
     WM_STORAGE=redis://localhost:6379 \
       WM_BOOTSTRAP_TOKEN=wmt_dev_local \
-      WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
+      WM_BOOTSTRAP_EMAIL=admin@local \
+      WM_LOCAL_AUTH='admin@local:devpassword:admin,user@local:devpassword' \
       SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
       cargo run -p wm-host
 
@@ -91,7 +92,8 @@ run-web:
 run-web-fast:
     WM_STORAGE=memory \
       WM_BOOTSTRAP_TOKEN=wmt_dev_local \
-      WM_LOCAL_AUTH='admin:devpassword:admin,user:devpassword' \
+      WM_BOOTSTRAP_EMAIL=admin@local \
+      WM_LOCAL_AUTH='admin@local:devpassword:admin,user@local:devpassword' \
       SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod-32b' \
       cargo run -p wm-host
 
@@ -105,7 +107,7 @@ run-web-fast:
 # GHCR image instead of building.)
 #
 # After it starts, open http://localhost:8080/ui/ and log in as
-# `admin` / `devpassword`. Stop with `just stop-web-docker` (keeps
+# `admin@local` / `devpassword`. Stop with `just stop-web-docker` (keeps
 # Valkey volume) or `just wipe-dev` (wipes it).
 run-web-docker:
     #!/usr/bin/env bash
@@ -115,7 +117,8 @@ run-web-docker:
     # gitignored; these are dev-only values, never for production.
     printf '%s\n' \
       'WM_BOOTSTRAP_TOKEN=wmt_dev_local' \
-      'WM_LOCAL_AUTH=admin:devpassword:admin,user:devpassword' \
+      'WM_BOOTSTRAP_EMAIL=admin@local' \
+      'WM_LOCAL_AUTH=admin@local:devpassword:admin,user@local:devpassword' \
       'SESSION_SECRET=dev-only-session-secret-do-not-use-in-prod-32b' \
       > .env
     docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile full up -d --build

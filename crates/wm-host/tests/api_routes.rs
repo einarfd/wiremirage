@@ -178,7 +178,7 @@ impl Harness {
     ) -> (String, u64) {
         let owner = self
             .auth
-            .get_user_by_name("bootstrap")
+            .get_user_by_email("bootstrap")
             .expect("lookup bootstrap")
             .expect("bootstrap exists")
             .id;
@@ -2224,13 +2224,13 @@ async fn admin_creates_lists_and_reads_user() {
     let resp = h
         .client
         .post(h.url("/api/users"))
-        .json(&json!({ "name": "alice", "is_admin": false }))
+        .json(&json!({ "email": "alice@test.example", "is_admin": false }))
         .send()
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 201);
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["name"], "alice");
+    assert_eq!(body["email"], "alice@test.example");
     assert_eq!(body["is_admin"], false);
 
     // List includes alice + bootstrap.
@@ -2243,26 +2243,26 @@ async fn admin_creates_lists_and_reads_user() {
         .json()
         .await
         .expect("json");
-    let mut names: Vec<&str> = listed["users"]
+    let mut emails: Vec<&str> = listed["users"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|u| u["name"].as_str().unwrap())
+        .map(|u| u["email"].as_str().unwrap())
         .collect();
-    names.sort();
-    assert_eq!(names, vec!["alice", "bootstrap"]);
+    emails.sort();
+    assert_eq!(emails, vec!["alice@test.example", "bootstrap"]);
 
-    // GET by name works too.
+    // GET by email works too (URL-encoded @ also accepted).
     let one: serde_json::Value = h
         .client
-        .get(h.url("/api/users/alice"))
+        .get(h.url("/api/users/alice@test.example"))
         .send()
         .await
         .expect("get")
         .json()
         .await
         .expect("json");
-    assert_eq!(one["name"], "alice");
+    assert_eq!(one["email"], "alice@test.example");
 }
 
 #[tokio::test]
@@ -2272,7 +2272,7 @@ async fn non_admin_cannot_create_or_list_users() {
 
     let resp = alice_client
         .post(h.url("/api/users"))
-        .json(&json!({ "name": "mallory" }))
+        .json(&json!({ "email": "mallory@test.example" }))
         .send()
         .await
         .expect("post");
@@ -2298,12 +2298,12 @@ async fn me_returns_caller_record() {
         .json()
         .await
         .expect("json");
-    assert_eq!(body["name"], "alice");
+    assert_eq!(body["email"], "alice");
     assert_eq!(body["is_admin"], false);
 }
 
 #[tokio::test]
-async fn user_can_read_own_record_by_name() {
+async fn user_can_read_own_record_by_email() {
     let h = Harness::start().await;
     let (_alice_id, alice_client) = h.provision_user("alice", false);
     let resp = alice_client
@@ -2413,14 +2413,14 @@ async fn cannot_delete_last_admin_via_another_admin() {
         .json()
         .await
         .expect("json");
-    let names: Vec<&str> = listed["users"]
+    let emails: Vec<&str> = listed["users"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|u| u["name"].as_str().unwrap())
+        .map(|u| u["email"].as_str().unwrap())
         .collect();
-    assert!(!names.contains(&"bootstrap"));
-    assert!(names.contains(&"other-admin"));
+    assert!(!emails.contains(&"bootstrap"));
+    assert!(emails.contains(&"other-admin"));
 }
 
 #[tokio::test]

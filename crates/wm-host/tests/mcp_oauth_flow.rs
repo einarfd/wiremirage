@@ -35,7 +35,7 @@ use wm_host::session::SessionStore;
 use wm_host::{AppState, Runtime, Storage, router};
 
 const SECRET: &[u8; 32] = b"this-is-a-thirty-two-byte-secret";
-const LOCAL_AUTH: &str = "alice:hunter2:admin";
+const LOCAL_AUTH: &str = "alice@test.example:hunter2:admin";
 
 struct Harness {
     addr: String,
@@ -151,9 +151,9 @@ async fn login_as_alice(h: &Harness, client: &Client) -> String {
     let csrf_form = extract_csrf_form_value(&html).expect("csrf form value");
 
     let body = format!(
-        "_csrf={}&username={}&password={}",
+        "_csrf={}&email={}&password={}",
         urlencode(&csrf_form),
-        urlencode("alice"),
+        urlencode("alice@test.example"),
         urlencode("hunter2"),
     );
     let post = client
@@ -327,7 +327,7 @@ async fn full_authorization_code_flow_mints_a_working_access_token() {
         "wmm_ access token should authenticate /api/*"
     );
     let me_json: Value = me.json().await.expect("me json");
-    assert_eq!(me_json["name"], "alice");
+    assert_eq!(me_json["email"], "alice@test.example");
 }
 
 #[tokio::test]

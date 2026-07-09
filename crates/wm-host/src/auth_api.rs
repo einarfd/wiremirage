@@ -104,7 +104,7 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
 
 #[derive(Debug, Deserialize)]
 struct PasswordLoginForm {
-    username: String,
+    email: String,
     password: String,
     /// Optional post-login redirect target. The handler validates
     /// that the value is a host-relative path (`/...`) so an open-
@@ -158,12 +158,12 @@ async fn password_login(
     }
 
     // Throttle check first — a locked-out caller doesn't get to learn
-    // anything about whether the username exists.
+    // anything about whether the account exists.
     if state.login_throttle().is_locked_out(ip) {
         return login_failure(StatusCode::TOO_MANY_REQUESTS, "too many failed attempts");
     }
 
-    let role = match local.verify(&form.username, &form.password) {
+    let role = match local.verify(&form.email, &form.password) {
         Ok(role) => role,
         Err(VerifyError::Invalid) => {
             if state.login_throttle().record_failure(ip) {
@@ -182,10 +182,7 @@ async fn password_login(
     // login we sync `is_admin` from the env-var role (per ADR-0018:
     // "Admin role lives in the env var"). The user record itself
     // survives across env-var edits.
-    let user = match state
-        .auth()
-        .upsert_local_user(&form.username, role.is_admin())
-    {
+    let user = match state.auth().upsert_local_user(&form.email, role.is_admin()) {
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "upsert local user");
@@ -470,41 +467,38 @@ async fn github_callback(
         return (StatusCode::FORBIDDEN, format!("{deny}")).into_response();
     }
 
-    let is_admin = github.is_admin(&identity.login);
-    let user = match state.auth().upsert_oauth_user(
-        "github",
-        &identity.id.to_string(),
-        &identity.login,
-        // The primary verified email (github_oauth::assemble picks
-        // verified entries first; an unverified-only account yields
-        // None) — the cross-provider linking key.
-        identity.email.as_deref(),
-        is_admin,
-    ) {
-        Ok(u) => u,
-        Err(crate::auth::AuthError::NameTaken(n)) => {
-            return (
-                StatusCode::CONFLICT,
-                format!(
-                    "GitHub login {n:?} collides with an existing user with a \
-                     different (or no) verified email. If both accounts are \
-                     yours, give them the same email at both providers and log \
-                     in with the existing account's provider once so its email \
-                     is on record; otherwise an admin can delete the colliding \
-                     user."
-                ),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "upsert oauth user");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error (user upsert)",
-            )
-                .into_response();
-        }
+    // Accounts are keyed by verified email (user-model.md) — refuse
+    // the login when GitHub supplied none rather than mint an
+    // email-less account. `github_oauth::assemble` picks verified
+    // entries only, so an unverified-only account lands here too.
+    let Some(email) = identity.email.as_deref() else {
+        tracing::warn!(login = %identity.login,
+            "github account has no verified email; refusing login");
+        return (
+            StatusCode::UNAUTHORIZED,
+            "GitHub login failed: your GitHub account exposes no verified \
+             email, and WireMirage accounts are keyed by email. Verify an \
+             email address on GitHub and retry.",
+        )
+            .into_response();
     };
+
+    let is_admin = github.is_admin(&identity.login);
+    let user =
+        match state
+            .auth()
+            .upsert_oauth_user("github", &identity.id.to_string(), email, is_admin)
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!(error = %e, "upsert oauth user");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error (user upsert)",
+                )
+                    .into_response();
+            }
+        };
 
     let ip_str = client_ip(&headers, state.trust_forwarded_headers()).to_string();
     let user_agent = headers
@@ -707,43 +701,27 @@ async fn oidc_callback(
         return (StatusCode::FORBIDDEN, format!("{deny}")).into_response();
     }
 
-    let Some(username) = identity.username() else {
+    // Accounts are keyed by verified email (user-model.md) — refuse
+    // the login when the IdP supplied none. `OidcIdentity` already
+    // drops emails the IdP marked email_verified=false.
+    let Some(email) = identity.email.as_deref() else {
         tracing::warn!(subject = %identity.subject,
-            "oidc userinfo carried neither preferred_username nor a usable email");
+            "oidc userinfo carried no verified email; refusing login");
         return (
             StatusCode::UNAUTHORIZED,
-            "OIDC login failed: the IdP returned neither `preferred_username` nor a \
-             verified `email`, so no username can be derived. Configure the IdP to \
-             include one of those claims.",
+            "OIDC login failed: the IdP returned no verified `email` claim, \
+             and WireMirage accounts are keyed by email. Configure the IdP \
+             to include a verified email in the userinfo response.",
         )
             .into_response();
     };
 
     let is_admin = oidc.is_admin(&identity);
-    let user = match state.auth().upsert_oauth_user(
-        "oidc",
-        &identity.subject,
-        &username,
-        // Already verified-filtered: OidcIdentity drops emails the
-        // IdP marked email_verified=false.
-        identity.email.as_deref(),
-        is_admin,
-    ) {
+    let user = match state
+        .auth()
+        .upsert_oauth_user("oidc", &identity.subject, email, is_admin)
+    {
         Ok(u) => u,
-        Err(crate::auth::AuthError::NameTaken(n)) => {
-            return (
-                StatusCode::CONFLICT,
-                format!(
-                    "OIDC login {n:?} collides with an existing user with a \
-                     different (or no) verified email. If both accounts are \
-                     yours, give them the same email at both providers and log \
-                     in with the existing account's provider once so its email \
-                     is on record; otherwise an admin can delete the colliding \
-                     user."
-                ),
-            )
-                .into_response();
-        }
         Err(e) => {
             tracing::error!(error = %e, "upsert oauth user");
             return (

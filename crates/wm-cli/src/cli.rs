@@ -609,12 +609,11 @@ pub struct CreateTokenArgs {
 pub enum UsersCommand {
     /// List users. Admin-only.
     List,
-    /// Show one user by email or name. Admin sees any user; non-admin
-    /// sees their own record only (the host enforces).
+    /// Show one user by email. Admin sees any user; non-admin sees
+    /// their own record only (the host enforces).
     Show {
-        /// User selector: a primary email (the canonical identifier
-        /// for provider-backed users) or a name handle.
-        name: String,
+        /// The user's email (the account identifier).
+        email: String,
     },
     /// Show the authenticated user's own record. Always available.
     Me,
@@ -625,8 +624,8 @@ pub enum UsersCommand {
     /// Delete a user. Admin-only. The host refuses to delete the
     /// last admin or a user that owns routes.
     Delete {
-        /// User selector: primary email or name handle.
-        name: String,
+        /// The user's email (the account identifier).
+        email: String,
         #[arg(long)]
         force: bool,
     },
@@ -634,9 +633,10 @@ pub enum UsersCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct CreateUserArgs {
-    /// User name handle (unique). Provider-backed users are usually
-    /// provisioned by login instead and identified by email.
-    pub name: String,
+    /// The user's email (the account identifier; unique). Users who
+    /// log in via OAuth/OIDC are usually provisioned by that login
+    /// instead — a pre-created email links to their first login.
+    pub email: String,
     /// Create the user as an admin. Default is non-admin.
     #[arg(long)]
     pub admin: bool,
@@ -644,8 +644,8 @@ pub struct CreateUserArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct UpdateUserArgs {
-    /// User selector: primary email or name handle.
-    pub name: String,
+    /// The user's email (the account identifier).
+    pub email: String,
     /// Promote the user to admin.
     #[arg(long, conflicts_with = "no_admin")]
     pub admin: bool,

@@ -748,7 +748,7 @@ fn resolve_owner_names<'a, I: Iterator<Item = &'a str>>(
         }
         match state.auth().get_user_by_id(id) {
             Ok(u) => {
-                out.insert(id.to_string(), u.name);
+                out.insert(id.to_string(), u.email);
             }
             Err(_) => {
                 out.insert(id.to_string(), short_id(id));
@@ -831,14 +831,14 @@ fn ui_error_400(state: &AppState, auth: &AuthContext, msg: String) -> Response {
 
 #[derive(Serialize)]
 pub(crate) struct UserBadge {
-    pub name: String,
+    pub email: String,
     pub is_admin: bool,
 }
 
 impl UserBadge {
     pub fn from(auth: &AuthContext) -> Self {
         Self {
-            name: auth.user_name.clone(),
+            email: auth.user_email.clone(),
             is_admin: auth.is_admin,
         }
     }

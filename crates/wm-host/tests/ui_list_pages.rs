@@ -53,8 +53,12 @@ async fn start_seeded(
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     // Create users first so we have ULIDs to seed groups/routes with.
-    let admin = auth.create_user("admin", true).expect("create admin user");
-    let alice = auth.create_user("alice", false).expect("create alice user");
+    let admin = auth
+        .create_user("admin@test.example", true)
+        .expect("create admin user");
+    let alice = auth
+        .create_user("alice@test.example", false)
+        .expect("create alice user");
 
     let registry = Arc::new(Registry::new(storage.clone()));
 
@@ -104,7 +108,8 @@ async fn start_seeded(
     let journal = Journal::new(storage.clone());
     let state = AppState::new(runtime, routes, auth, journal)
         .with_local_auth(
-            LocalAuth::parse("admin:devpassword:admin,alice:devpassword").expect("local auth"),
+            LocalAuth::parse("admin@test.example:devpassword:admin,alice@test.example:devpassword")
+                .expect("local auth"),
         )
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
     let app = router(state);
@@ -130,7 +135,7 @@ async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
-            "_csrf={csrf_value}&username={user}&password=devpassword"
+            "_csrf={csrf_value}&email={user}%40test.example&password=devpassword"
         ))
         .send()
         .await

@@ -468,7 +468,10 @@ async fn who_am_i_returns_bootstrap_user() {
         .expect("who_am_i");
     let structured = result.structured_content.expect("structured content set");
     let user = structured.get("user").and_then(|v| v.as_object()).unwrap();
-    assert_eq!(user.get("name").and_then(|v| v.as_str()), Some("bootstrap"));
+    assert_eq!(
+        user.get("email").and_then(|v| v.as_str()),
+        Some("bootstrap")
+    );
     assert_eq!(user.get("is_admin").and_then(|v| v.as_bool()), Some(true));
 
     client.cancel().await.expect("cancel");
@@ -1042,8 +1045,8 @@ async fn show_route_source_returns_source_for_typescript_route() {
     let bootstrap_user = h
         .state
         .auth()
-        .get_user_by_name("bootstrap")
-        .expect("get_user_by_name")
+        .get_user_by_email("bootstrap")
+        .expect("get_user_by_email")
         .expect("bootstrap user exists");
     let route = h
         .state
@@ -1096,8 +1099,8 @@ async fn show_route_source_is_null_for_wasm_route() {
     let bootstrap_user = h
         .state
         .auth()
-        .get_user_by_name("bootstrap")
-        .expect("get_user_by_name")
+        .get_user_by_email("bootstrap")
+        .expect("get_user_by_email")
         .expect("bootstrap user exists");
     let route = h
         .state
@@ -1418,7 +1421,7 @@ async fn dry_run_route_with_kv_overrides_seeds_snapshot() {
             owner_id: h
                 .state
                 .auth()
-                .get_user_by_name("bootstrap")
+                .get_user_by_email("bootstrap")
                 .expect("user")
                 .expect("bootstrap user exists")
                 .id,

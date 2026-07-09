@@ -667,6 +667,25 @@ creation (`wm users create`, bootstrap). Also: `POST /auth/logout`
 now 303s to `/auth/login?signed_out=1` (which renders a signed-out
 notice) instead of returning a bare 204 that left the browser sitting
 on a dead page.
+A follow-up went the rest of the way: identity is **email-only**.
+`User.name` is deleted — the record is `{ id, email, is_admin,
+created_at }` and the email is the identifier AND the display label on
+every surface (UI owner columns + nav badge, `wm users`, MCP
+`who_am_i`/`summarize_workspace`, REST `UserRecord`). The whole
+derived-handle machinery (`derive_unique_name`, `user:by-name`,
+NameTaken-on-login) is gone. Consequences: OAuth/OIDC logins whose IdP
+supplies no verified email are **refused** with a clear error (an
+account can't exist without its key); `WM_LOCAL_AUTH` identifiers must
+be emails (`alice@corp.example:pw[:admin]`, fail-fast otherwise, login
+form says "Email"); `WM_BOOTSTRAP_TOKEN` now requires
+`WM_BOOTSTRAP_EMAIL` alongside (fail-fast) — and because the bootstrap
+account is keyed by YOUR email, a later browser login with the same
+verified email lands in the same account (token + browser = one
+identity). Migration is in place: a legacy `bootstrap` record adopts
+`WM_BOOTSTRAP_EMAIL` on next restart (token keeps working), and other
+pre-email records decode their old name handle as the identifier until
+a login backfills the real email. Storage field stays `primary_email`
+(no record migration); `user:by-email` is the only user index.
 
 ## Where the design lives
 
@@ -773,6 +792,7 @@ To run the host with Valkey:
 ```sh
 docker compose up -d   # starts valkey
 WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+  WM_BOOTSTRAP_EMAIL=admin@local \
   WM_STORAGE=redis://localhost:6379 \
   cargo run -p wm-host
 ```
@@ -780,7 +800,8 @@ WM_BOOTSTRAP_TOKEN=wmt_dev_local \
 Or in-memory:
 
 ```sh
-WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_STORAGE=memory cargo run -p wm-host
+WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_BOOTSTRAP_EMAIL=admin@local \
+  WM_STORAGE=memory cargo run -p wm-host
 ```
 
 Register a TypeScript route and call it. Mock traffic is served on the
@@ -809,8 +830,11 @@ Env vars (no silent fallbacks; missing required → fail-fast):
 
 - `WM_STORAGE` (required) — `memory`, `redis://...`, or `rediss://...`
 - `WM_BOOTSTRAP_TOKEN` (required on first startup, optional on
-  restarts once at least one user exists) — plaintext for the admin
-  user named `bootstrap`. Treat like a credential.
+  restarts once at least one user exists) — plaintext for the
+  bootstrap admin's API token. Treat like a credential. Requires
+  `WM_BOOTSTRAP_EMAIL` alongside — the admin account's identifier
+  (accounts are email-keyed; a browser login with the same verified
+  email reaches the same account).
 - `WM_TRUSTED_PROXY` (optional, ADR-0027) — the public hostname(s)
   the trusted TLS-terminating reverse proxy serves (comma-separated).
   When set, turns on the whole behind-a-proxy posture: `Secure` on the

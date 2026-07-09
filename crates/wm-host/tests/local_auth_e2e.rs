@@ -67,13 +67,13 @@ fn no_redirect_client() -> Client {
         .expect("build client")
 }
 
-/// POST `username` + `password` and return the response. Form-encoded
+/// POST `email` + `password` and return the response. Form-encoded
 /// body built by hand (we'd otherwise have to enable reqwest's
 /// urlencoded feature workspace-wide).
 async fn post_login(
     h: &Harness,
     client: &Client,
-    username: &str,
+    email: &str,
     password: &str,
 ) -> reqwest::Response {
     // Slice-25 CSRF middleware: GET login page first to mint the
@@ -90,9 +90,9 @@ async fn post_login(
     let csrf_value = extract_csrf_form_value(&page).expect("csrf form value");
 
     let body = format!(
-        "_csrf={}&username={}&password={}",
+        "_csrf={}&email={}&password={}",
         urlencode(&csrf_value),
-        urlencode(username),
+        urlencode(email),
         urlencode(password)
     );
     client
@@ -150,10 +150,10 @@ fn extract_cookie_value(set_cookie: &str) -> String {
 
 #[tokio::test]
 async fn login_with_valid_password_sets_signed_cookie() {
-    let h = start("alice:hunter2:admin").await;
+    let h = start("alice@test.example:hunter2:admin").await;
     let client = no_redirect_client();
 
-    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    let resp = post_login(&h, &client, "alice@test.example", "hunter2").await;
     assert_eq!(resp.status().as_u16(), 303);
     let cookie = resp
         .headers()
@@ -175,10 +175,10 @@ async fn login_with_valid_password_sets_signed_cookie() {
 
 #[tokio::test]
 async fn login_with_wrong_password_returns_401() {
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
 
-    let resp = post_login(&h, &client, "alice", "WRONG").await;
+    let resp = post_login(&h, &client, "alice@test.example", "WRONG").await;
     assert_eq!(resp.status().as_u16(), 401);
     assert!(
         resp.headers().get("set-cookie").is_none(),
@@ -188,33 +188,33 @@ async fn login_with_wrong_password_returns_401() {
 
 #[tokio::test]
 async fn login_with_unknown_user_returns_401() {
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
 
-    let resp = post_login(&h, &client, "eve", "hunter2").await;
+    let resp = post_login(&h, &client, "eve@test.example", "hunter2").await;
     assert_eq!(resp.status().as_u16(), 401);
 }
 
 #[tokio::test]
 async fn six_wrong_attempts_trigger_lockout() {
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
 
     for i in 0..5 {
-        let resp = post_login(&h, &client, "alice", "WRONG").await;
+        let resp = post_login(&h, &client, "alice@test.example", "WRONG").await;
         assert_eq!(resp.status().as_u16(), 401, "attempt {i}");
     }
     // 6th request — even with the correct password — should be locked out.
-    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    let resp = post_login(&h, &client, "alice@test.example", "hunter2").await;
     assert_eq!(resp.status().as_u16(), 429, "expected 429 after lockout");
 }
 
 #[tokio::test]
 async fn session_cookie_authenticates_api_endpoint() {
-    let h = start("alice:hunter2:admin").await;
+    let h = start("alice@test.example:hunter2:admin").await;
     let client = no_redirect_client();
 
-    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    let resp = post_login(&h, &client, "alice@test.example", "hunter2").await;
     assert_eq!(resp.status().as_u16(), 303);
     let cookie_value =
         extract_cookie_value(resp.headers().get("set-cookie").unwrap().to_str().unwrap());
@@ -228,13 +228,13 @@ async fn session_cookie_authenticates_api_endpoint() {
         .expect("get me");
     assert_eq!(me.status().as_u16(), 200, "expected cookie auth to succeed");
     let body: serde_json::Value = me.json().await.expect("json");
-    assert_eq!(body["name"], "alice");
+    assert_eq!(body["email"], "alice@test.example");
     assert_eq!(body["is_admin"], true);
 }
 
 #[tokio::test]
 async fn logout_invalidates_the_cookie() {
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
 
     // Slice-25 CSRF: GET login page first to mint the wm_csrf cookie,
@@ -250,7 +250,7 @@ async fn logout_invalidates_the_cookie() {
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
-            "_csrf={csrf_value}&username=alice&password=hunter2"
+            "_csrf={csrf_value}&email=alice%40test.example&password=hunter2"
         ))
         .send()
         .await
@@ -300,7 +300,7 @@ async fn logout_invalidates_the_cookie() {
 
 #[tokio::test]
 async fn login_page_renders_form_when_local_auth_is_configured() {
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
     let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
@@ -324,9 +324,9 @@ async fn login_page_says_disabled_when_no_methods_configured() {
 
 #[tokio::test]
 async fn admin_role_in_env_syncs_on_login() {
-    let h = start("alice:hunter2:admin").await;
+    let h = start("alice@test.example:hunter2:admin").await;
     let client = no_redirect_client();
-    let login = post_login(&h, &client, "alice", "hunter2").await;
+    let login = post_login(&h, &client, "alice@test.example", "hunter2").await;
     assert_eq!(login.status().as_u16(), 303);
     let cookie_value =
         extract_cookie_value(login.headers().get("set-cookie").unwrap().to_str().unwrap());
@@ -343,9 +343,9 @@ async fn admin_role_in_env_syncs_on_login() {
 
 #[tokio::test]
 async fn tampered_session_cookie_returns_401() {
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
-    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    let resp = post_login(&h, &client, "alice@test.example", "hunter2").await;
     let mut cookie_value =
         extract_cookie_value(resp.headers().get("set-cookie").unwrap().to_str().unwrap());
     // Flip the last byte of the signature portion.
@@ -375,7 +375,7 @@ async fn bearer_token_still_works_when_session_store_is_configured() {
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
     let state = AppState::new(runtime, routes, auth, journal)
-        .with_local_auth(LocalAuth::parse("alice:hunter2").expect("parse"))
+        .with_local_auth(LocalAuth::parse("alice@test.example:hunter2").expect("parse"))
         .with_sessions(SessionStore::new(storage, SECRET).expect("session"));
     let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -441,9 +441,9 @@ fn set_cookie_blob(resp: &reqwest::Response) -> String {
 
 #[tokio::test]
 async fn cookies_have_no_secure_flag_by_default() {
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
-    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    let resp = post_login(&h, &client, "alice@test.example", "hunter2").await;
     assert_eq!(resp.status().as_u16(), 303, "login redirects");
     let cookies = set_cookie_blob(&resp);
     assert!(cookies.contains("wm_session="), "session cookie present");
@@ -455,7 +455,7 @@ async fn cookies_have_no_secure_flag_by_default() {
 
 #[tokio::test]
 async fn cookies_carry_secure_flag_when_enabled() {
-    let h = start_with_hardening("alice:hunter2", true, false).await;
+    let h = start_with_hardening("alice@test.example:hunter2", true, false).await;
     let client = no_redirect_client();
 
     // GET the login page first so the CSRF cookie is minted with the
@@ -472,7 +472,7 @@ async fn cookies_carry_secure_flag_when_enabled() {
     );
 
     // Then complete the login and check the session cookie too.
-    let resp = post_login(&h, &client, "alice", "hunter2").await;
+    let resp = post_login(&h, &client, "alice@test.example", "hunter2").await;
     assert_eq!(resp.status().as_u16(), 303);
     let session_cookies = set_cookie_blob(&resp);
     assert!(
@@ -486,7 +486,7 @@ async fn forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback() {
     // Fire 5 failed logins from "different" XFF IPs. With XFF-trust
     // OFF (default), they all share the loopback throttle bucket, so
     // the sixth attempt — from yet another XFF IP — is locked out.
-    let h = start("alice:hunter2").await;
+    let h = start("alice@test.example:hunter2").await;
     let client = no_redirect_client();
     for i in 1..=5 {
         // Burn the CSRF cookie minted per request so each POST has
@@ -496,7 +496,8 @@ async fn forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback() {
         let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
         let csrf_value =
             extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/ui/",);
+        let body =
+            format!("_csrf={csrf_value}&email=alice%40test.example&password=wrong{i}&next=/ui/",);
         let _ = client
             .post(url(&h, "/auth/login/password"))
             .header("content-type", "application/x-www-form-urlencoded")
@@ -514,7 +515,7 @@ async fn forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback() {
     let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
     let csrf_value = extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/ui/");
+    let body = format!("_csrf={csrf_value}&email=alice%40test.example&password=hunter2&next=/ui/");
     let resp = client
         .post(url(&h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")
@@ -533,7 +534,7 @@ async fn forwarded_for_ignored_by_default_so_throttle_collapses_to_loopback() {
 
 #[tokio::test]
 async fn forwarded_for_honored_when_explicitly_trusted() {
-    let h = start_with_hardening("alice:hunter2", false, true).await;
+    let h = start_with_hardening("alice@test.example:hunter2", false, true).await;
     let client = no_redirect_client();
     // Five failures from one XFF IP locks THAT IP only.
     for i in 1..=5 {
@@ -541,7 +542,8 @@ async fn forwarded_for_honored_when_explicitly_trusted() {
         let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
         let csrf_value =
             extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-        let body = format!("_csrf={csrf_value}&username=alice&password=wrong{i}&next=/ui/",);
+        let body =
+            format!("_csrf={csrf_value}&email=alice%40test.example&password=wrong{i}&next=/ui/",);
         let _ = client
             .post(url(&h, "/auth/login/password"))
             .header("content-type", "application/x-www-form-urlencoded")
@@ -557,7 +559,7 @@ async fn forwarded_for_honored_when_explicitly_trusted() {
     let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     let csrf_cookie = pick_csrf_set_cookie(&resp).expect("csrf");
     let csrf_value = extract_csrf_form_value(&resp.text().await.unwrap()).expect("csrf form value");
-    let body = format!("_csrf={csrf_value}&username=alice&password=hunter2&next=/ui/");
+    let body = format!("_csrf={csrf_value}&email=alice%40test.example&password=hunter2&next=/ui/");
     let resp = client
         .post(url(&h, "/auth/login/password"))
         .header("content-type", "application/x-www-form-urlencoded")

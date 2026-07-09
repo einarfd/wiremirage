@@ -340,8 +340,8 @@ async fn full_callback_flow_mints_session_and_creates_user() {
     assert!(!cookie.is_empty());
 
     // The session actually authenticates: /api/users/me resolves to
-    // the provisioned user, named after preferred_username, admin via
-    // WM_OIDC_ADMIN_EMAILS.
+    // the provisioned user, identified by the verified email, admin
+    // via WM_OIDC_ADMIN_EMAILS.
     let me = client
         .get(url(&h, "/api/users/me"))
         .header("cookie", format!("{COOKIE_NAME}={cookie}"))
@@ -350,7 +350,7 @@ async fn full_callback_flow_mints_session_and_creates_user() {
         .expect("send me");
     assert_eq!(me.status(), 200);
     let body: serde_json::Value = me.json().await.expect("json");
-    assert_eq!(body["name"], "einar");
+    assert_eq!(body["email"], "einar@kindly.example");
     assert_eq!(body["is_admin"], true, "admin email promotes: {body}");
 }
 
@@ -526,12 +526,10 @@ async fn github_and_oidc_logins_link_to_one_user_by_email() {
         .await
         .unwrap();
     let github_user_id = me["id"].as_str().unwrap().to_string();
-    assert_eq!(me["name"], "einarw");
-    assert_eq!(me["primary_email"], "einar@kindly.example");
+    assert_eq!(me["email"], "einar@kindly.example");
 
-    // Login 2: OIDC, different provider and different username
-    // ("einar" via preferred_username) but the same verified email —
-    // must land in the SAME account.
+    // Login 2: OIDC — a different provider, but the same verified
+    // email — must land in the SAME account.
     let start = client
         .get(h_url("/auth/start/oidc"))
         .send()
@@ -571,7 +569,7 @@ async fn github_and_oidc_logins_link_to_one_user_by_email() {
         github_user_id,
         "both providers resolve to one user"
     );
-    assert_eq!(me["name"], "einarw", "original name kept");
+    assert_eq!(me["email"], "einar@kindly.example");
 
     host_server.abort();
     gh_server.abort();
