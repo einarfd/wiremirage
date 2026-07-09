@@ -360,6 +360,12 @@ p { margin: 0 0 var(--space-3); }
   font-size: var(--text-sm);
   margin: 0;
 }
+.auth-notice {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  margin: 0 0 var(--space-4);
+  text-align: center;
+}
 .auth-hint {
   margin-top: var(--space-4);
   color: var(--text-muted);

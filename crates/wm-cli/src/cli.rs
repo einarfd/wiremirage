@@ -609,10 +609,11 @@ pub struct CreateTokenArgs {
 pub enum UsersCommand {
     /// List users. Admin-only.
     List,
-    /// Show one user by name. Admin sees any user; non-admin sees
-    /// their own record only (the host enforces).
+    /// Show one user by email or name. Admin sees any user; non-admin
+    /// sees their own record only (the host enforces).
     Show {
-        /// User name.
+        /// User selector: a primary email (the canonical identifier
+        /// for provider-backed users) or a name handle.
         name: String,
     },
     /// Show the authenticated user's own record. Always available.
@@ -624,7 +625,7 @@ pub enum UsersCommand {
     /// Delete a user. Admin-only. The host refuses to delete the
     /// last admin or a user that owns routes.
     Delete {
-        /// User name.
+        /// User selector: primary email or name handle.
         name: String,
         #[arg(long)]
         force: bool,
@@ -633,7 +634,8 @@ pub enum UsersCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct CreateUserArgs {
-    /// User name (canonical identifier; unique).
+    /// User name handle (unique). Provider-backed users are usually
+    /// provisioned by login instead and identified by email.
     pub name: String,
     /// Create the user as an admin. Default is non-admin.
     #[arg(long)]
@@ -642,7 +644,7 @@ pub struct CreateUserArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct UpdateUserArgs {
-    /// User name.
+    /// User selector: primary email or name handle.
     pub name: String,
     /// Promote the user to admin.
     #[arg(long, conflicts_with = "no_admin")]

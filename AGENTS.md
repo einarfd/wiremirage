@@ -655,6 +655,18 @@ list/show`, and MCP `who_am_i`. Tier-2:
 `github_and_oidc_logins_link_to_one_user_by_email` in
 `tests/oidc_e2e.rs`; the linking matrix is unit-tested in
 `auth::tests`.
+A follow-up made identity **email-primary**: `user:by-email` is a real
+unique index (self-healing for records that predate it), `GET/PATCH/
+DELETE /api/users/{selector}` and the `wm users` subcommands accept a
+primary email as the selector (`@` discriminates; names still address
+the email-less system accounts — bootstrap and `WM_LOCAL_AUTH`), and
+**names no longer gate logins**: an OAuth login whose name hint is
+taken gets a derived unique handle (email local part, then `-N`
+suffix) instead of a 409. `NameTaken` survives only on explicit
+creation (`wm users create`, bootstrap). Also: `POST /auth/logout`
+now 303s to `/auth/login?signed_out=1` (which renders a signed-out
+notice) instead of returning a bare 204 that left the browser sitting
+on a dead page.
 
 ## Where the design lives
 

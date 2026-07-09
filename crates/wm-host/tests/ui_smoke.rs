@@ -405,7 +405,11 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
         .send()
         .await
         .unwrap();
-    assert_eq!(logout.status().as_u16(), 204);
+    assert_eq!(logout.status().as_u16(), 303, "logout redirects to login");
+    assert_eq!(
+        logout.headers()["location"].to_str().unwrap(),
+        "/auth/login?signed_out=1"
+    );
 
     // With the (now-invalidated) cookie, /ui/ should redirect again.
     let after = client

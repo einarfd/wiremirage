@@ -72,7 +72,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/users", post(create_user).get(list_users))
         .route("/api/users/me", get(get_me))
         .route(
-            "/api/users/{name}",
+            "/api/users/{selector}",
             get(get_user).patch(patch_user).delete(delete_user),
         )
         // Journal — list/get per group (admin or any group-route owner).
@@ -480,6 +480,9 @@ impl From<AuthError> for ApiError {
             AuthError::NotFound => ApiError::not_found(),
             AuthError::NameTaken(name) => {
                 ApiError::conflict(format!("name {name:?} is already in use"))
+            }
+            AuthError::EmailTaken(email) => {
+                ApiError::conflict(format!("email {email:?} is already in use"))
             }
             AuthError::Storage(e) => ApiError::internal(format!("storage: {e}")),
             AuthError::Malformed(msg) => ApiError::internal(format!("malformed record: {msg}")),
@@ -1436,11 +1439,11 @@ async fn get_me(
 async fn get_user(
     State(state): State<AppState>,
     auth: AuthContext,
-    Path(name): Path<String>,
+    Path(selector): Path<String>,
 ) -> Result<Json<UserRecord>, ApiError> {
     let user = state
         .auth()
-        .get_user_by_name(&name)?
+        .get_user_by_selector(&selector)?
         .ok_or_else(ApiError::not_found)?;
     if !auth.is_admin && user.id != auth.user_id {
         return Err(ApiError::forbidden(
@@ -1453,13 +1456,13 @@ async fn get_user(
 async fn patch_user(
     State(state): State<AppState>,
     auth: AuthContext,
-    Path(name): Path<String>,
+    Path(selector): Path<String>,
     Json(body): Json<PatchUserBody>,
 ) -> Result<Json<UserRecord>, ApiError> {
     require_admin(&auth)?;
     let user = state
         .auth()
-        .get_user_by_name(&name)?
+        .get_user_by_selector(&selector)?
         .ok_or_else(ApiError::not_found)?;
     let Some(target_admin) = body.is_admin else {
         // Nothing to patch right now — only `is_admin` is supported. A
@@ -1481,12 +1484,12 @@ async fn patch_user(
 async fn delete_user(
     State(state): State<AppState>,
     auth: AuthContext,
-    Path(name): Path<String>,
+    Path(selector): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&auth)?;
     let user = state
         .auth()
-        .get_user_by_name(&name)?
+        .get_user_by_selector(&selector)?
         .ok_or_else(ApiError::not_found)?;
     if user.id == auth.user_id {
         return Err(ApiError::forbidden(
