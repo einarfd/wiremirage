@@ -58,8 +58,10 @@ fn no_redirect_client() -> Client {
 async fn start_seeded() -> (Harness, String, String) {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
-    let admin = auth.create_user("admin", true).expect("admin");
-    let alice = auth.create_user("alice", false).expect("alice");
+    let admin = auth.create_user("admin@test.example", true).expect("admin");
+    let alice = auth
+        .create_user("alice@test.example", false)
+        .expect("alice");
 
     let registry = Arc::new(Registry::new(storage.clone()));
     registry
@@ -108,7 +110,8 @@ async fn start_seeded() -> (Harness, String, String) {
     let journal = Journal::new(storage.clone());
     let state = AppState::new(runtime, routes, auth, journal)
         .with_local_auth(
-            LocalAuth::parse("admin:devpassword:admin,alice:devpassword").expect("auth"),
+            LocalAuth::parse("admin@test.example:devpassword:admin,alice@test.example:devpassword")
+                .expect("auth"),
         )
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
     let app = router(state);
@@ -136,7 +139,7 @@ async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
-            "_csrf={csrf_value}&username={user}&password=devpassword"
+            "_csrf={csrf_value}&email={user}%40test.example&password=devpassword"
         ))
         .send()
         .await
@@ -423,7 +426,7 @@ async fn route_detail_renders_stored_source_for_source_language_route() {
     // stored — the shared start_seeded() only has wasm uploads.
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
-    let admin = auth.create_user("admin", true).expect("admin");
+    let admin = auth.create_user("admin@test.example", true).expect("admin");
 
     let registry = Arc::new(Registry::new(storage.clone()));
     registry
@@ -452,7 +455,7 @@ async fn route_detail_renders_stored_source_for_source_language_route() {
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
     let state = AppState::new(runtime, routes, auth, journal)
-        .with_local_auth(LocalAuth::parse("admin:devpassword:admin").expect("auth"))
+        .with_local_auth(LocalAuth::parse("admin@test.example:devpassword:admin").expect("auth"))
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
     let app = router(state);
 
@@ -537,7 +540,7 @@ async fn root_user_route_shadows_redirect() {
     // explicitly supported.
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
-    let admin = auth.create_user("admin", true).expect("admin");
+    let admin = auth.create_user("admin@test.example", true).expect("admin");
     let registry = Arc::new(Registry::new(storage.clone()));
     // group=None creates an implicit single-route group; the route
     // sits at GET / and we don't care about the group's name here.
@@ -559,7 +562,7 @@ async fn root_user_route_shadows_redirect() {
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
     let state = AppState::new(runtime, routes, auth, journal)
-        .with_local_auth(LocalAuth::parse("admin:devpassword:admin").expect("auth"))
+        .with_local_auth(LocalAuth::parse("admin@test.example:devpassword:admin").expect("auth"))
         .with_sessions(SessionStore::new(storage, SECRET).expect("sessions"));
     let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

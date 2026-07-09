@@ -317,7 +317,7 @@ async fn wm_routes_update_changes_path() {
             owner_id: h
                 .state
                 .auth()
-                .get_user_by_name("bootstrap")
+                .get_user_by_email("bootstrap")
                 .expect("read bootstrap")
                 .expect("bootstrap exists")
                 .id,
@@ -367,7 +367,7 @@ async fn wm_routes_state_lists_and_clears() {
     let bootstrap_id = h
         .state
         .auth()
-        .get_user_by_name("bootstrap")
+        .get_user_by_email("bootstrap")
         .expect("read")
         .expect("present")
         .id;
@@ -456,7 +456,7 @@ async fn wm_routes_test_dry_runs_against_bogus_wasm() {
     let bootstrap_id = h
         .state
         .auth()
-        .get_user_by_name("bootstrap")
+        .get_user_by_email("bootstrap")
         .expect("read")
         .expect("present")
         .id;
@@ -556,7 +556,14 @@ async fn wm_users_list_create_delete_round_trip() {
         Command::cargo_bin("wm")
             .expect("locate wm binary")
             .args([
-                "--host", &host_c, "--token", &token_c, "--json", "users", "create", "alice",
+                "--host",
+                &host_c,
+                "--token",
+                &token_c,
+                "--json",
+                "users",
+                "create",
+                "alice@test.example",
             ])
             .output()
             .expect("run wm")
@@ -570,7 +577,7 @@ async fn wm_users_list_create_delete_round_trip() {
     );
     let parsed: serde_json::Value =
         serde_json::from_slice(&create.stdout).expect("create json parses");
-    assert_eq!(parsed["name"], "alice");
+    assert_eq!(parsed["email"], "alice@test.example");
     assert_eq!(parsed["is_admin"], false);
 
     // List should now contain bootstrap + alice.
@@ -589,14 +596,14 @@ async fn wm_users_list_create_delete_round_trip() {
     .expect("blocking");
     assert!(list.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list json parses");
-    let names: Vec<&str> = parsed["users"]
+    let emails: Vec<&str> = parsed["users"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|u| u["name"].as_str().unwrap())
+        .map(|u| u["email"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"alice"));
-    assert!(names.contains(&"bootstrap"));
+    assert!(emails.contains(&"alice@test.example"));
+    assert!(emails.contains(&"bootstrap"));
 
     // Delete alice.
     let host_d = host;
@@ -605,7 +612,14 @@ async fn wm_users_list_create_delete_round_trip() {
         Command::cargo_bin("wm")
             .expect("locate wm binary")
             .args([
-                "--host", &host_d, "--token", &token_d, "users", "delete", "alice", "--force",
+                "--host",
+                &host_d,
+                "--token",
+                &token_d,
+                "users",
+                "delete",
+                "alice@test.example",
+                "--force",
             ])
             .output()
             .expect("run wm")

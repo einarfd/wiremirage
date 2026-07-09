@@ -32,11 +32,13 @@ writes are isolated and discarded on completion, no journal entry
 created (slice 16). Bearer-token auth gates the `/api/*` surface;
 mock traffic to user routes stays open by design (SUTs don't have
 tokens).
-Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` on first startup. Token
+Bootstrap with `WM_BOOTSTRAP_TOKEN=wmt_...` + `WM_BOOTSTRAP_EMAIL=...`
+on first startup. Accounts are identified by email everywhere. Token
 and user management live at `/api/tokens` and `/api/users`
 (admin-only for cross-user actions; `GET /api/users/me` for self).
 For browser login on testing or private deployments, set
-`WM_LOCAL_AUTH=alice:hunter2:admin,bob:pw` + `SESSION_SECRET`; the
+`WM_LOCAL_AUTH=alice@corp.example:hunter2:admin,bob@corp.example:pw`
++ `SESSION_SECRET`; the
 `/auth/login/password` endpoint then mints an `wm_session` cookie
 that authenticates `/api/*` alongside the bearer-token path
 (slice 20, per ADR-0018 — not for public exposure). The web UI
@@ -123,6 +125,7 @@ To run the host:
 ```
 docker compose up -d   # starts Valkey
 WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+  WM_BOOTSTRAP_EMAIL=admin@local \
   WM_STORAGE=redis://localhost:6379 \
   cargo run -p wm-host
 # In another shell. Mock traffic is served on the group's subdomain
@@ -150,7 +153,8 @@ on every push to `main`. `docker-compose.yml`'s `wm-host` service (the `full`
 profile) pulls that image, so a deployment never builds on the host:
 
 ```
-WM_BOOTSTRAP_TOKEN=wmt_dev_local docker compose --profile full up -d
+WM_BOOTSTRAP_TOKEN=wmt_dev_local WM_BOOTSTRAP_EMAIL=admin@local \
+  docker compose --profile full up -d
 ```
 
 Override the tag with `WM_IMAGE` (e.g. `WM_IMAGE=ghcr.io/einarfd/wiremirage:sha-abc1234`).
@@ -241,10 +245,16 @@ best-effort. Outcomes land in a per-group callback journal
 
 ### API tokens — bootstrap (optional when a browser-login path is configured)
 
-`WM_BOOTSTRAP_TOKEN=wmt_<some-secret>` creates an admin user named `bootstrap`
-on the very first host startup, with the supplied plaintext as their API
-token. Subsequent starts with the same env var are no-ops *as long as the
-bootstrap user still exists*.
+`WM_BOOTSTRAP_TOKEN=wmt_<some-secret>` plus `WM_BOOTSTRAP_EMAIL=<your-email>`
+creates an admin user identified by that email on the very first host
+startup, with the supplied plaintext as their API token. Both are required
+together (accounts are keyed by email). Subsequent starts with the same env
+vars are no-ops *as long as that user still exists*. Because the account is
+keyed by your email, a later browser login (OIDC / GitHub) with the same
+verified email lands in the *same* account — token and browser are one
+identity. Deployments from before email-keyed accounts are migrated in
+place: the legacy `bootstrap` record adopts `WM_BOOTSTRAP_EMAIL` on the
+next restart and its token keeps working.
 
 The host **refuses to start** when no users exist AND no login method is
 configured at all — that prevents a fresh deployment from coming up
@@ -258,16 +268,14 @@ Generate one with `openssl rand -hex 32` (prefix with `wmt_` to match the
 project's token convention). After first deploy, log in with this token
 via the CLI (`WM_TOKEN=wmt_... wm health`) or the UI's bearer-token flow,
 mint a real operator token (`wm tokens create operator/default`), then
-delete the bootstrap user. Note that an admin can't self-delete (built-in
-guard), so the deletion happens from a *different* admin's session — either
-a second user you created, or your OAuth-provisioned user once GitHub
-login has succeeded once.
+rotate or delete the literal bootstrap token (`wm tokens revoke bootstrap`)
+so the env-var plaintext stops being a valid credential.
 
 **Important — drop `WM_BOOTSTRAP_TOKEN` after retirement.** The host's
-bootstrap check only verifies "does a user named `bootstrap` exist?" — if
-the env var stays set after you delete the bootstrap user, the *next*
+bootstrap check only verifies "does a user with `WM_BOOTSTRAP_EMAIL`
+exist?" — if the env vars stay set after you delete that user, the *next*
 host restart silently re-creates it with the same token. Always unset the
-env var when retiring the bootstrap user; treat the two as a paired
+env vars when retiring the bootstrap account; treat them as a paired
 operation.
 
 ### Browser login — OIDC (any standards-compliant IdP)
@@ -325,10 +333,12 @@ Then set on the host:
   dedicated scope is requested).
 - `SESSION_SECRET` — as under GitHub OAuth below.
 
-Usernames come from the IdP's `preferred_username` claim, falling back to
-the email's local part. Identity is keyed on the stable `sub` claim, so a
-username or email change at the IdP doesn't create a duplicate WireMirage
-user.
+Accounts are identified by the IdP's **verified email** claim — an IdP
+that returns no verified email in userinfo can't log in (configure it to
+include one). Returning logins are matched on the stable `sub` claim, so
+an email change at the IdP doesn't create a duplicate WireMirage user,
+and the same verified email arriving via a *different* provider (say
+GitHub and your own IdP) links to one account.
 
 Example — Pocket ID: create the OIDC client in Pocket ID's admin UI
 (callback URL as above), then:
@@ -428,10 +438,11 @@ doesn't grant access on its own.
 
 ### Browser login — local passwords (testing / trusted networks only)
 
-- `WM_LOCAL_AUTH=alice:hunter2:admin,bob:correct-horse-battery-staple` —
-  comma-separated `user:password[:role]` triples; `role` is `admin` or omitted
-  (default user). Passwords are argon2id-hashed at startup; the plaintext
-  is never persisted.
+- `WM_LOCAL_AUTH=alice@corp.example:hunter2:admin,bob@corp.example:pw` —
+  comma-separated `email:password[:role]` triples; `role` is `admin` or
+  omitted (default user). The identifier must be an email (accounts are
+  keyed by email; nothing is ever sent to it). Passwords are argon2id-hashed
+  at startup; the plaintext is never persisted.
 - `SESSION_SECRET` as above.
 
 This mode exists for testing and trusted-network deployments — passwords in
@@ -715,10 +726,11 @@ set the one behind-a-proxy switch:
 In addition, the first-deploy checklist:
 
 - **Generate a strong `WM_BOOTSTRAP_TOKEN`** (`openssl rand -hex 32` is fine)
-  and treat it as a credential. After first deploy, log in via the bootstrap
-  token, mint an operator token (`wm tokens create operator/default`), and
-  delete the bootstrap user (`wm users delete bootstrap`) so the literal
-  bootstrap token stops being a valid credential.
+  and treat it as a credential, with `WM_BOOTSTRAP_EMAIL` set to your own
+  email so browser logins reach the same account. After first deploy, log
+  in via the bootstrap token, mint an operator token (`wm tokens create
+  operator/default`), and revoke the bootstrap token (`wm tokens revoke
+  bootstrap`) so the env-var plaintext stops being a valid credential.
 - **Generate a strong `SESSION_SECRET`** of at least 32 bytes (`openssl rand
   -base64 48`). Rotating it later invalidates every existing session by
   design — so keep it stable unless you intend a global logout.

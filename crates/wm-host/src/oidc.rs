@@ -479,9 +479,6 @@ pub struct OidcIdentity {
     /// The `sub` claim — the issuer-stable subject we persist as the
     /// `(provider, subject)` tuple.
     pub subject: String,
-    /// `preferred_username` when present.
-    pub preferred_username: Option<String>,
-    pub name: Option<String>,
     /// The `email` claim, dropped when the IdP explicitly marked it
     /// `email_verified: false` — an unverified email must not satisfy
     /// email/domain allow rules. Absent `email_verified` is treated
@@ -521,34 +518,9 @@ impl OidcIdentity {
         };
         Ok(Self {
             subject,
-            preferred_username: claims
-                .get("preferred_username")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            name: claims
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
             email,
             groups,
         })
-    }
-
-    /// The username for the WireMirage user record:
-    /// `preferred_username`, falling back to the email local part.
-    /// `None` when the IdP supplied neither — the caller surfaces
-    /// that as a clear error rather than inventing a name.
-    pub fn username(&self) -> Option<String> {
-        if let Some(u) = &self.preferred_username
-            && !u.is_empty()
-        {
-            return Some(u.clone());
-        }
-        self.email
-            .as_deref()
-            .and_then(|e| e.split_once('@'))
-            .map(|(local, _)| local.to_string())
-            .filter(|l| !l.is_empty())
     }
 }
 
@@ -674,8 +646,6 @@ mod tests {
     fn identity(email: Option<&str>, groups: Vec<&str>) -> OidcIdentity {
         OidcIdentity {
             subject: "sub-1".into(),
-            preferred_username: Some("alice".into()),
-            name: None,
             email: email.map(str::to_string),
             groups: groups.into_iter().map(String::from).collect(),
         }
@@ -806,16 +776,6 @@ mod tests {
     fn identity_requires_sub() {
         let claims = json!({ "email": "a@b.c" });
         assert!(OidcIdentity::from_claims(&claims, "groups").is_err());
-    }
-
-    #[test]
-    fn username_prefers_preferred_username_then_email_local_part() {
-        let mut id = identity(Some("alice@corp.example"), vec![]);
-        assert_eq!(id.username().as_deref(), Some("alice"));
-        id.preferred_username = None;
-        assert_eq!(id.username().as_deref(), Some("alice"));
-        id.email = None;
-        assert_eq!(id.username(), None);
     }
 
     #[test]

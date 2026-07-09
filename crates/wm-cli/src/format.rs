@@ -483,9 +483,8 @@ pub fn render_user(u: &UserRecord, format: Format) {
     match format {
         Format::Json => print_json(u),
         Format::Human => {
-            println!("name:       {}", u.name);
+            println!("email:      {}", u.email);
             println!("id:         {}", u.id);
-            println!("email:      {}", u.primary_email.as_deref().unwrap_or("-"));
             println!("admin:      {}", if u.is_admin { "yes" } else { "no" });
             println!("created_at: {}", u.created_at);
         }
@@ -500,13 +499,12 @@ pub fn render_user_list(list: &ListUsersResponse, format: Format) {
                 println!("(no users)");
                 return;
             }
-            let rows: Vec<[String; 4]> = list
+            let rows: Vec<[String; 3]> = list
                 .users
                 .iter()
                 .map(|u| {
                     [
-                        u.name.clone(),
-                        u.primary_email.clone().unwrap_or_else(|| "-".into()),
+                        u.email.clone(),
                         if u.is_admin {
                             "yes".into()
                         } else {
@@ -516,7 +514,7 @@ pub fn render_user_list(list: &ListUsersResponse, format: Format) {
                     ]
                 })
                 .collect();
-            print_table(&["NAME", "EMAIL", "ADMIN", "CREATED_AT"], &rows);
+            print_table(&["EMAIL", "ADMIN", "CREATED_AT"], &rows);
         }
     }
 }

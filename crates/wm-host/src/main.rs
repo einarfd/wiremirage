@@ -14,8 +14,6 @@ use wm_host::session::SessionStore;
 use wm_host::telemetry;
 use wm_host::{AppState, Runtime, Storage, router};
 
-const BOOTSTRAP_USER_NAME: &str = "bootstrap";
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut telemetry_guard = telemetry::init()?;
@@ -299,8 +297,12 @@ fn configure_local_auth(mut state: AppState, storage: Storage) -> anyhow::Result
 }
 
 /// Honour `WM_BOOTSTRAP_TOKEN` on first startup: create an admin user
-/// named `bootstrap` whose token is the supplied plaintext. Idempotent —
-/// subsequent starts with the same env var are no-ops.
+/// identified by `WM_BOOTSTRAP_EMAIL` whose token is the supplied
+/// plaintext. Both variables are required together — accounts are keyed
+/// by email, so a token without an identity is a config error.
+/// Idempotent — subsequent starts with the same env vars are no-ops,
+/// and a pre-email deployment's legacy `bootstrap` record is adopted
+/// (gains the email; its token keeps working) rather than duplicated.
 ///
 /// The host will start without `WM_BOOTSTRAP_TOKEN` if at least one user
 /// already exists; otherwise it errors so a fresh deployment doesn't
@@ -316,17 +318,30 @@ fn bootstrap_admin_if_requested(auth: &Auth) -> anyhow::Result<()> {
                     "WM_BOOTSTRAP_TOKEN does not start with `wmt_`; tokens by convention use that prefix"
                 );
             }
+            let email = env::var("WM_BOOTSTRAP_EMAIL").map_err(|_| {
+                anyhow!(
+                    "WM_BOOTSTRAP_TOKEN is set but WM_BOOTSTRAP_EMAIL is not. Accounts are keyed \
+                 by email — set WM_BOOTSTRAP_EMAIL to the admin's email address (logging in \
+                 via OAuth/OIDC with the same verified email reaches the same account)."
+                )
+            })?;
+            let email = email.trim().to_string();
+            if email.is_empty() || !email.contains('@') {
+                return Err(anyhow!(
+                    "WM_BOOTSTRAP_EMAIL must be an email address, got {email:?}"
+                ));
+            }
             let created = auth
-                .bootstrap_admin(BOOTSTRAP_USER_NAME, &plaintext)
+                .bootstrap_admin(&email, &plaintext)
                 .map_err(|e| anyhow!("failed to bootstrap admin: {e}"))?;
             if created {
                 tracing::warn!(
-                    "Bootstrapped admin user {BOOTSTRAP_USER_NAME:?}; the supplied token is now its API token. \
+                    "Bootstrapped admin user {email:?}; the supplied token is now its API token. \
                      Treat WM_BOOTSTRAP_TOKEN like a credential."
                 );
             } else {
                 tracing::info!(
-                    "WM_BOOTSTRAP_TOKEN provided but bootstrap user already exists; ignoring \
+                    "WM_BOOTSTRAP_TOKEN provided but the bootstrap admin already exists; ignoring \
                      (rotate via /api/tokens or by deleting the bootstrap user first)"
                 );
             }
@@ -392,9 +407,9 @@ fn ensure_login_method_available(state: &AppState) -> anyhow::Result<()> {
     }
     Err(anyhow!(
         "no users exist and no login method is configured. \
-         Either set WM_BOOTSTRAP_TOKEN=wmt_<plaintext> to provision a \
-         bearer-token admin named {BOOTSTRAP_USER_NAME:?}, or configure \
-         WM_LOCAL_AUTH, GitHub OAuth (WM_GITHUB_CLIENT_ID + \
+         Either set WM_BOOTSTRAP_TOKEN=wmt_<plaintext> plus \
+         WM_BOOTSTRAP_EMAIL=<email> to provision a bearer-token admin, \
+         or configure WM_LOCAL_AUTH, GitHub OAuth (WM_GITHUB_CLIENT_ID + \
          WM_GITHUB_CLIENT_SECRET + allow rules), or OIDC \
          (WM_OIDC_ISSUER + client credentials + allow rules) so a \
          browser login can create the first user."

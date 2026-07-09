@@ -171,7 +171,7 @@ fire GET  /completely/unknown    1  # no close neighbours
 say "Summary"
 "${CLI[@]}" groups list || true
 echo
-echo "Done. Visit $HOST/ui/ and log in as admin / devpassword."
+echo "Done. Visit $HOST/ui/ and log in as admin@local / devpassword."
 echo "The seeded routes are owned by the bootstrap user, so the admin's"
 echo "'Just mine' filter will show nothing until you create routes from"
 echo "the UI yourself (those land with admin as owner)."

@@ -273,7 +273,6 @@ pub struct GitHubIdentity {
     /// is the value we persist as the (provider, subject) tuple.
     pub id: u64,
     pub login: String,
-    pub name: Option<String>,
     /// Primary verified email when one is available. None when the
     /// user has no verified primary on record (rare).
     pub email: Option<String>,
@@ -301,7 +300,6 @@ impl GitHubIdentity {
         Self {
             id: user.id,
             login: user.login,
-            name: user.name,
             email,
             orgs,
         }
@@ -336,8 +334,6 @@ impl std::fmt::Display for AllowFailure {
 struct UserPayload {
     id: u64,
     login: String,
-    #[serde(default)]
-    name: Option<String>,
     #[serde(default)]
     email: Option<String>,
 }
@@ -415,7 +411,6 @@ mod tests {
         GitHubIdentity {
             id: 1,
             login: login.into(),
-            name: None,
             email: None,
             orgs: orgs.map(|o| o.into_iter().map(String::from).collect()),
         }

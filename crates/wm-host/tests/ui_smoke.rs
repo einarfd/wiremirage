@@ -91,7 +91,7 @@ async fn login_and_get_cookie(h: &Harness, client: &Client) -> String {
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
-            "_csrf={csrf_value}&username=admin&password=devpassword"
+            "_csrf={csrf_value}&email=admin%40test.example&password=devpassword"
         ))
         .send()
         .await
@@ -126,7 +126,7 @@ fn extract_csrf_value(body: &str) -> Option<String> {
 
 #[tokio::test]
 async fn unauthenticated_ui_redirects_to_login_with_next() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
 
     let resp = client.get(url(&h, "/ui/")).send().await.expect("get");
@@ -151,7 +151,7 @@ async fn unauthenticated_ui_redirects_to_login_with_next() {
 
 #[tokio::test]
 async fn deeper_ui_path_preserves_next_through_login_redirect() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
 
     let resp = client.get(url(&h, "/ui/routes")).send().await.expect("get");
@@ -165,7 +165,7 @@ async fn deeper_ui_path_preserves_next_through_login_redirect() {
 
 #[tokio::test]
 async fn login_page_renders_form_from_template() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let resp = client.get(url(&h, "/auth/login")).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
@@ -179,7 +179,7 @@ async fn login_page_renders_form_from_template() {
 
 #[tokio::test]
 async fn login_page_carries_next_into_form_hidden_input() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let resp = client
         .get(url(&h, "/auth/login?next=/ui/groups"))
@@ -201,7 +201,7 @@ async fn login_page_carries_next_into_form_hidden_input() {
 
 #[tokio::test]
 async fn home_page_renders_after_login() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
 
@@ -216,7 +216,10 @@ async fn home_page_renders_after_login() {
     // The signed-in user's name appears in the header badge and the
     // welcome message; the stylesheet link is present; the home
     // page's distinctive sections render.
-    assert!(body.contains("admin"), "expected user name on home page");
+    assert!(
+        body.contains("admin@test.example"),
+        "expected user email on home page"
+    );
     assert!(body.contains("Welcome, admin"));
     assert!(body.contains("Groups"));
     assert!(body.contains("/ui/static/wm.css"));
@@ -224,7 +227,7 @@ async fn home_page_renders_after_login() {
 
 #[tokio::test]
 async fn home_page_shows_admin_badge_for_admin_user() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
     let body = client
@@ -245,7 +248,7 @@ async fn home_page_shows_admin_badge_for_admin_user() {
 
 #[tokio::test]
 async fn css_served_unauthenticated_and_correct_mime() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let resp = client
         .get(url(&h, "/ui/static/wm.css"))
@@ -271,7 +274,7 @@ async fn ace_editor_assets_served_with_js_mime() {
     // one mode + one theme + the wm-ace bootstrap come back as JS,
     // and that an unknown filename under the same prefix still 404s
     // (the handler is an enum match, not a passthrough to the filesystem).
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     for path in [
         "/ui/static/ace/ace.js",
@@ -302,7 +305,7 @@ async fn ace_editor_assets_served_with_js_mime() {
 
 #[tokio::test]
 async fn placeholder_pages_render_with_api_hint() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
 
@@ -341,7 +344,8 @@ async fn placeholder_pages_render_with_api_hint() {
 
 #[tokio::test]
 async fn admin_only_stubs_are_forbidden_for_non_admin() {
-    let h = start_with_users("admin:devpassword:admin,user:devpassword").await;
+    let h = start_with_users("admin@test.example:devpassword:admin,user@test.example:devpassword")
+        .await;
     let client = no_redirect_client();
 
     // Log in as the non-admin user. Slice-25 CSRF: GET login page
@@ -354,7 +358,7 @@ async fn admin_only_stubs_are_forbidden_for_non_admin() {
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("wm_csrf={csrf_cookie}"))
         .body(format!(
-            "_csrf={csrf_value}&username=user&password=devpassword"
+            "_csrf={csrf_value}&email=user%40test.example&password=devpassword"
         ))
         .send()
         .await
@@ -380,7 +384,7 @@ async fn admin_only_stubs_are_forbidden_for_non_admin() {
 
 #[tokio::test]
 async fn logout_brings_you_back_to_login_redirect_loop() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
 
@@ -427,7 +431,7 @@ async fn logout_brings_you_back_to_login_redirect_loop() {
 
 #[tokio::test]
 async fn connect_page_shows_mcp_endpoint_and_configs() {
-    let h = start_with_users("admin:devpassword:admin").await;
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
 

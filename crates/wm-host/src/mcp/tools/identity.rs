@@ -26,10 +26,9 @@ pub struct WhoAmIResult {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct WhoAmIUser {
     pub id: String,
-    pub name: String,
-    /// Verified email used as the cross-provider identity-linking key;
-    /// null for bootstrap/local users.
-    pub primary_email: Option<String>,
+    /// The account identifier: a verified email, also the
+    /// cross-provider identity-linking key (user-model.md).
+    pub email: String,
     pub is_admin: bool,
 }
 
@@ -37,7 +36,7 @@ pub struct WhoAmIUser {
 impl WmMcpServer {
     #[tool(
         name = "who_am_i",
-        description = "Show the user identity associated with the current MCP session's bearer token: id, name, and admin status. Use this to verify which user the MCP token authenticates as, especially in shared CI environments."
+        description = "Show the user identity associated with the current MCP session's bearer token: id, email, and admin status. Use this to verify which user the MCP token authenticates as, especially in shared CI environments."
     )]
     pub async fn who_am_i(
         &self,
@@ -46,20 +45,10 @@ impl WmMcpServer {
         let auth = auth_from(&parts)?;
         let base_url =
             crate::auth_api::public_base_url(&parts.headers, self.state.trust_forwarded_headers());
-        // AuthContext doesn't carry the email; one record read is fine
-        // for an identity-inspection tool. Best-effort — a race with a
-        // concurrent user-delete just yields null.
-        let primary_email = self
-            .state
-            .auth()
-            .get_user_by_id(&auth.user_id)
-            .ok()
-            .and_then(|u| u.primary_email);
         Ok(Json(WhoAmIResult {
             user: WhoAmIUser {
                 id: auth.user_id,
-                name: auth.user_name,
-                primary_email,
+                email: auth.user_email,
                 is_admin: auth.is_admin,
             },
             base_url,

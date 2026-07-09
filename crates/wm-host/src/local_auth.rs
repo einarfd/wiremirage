@@ -1,14 +1,16 @@
 //! Local user accounts via the `WM_LOCAL_AUTH` env var.
 //!
-//! ADR-0018 scopes the feature: a deliberately-small username/password
+//! ADR-0018 scopes the feature: a deliberately-small email/password
 //! mechanism for testing and trusted-network deployments. Not for
 //! public exposure — see the ADR for the threat model.
 //!
-//! Format: comma-separated entries, each `username:password:role`
-//! where `role` is `admin` or `user` (default `user`):
+//! Format: comma-separated entries, each `email:password:role`
+//! where `role` is `admin` or `user` (default `user`). Accounts are
+//! keyed by email (user-model.md), so the identifier must contain
+//! `@` — nothing is ever *sent* to it:
 //!
 //! ```text
-//! WM_LOCAL_AUTH=alice:hunter2:admin,bob:correct-horse-battery-staple
+//! WM_LOCAL_AUTH=alice@corp.example:hunter2:admin,bob@corp.example:correct-horse-battery-staple
 //! ```
 //!
 //! Plaintext lives only in the env var. The host parses + argon2-hashes
@@ -86,14 +88,17 @@ pub enum ParseError {
     EmptyEntry,
     #[error("entry missing password: {0:?}")]
     MissingPassword(String),
-    #[error("empty username in entry: {0:?}")]
-    EmptyUsername(String),
+    #[error(
+        "user identifier {0:?} is not an email address (accounts are keyed by email; \
+         nothing is ever sent to it)"
+    )]
+    NotAnEmail(String),
     #[error("empty password for user {0:?}")]
     EmptyPassword(String),
     #[error("invalid role for user {user:?}: {raw:?} (use `admin` or `user`)")]
     InvalidRole { user: String, raw: String },
-    #[error("duplicate username in WM_LOCAL_AUTH: {0:?}")]
-    DuplicateUsername(String),
+    #[error("duplicate email in WM_LOCAL_AUTH: {0:?}")]
+    DuplicateEmail(String),
 }
 
 #[derive(Debug, Error)]
@@ -132,12 +137,14 @@ impl LocalAuth {
             if entry.is_empty() {
                 return Err(ParseError::EmptyEntry);
             }
-            let (username, rest) = entry
+            let (email, rest) = entry
                 .split_once(':')
                 .ok_or_else(|| ParseError::MissingPassword(entry.to_string()))?;
-            let username = username.trim();
-            if username.is_empty() {
-                return Err(ParseError::EmptyUsername(entry.to_string()));
+            // Normalized the same way auth.rs normalizes emails, so the
+            // login lookup and the user record agree.
+            let email = email.trim().to_ascii_lowercase();
+            if email.is_empty() || !email.contains('@') {
+                return Err(ParseError::NotAnEmail(email));
             }
             // `rest` is `password` or `password:role`. We split on the
             // *last* `:` so a password containing `:` works as long as
@@ -155,7 +162,7 @@ impl LocalAuth {
                     // them would mask config bugs ("I typed `:adimn`").
                     None => {
                         return Err(ParseError::InvalidRole {
-                            user: username.to_string(),
+                            user: email.clone(),
                             raw: role_candidate.to_string(),
                         });
                     }
@@ -163,10 +170,10 @@ impl LocalAuth {
                 None => (rest, LocalRole::User),
             };
             if password.is_empty() {
-                return Err(ParseError::EmptyPassword(username.to_string()));
+                return Err(ParseError::EmptyPassword(email));
             }
-            if users.contains_key(username) {
-                return Err(ParseError::DuplicateUsername(username.to_string()));
+            if users.contains_key(&email) {
+                return Err(ParseError::DuplicateEmail(email));
             }
             let hash = hash_password(password).map_err(|_| {
                 // argon2 hashing failure on startup is a host bug, not
@@ -174,11 +181,11 @@ impl LocalAuth {
                 // operator sees *something* — but in practice this
                 // arm is unreachable.
                 ParseError::InvalidRole {
-                    user: username.to_string(),
+                    user: email.clone(),
                     raw: "<hash-failure>".to_string(),
                 }
             })?;
-            users.insert(username.to_string(), Credential { hash, role });
+            users.insert(email, Credential { hash, role });
         }
         Ok(Self { users })
     }
@@ -187,24 +194,27 @@ impl LocalAuth {
         self.users.is_empty()
     }
 
-    pub fn has_user(&self, username: &str) -> bool {
-        self.users.contains_key(username)
+    pub fn has_user(&self, email: &str) -> bool {
+        self.users.contains_key(&email.trim().to_ascii_lowercase())
     }
 
-    /// Look up the role for `username`. Used after a successful
+    /// Look up the role for `email`. Used after a successful
     /// verify so the caller knows what `is_admin` to write on the
     /// user record. Returns `None` for unknown users.
-    pub fn role(&self, username: &str) -> Option<LocalRole> {
-        self.users.get(username).map(|c| c.role)
+    pub fn role(&self, email: &str) -> Option<LocalRole> {
+        self.users
+            .get(&email.trim().to_ascii_lowercase())
+            .map(|c| c.role)
     }
 
     /// Verify a plaintext password against the stored hash for
-    /// `username`. Returns `Ok(())` on match, `Err(VerifyError::Invalid)`
+    /// `email`. Returns `Ok(())` on match, `Err(VerifyError::Invalid)`
     /// for unknown user OR wrong password (we don't distinguish on
     /// purpose — leaking "user exists" doesn't help anyone in this
     /// threat model).
-    pub fn verify(&self, username: &str, password: &str) -> Result<LocalRole, VerifyError> {
-        let credential = self.users.get(username).ok_or(VerifyError::Invalid)?;
+    pub fn verify(&self, email: &str, password: &str) -> Result<LocalRole, VerifyError> {
+        let email = email.trim().to_ascii_lowercase();
+        let credential = self.users.get(&email).ok_or(VerifyError::Invalid)?;
         let parsed = PasswordHash::new(&credential.hash)
             .map_err(|e| VerifyError::HashEngine(e.to_string()))?;
         match Argon2::default().verify_password(password.as_bytes(), &parsed) {
@@ -263,98 +273,116 @@ mod tests {
 
     #[test]
     fn single_user_no_role_defaults_to_user() {
-        let auth = LocalAuth::parse("alice:hunter2").unwrap();
-        assert!(auth.has_user("alice"));
-        assert_eq!(auth.role("alice"), Some(LocalRole::User));
+        let auth = LocalAuth::parse("alice@corp.example:hunter2").unwrap();
+        assert!(auth.has_user("alice@corp.example"));
+        assert_eq!(auth.role("alice@corp.example"), Some(LocalRole::User));
         assert!(matches!(
-            auth.verify("alice", "hunter2"),
+            auth.verify("alice@corp.example", "hunter2"),
             Ok(LocalRole::User)
         ));
     }
 
     #[test]
-    fn admin_role_recognized() {
-        let auth = LocalAuth::parse("alice:hunter2:admin").unwrap();
+    fn lookup_is_case_insensitive() {
+        let auth = LocalAuth::parse("Alice@Corp.Example:hunter2").unwrap();
+        assert!(auth.has_user("alice@corp.example"));
         assert!(matches!(
-            auth.verify("alice", "hunter2"),
+            auth.verify("ALICE@corp.example", "hunter2"),
+            Ok(LocalRole::User)
+        ));
+    }
+
+    #[test]
+    fn non_email_identifier_rejected() {
+        let err = LocalAuth::parse("alice:hunter2").unwrap_err();
+        assert!(matches!(err, ParseError::NotAnEmail(_)));
+    }
+
+    #[test]
+    fn admin_role_recognized() {
+        let auth = LocalAuth::parse("alice@corp.example:hunter2:admin").unwrap();
+        assert!(matches!(
+            auth.verify("alice@corp.example", "hunter2"),
             Ok(LocalRole::Admin)
         ));
     }
 
     #[test]
     fn explicit_user_role_same_as_default() {
-        let auth = LocalAuth::parse("alice:hunter2:user").unwrap();
-        assert_eq!(auth.role("alice"), Some(LocalRole::User));
+        let auth = LocalAuth::parse("alice@corp.example:hunter2:user").unwrap();
+        assert_eq!(auth.role("alice@corp.example"), Some(LocalRole::User));
     }
 
     #[test]
     fn multiple_users_parsed() {
-        let auth = LocalAuth::parse("alice:hunter2:admin,bob:correct-horse").unwrap();
-        assert_eq!(auth.role("alice"), Some(LocalRole::Admin));
-        assert_eq!(auth.role("bob"), Some(LocalRole::User));
+        let auth =
+            LocalAuth::parse("alice@corp.example:hunter2:admin,bob@corp.example:correct-horse")
+                .unwrap();
+        assert_eq!(auth.role("alice@corp.example"), Some(LocalRole::Admin));
+        assert_eq!(auth.role("bob@corp.example"), Some(LocalRole::User));
     }
 
     #[test]
     fn password_with_colons_works_when_role_suffix_present() {
         // `secret:contains:colons:admin` → role=admin, password="secret:contains:colons"
-        let auth = LocalAuth::parse("alice:secret:contains:colons:admin").unwrap();
+        let auth = LocalAuth::parse("alice@corp.example:secret:contains:colons:admin").unwrap();
         assert!(matches!(
-            auth.verify("alice", "secret:contains:colons"),
+            auth.verify("alice@corp.example", "secret:contains:colons"),
             Ok(LocalRole::Admin)
         ));
     }
 
     #[test]
     fn wrong_password_returns_invalid() {
-        let auth = LocalAuth::parse("alice:hunter2").unwrap();
+        let auth = LocalAuth::parse("alice@corp.example:hunter2").unwrap();
         assert!(matches!(
-            auth.verify("alice", "wrong"),
+            auth.verify("alice@corp.example", "wrong"),
             Err(VerifyError::Invalid)
         ));
     }
 
     #[test]
     fn unknown_user_returns_invalid() {
-        let auth = LocalAuth::parse("alice:hunter2").unwrap();
+        let auth = LocalAuth::parse("alice@corp.example:hunter2").unwrap();
         assert!(matches!(
-            auth.verify("eve", "hunter2"),
+            auth.verify("eve@corp.example", "hunter2"),
             Err(VerifyError::Invalid)
         ));
     }
 
     #[test]
-    fn empty_username_rejected() {
+    fn empty_identifier_rejected() {
         let err = LocalAuth::parse(":hunter2").unwrap_err();
-        assert!(matches!(err, ParseError::EmptyUsername(_)));
+        assert!(matches!(err, ParseError::NotAnEmail(_)));
     }
 
     #[test]
     fn missing_password_rejected() {
-        let err = LocalAuth::parse("alice").unwrap_err();
+        let err = LocalAuth::parse("alice@corp.example").unwrap_err();
         assert!(matches!(err, ParseError::MissingPassword(_)));
     }
 
     #[test]
     fn empty_password_rejected() {
-        let err = LocalAuth::parse("alice:").unwrap_err();
+        let err = LocalAuth::parse("alice@corp.example:").unwrap_err();
         assert!(matches!(err, ParseError::EmptyPassword(_)));
     }
 
     #[test]
     fn invalid_role_rejected() {
-        let err = LocalAuth::parse("alice:hunter2:wizard").unwrap_err();
+        let err = LocalAuth::parse("alice@corp.example:hunter2:wizard").unwrap_err();
         assert!(matches!(err, ParseError::InvalidRole { .. }));
     }
 
     #[test]
-    fn duplicate_username_rejected() {
-        let err = LocalAuth::parse("alice:a,alice:b").unwrap_err();
-        assert!(matches!(err, ParseError::DuplicateUsername(_)));
+    fn duplicate_email_rejected() {
+        let err = LocalAuth::parse("alice@corp.example:a,Alice@corp.example:b").unwrap_err();
+        assert!(matches!(err, ParseError::DuplicateEmail(_)));
     }
 
     #[test]
     fn empty_entry_from_extra_comma_rejected() {
-        let err = LocalAuth::parse("alice:a,,bob:b").unwrap_err();
+        let err = LocalAuth::parse("alice@corp.example:a,,bob@corp.example:b").unwrap_err();
         assert!(matches!(err, ParseError::EmptyEntry));
     }
 }

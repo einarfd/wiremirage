@@ -3,11 +3,14 @@
 //! Storage layout per `storage-model.md`:
 //!
 //!   user:{ulid}                          hash with user fields
-//!   user:by-name:{name}                  string -> user ulid (name = label/handle)
-//!   user:by-email:{primary_email}        string -> user ulid (the canonical
-//!                                        identifier for provider-backed users;
-//!                                        self-healing for pre-index records)
+//!   user:by-email:{email}                string -> user ulid (THE unique
+//!                                        identifier index; self-healing for
+//!                                        pre-index records)
 //!   user:all                             set of all user ulids
+//!
+//! Identity is email-only: `user:by-name` is retired (a legacy record's
+//! stored `name` doubles as its identifier until a bootstrap/login
+//! backfills the real email — see `decode_user`).
 //!
 //!   token:{ulid}                         hash with token fields (incl. hash; never plaintext)
 //!   token:by-hash:{sha256-hex}           string -> token ulid (fast auth lookup)
@@ -48,15 +51,16 @@ pub enum AuthError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub id: String,
-    pub name: String,
-    /// The cross-provider join key (per user-model.md): set from the
-    /// provider's *verified* email claim when the user is first
-    /// provisioned through an OAuth login (or backfilled on a later
-    /// login if the record predates this field), and never
-    /// auto-updated afterwards — email rotation at a provider must not
-    /// silently re-wire identity linking. `None` for bootstrap/local
-    /// users and for providers that supplied no verified email.
-    pub primary_email: Option<String>,
+    /// The account identifier and cross-provider join key (per
+    /// user-model.md): a *verified* email. Set at provisioning and
+    /// never auto-updated afterwards — email rotation at a provider
+    /// must not silently re-wire identity linking. The auth layer
+    /// treats it as an opaque case-normalized unique string; email
+    /// shape is enforced at the input boundaries (API, env vars,
+    /// OAuth callbacks). Records that predate email-only identity
+    /// decode their stored legacy `name` handle into this field until
+    /// a bootstrap/login backfills the real email.
+    pub email: String,
     pub is_admin: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -105,7 +109,7 @@ pub enum CredentialKind {
 #[derive(Debug, Clone)]
 pub struct AuthContext {
     pub user_id: String,
-    pub user_name: String,
+    pub user_email: String,
     pub is_admin: bool,
     pub credential_kind: CredentialKind,
     pub credential_id: String,
@@ -135,15 +139,40 @@ impl Auth {
 
     // -- Bootstrap --------------------------------------------------------
 
-    /// Idempotently ensure an admin user exists with `name`, owning a
+    /// Idempotently ensure an admin user exists with `email`, owning a
     /// token derived from the supplied plaintext. Returns `true` if a
     /// new user was created, `false` if the user already existed.
-    pub fn bootstrap_admin(&self, name: &str, plaintext: &str) -> Result<bool, AuthError> {
+    pub fn bootstrap_admin(&self, email: &str, plaintext: &str) -> Result<bool, AuthError> {
         let mut bucket = self.bucket()?;
-        if let Some(_existing) = self.read_user_by_name(&mut bucket, name)? {
+        let email = normalize_email(email);
+        if self.find_user_by_email(&mut bucket, &email)?.is_some() {
             return Ok(false);
         }
-        let user = self.write_new_user(&mut bucket, name, None, true)?;
+        // Adopt a legacy pre-email bootstrap record (reachable via the
+        // retired `user:by-name` index) instead of minting a second
+        // admin: its existing token keeps working and the record gains
+        // the email as its identifier.
+        if let Some(bytes) = bucket.get("user:by-name:bootstrap")? {
+            let id = String::from_utf8(bytes)
+                .map_err(|_| AuthError::Malformed("user:by-name value".into()))?;
+            if let Some(user) = self.read_user_by_id(&mut bucket, &id)? {
+                let fields = bucket.hash_get_all(&format!("user:{}", user.id))?;
+                if !fields.contains_key("primary_email") {
+                    bucket.hash_set(
+                        &format!("user:{}", user.id),
+                        "primary_email",
+                        email.as_bytes().to_vec(),
+                    )?;
+                    bucket.set(
+                        &format!("user:by-email:{email}"),
+                        user.id.as_bytes().to_vec(),
+                    )?;
+                    bucket.delete("user:by-name:bootstrap")?;
+                    return Ok(false);
+                }
+            }
+        }
+        let user = self.write_new_user(&mut bucket, &email, true)?;
         self.write_new_token(&mut bucket, &user.id, "bootstrap", plaintext, None)?;
         Ok(true)
     }
@@ -159,12 +188,9 @@ impl Auth {
         Ok(!ids.is_empty())
     }
 
-    pub fn create_user(&self, name: &str, is_admin: bool) -> Result<User, AuthError> {
+    pub fn create_user(&self, email: &str, is_admin: bool) -> Result<User, AuthError> {
         let mut bucket = self.bucket()?;
-        if self.read_user_by_name(&mut bucket, name)?.is_some() {
-            return Err(AuthError::NameTaken(name.to_string()));
-        }
-        self.write_new_user(&mut bucket, name, None, is_admin)
+        self.write_new_user(&mut bucket, &normalize_email(email), is_admin)
     }
 
     pub fn get_user_by_id(&self, id: &str) -> Result<User, AuthError> {
@@ -173,24 +199,13 @@ impl Auth {
             .ok_or(AuthError::NotFound)
     }
 
-    pub fn get_user_by_name(&self, name: &str) -> Result<Option<User>, AuthError> {
+    /// Resolve a user by email — the admin-surface selector. Legacy
+    /// records that predate email-only identity are still reachable by
+    /// their old name handle (their decoded `email` IS that handle, so
+    /// the scan fallback matches it).
+    pub fn get_user_by_email(&self, email: &str) -> Result<Option<User>, AuthError> {
         let mut bucket = self.bucket()?;
-        self.read_user_by_name(&mut bucket, name)
-    }
-
-    /// Resolve a user by the admin-surface selector: anything with an
-    /// `@` is treated as a `primary_email` (the canonical identifier
-    /// for provider-backed users), anything else as the name handle
-    /// (the only address system accounts like `bootstrap` and
-    /// `WM_LOCAL_AUTH` users have). Emails can never contain-free
-    /// collide with names because names never contain `@`.
-    pub fn get_user_by_selector(&self, selector: &str) -> Result<Option<User>, AuthError> {
-        let mut bucket = self.bucket()?;
-        if selector.contains('@') {
-            self.find_user_by_primary_email(&mut bucket, &normalize_email(selector))
-        } else {
-            self.read_user_by_name(&mut bucket, selector)
-        }
+        self.find_user_by_email(&mut bucket, &normalize_email(email))
     }
 
     pub fn list_users(&self) -> Result<Vec<User>, AuthError> {
@@ -214,11 +229,14 @@ impl Auth {
     /// Upsert a user backed by a local-auth (env-var) identity.
     /// First call creates the user; subsequent calls sync `is_admin`
     /// from the env-var role (per ADR-0018: "Admin role lives in the
-    /// env var"). The username is the user record's `name` and also
-    /// the `subject` on the implicit `local:` identity index.
-    pub fn upsert_local_user(&self, username: &str, is_admin: bool) -> Result<User, AuthError> {
+    /// env var"). The email is the user record's identifier and also
+    /// the `subject` on the implicit `local:` identity index — so an
+    /// OAuth-provisioned account with the same email links here too,
+    /// same contract as `upsert_oauth_user`.
+    pub fn upsert_local_user(&self, email: &str, is_admin: bool) -> Result<User, AuthError> {
         let mut bucket = self.bucket()?;
-        if let Some(mut user) = self.read_user_by_name(&mut bucket, username)? {
+        let email = normalize_email(email);
+        if let Some(mut user) = self.find_user_by_email(&mut bucket, &email)? {
             if user.is_admin != is_admin {
                 bucket.hash_set(
                     &format!("user:{}", user.id),
@@ -231,14 +249,14 @@ impl Auth {
             // protects against the (unusual) case where the entry was
             // wiped manually but the user record survived.
             bucket.set(
-                &format!("user:by-identity:local:{username}"),
+                &format!("user:by-identity:local:{email}"),
                 user.id.as_bytes().to_vec(),
             )?;
             return Ok(user);
         }
-        let user = self.write_new_user(&mut bucket, username, None, is_admin)?;
+        let user = self.write_new_user(&mut bucket, &email, is_admin)?;
         bucket.set(
-            &format!("user:by-identity:local:{username}"),
+            &format!("user:by-identity:local:{email}"),
             user.id.as_bytes().to_vec(),
         )?;
         Ok(user)
@@ -246,34 +264,28 @@ impl Auth {
 
     /// Upsert a user keyed on an external identity (e.g. a GitHub
     /// numeric ID or an OIDC `sub`). Returning users are looked up via
-    /// `user:by-identity:{provider}:{subject}` so the user's display
-    /// name and admin flag survive renames on the provider side.
+    /// `user:by-identity:{provider}:{subject}` so the account survives
+    /// renames on the provider side.
     ///
-    /// `email` is the provider's **verified** email claim (callers
-    /// must pass `None` for unverified emails — linking on an
-    /// unverified claim would be an account-takeover vector). It's
+    /// `email` is the provider's **verified** email claim — callers
+    /// must refuse the login before getting here when the provider
+    /// supplied none (linking on an unverified claim would be an
+    /// account-takeover vector, and accounts are keyed by email). It's
     /// the cross-provider join key per user-model.md: a first-seen
     /// `(provider, subject)` whose verified email matches an existing
-    /// user's `primary_email` is **linked** to that user, so the same
-    /// human logging in via GitHub and via an OIDC IdP lands in one
-    /// account, in either order.
-    ///
-    /// `name_hint` is the GitHub login / OIDC `preferred_username`.
-    /// It seeds the user record's `name` on first sight — but names
-    /// are labels, not identity, and a login never fails because a
-    /// handle is taken: on collision a unique name is derived (email
-    /// local part, then numbered suffix).
+    /// user's email is **linked** to that user, so the same human
+    /// logging in via GitHub and via an OIDC IdP lands in one account,
+    /// in either order.
     pub fn upsert_oauth_user(
         &self,
         provider: &str,
         subject: &str,
-        name_hint: &str,
-        email: Option<&str>,
+        email: &str,
         is_admin: bool,
     ) -> Result<User, AuthError> {
         let mut bucket = self.bucket()?;
         let identity_key = format!("user:by-identity:{provider}:{subject}");
-        let email = email.map(normalize_email);
+        let email = normalize_email(email);
 
         // Already-linked path: returning user. Sync `is_admin` from
         // the latest env-var config so removing someone from the
@@ -291,32 +303,30 @@ impl Auth {
                     )?;
                     user.is_admin = is_admin;
                 }
-                // Backfill `primary_email` on records that predate the
-                // field (or whose provider only now supplied an email).
-                // This is a set-once, not an update — an already-set
-                // primary_email never moves (user-model.md: email
-                // rotation must not silently re-wire linking).
-                if user.primary_email.is_none()
-                    && let Some(email) = &email
-                    && self
-                        .find_user_by_primary_email(&mut bucket, email)?
-                        .is_none()
-                {
-                    bucket.hash_set(
-                        &format!("user:{}", user.id),
-                        "primary_email",
-                        email.as_bytes().to_vec(),
-                    )?;
-                    bucket.set(
-                        &format!("user:by-email:{email}"),
-                        user.id.as_bytes().to_vec(),
-                    )?;
-                    user.primary_email = Some(email.clone());
-                } else if let Some(email) = &user.primary_email {
+                // Records that predate email-only identity decode
+                // their legacy name handle as `email`; backfill the
+                // real one. Set-once, not an update — a stored email
+                // never moves (user-model.md: email rotation must not
+                // silently re-wire linking).
+                let fields = bucket.hash_get_all(&format!("user:{}", user.id))?;
+                if !fields.contains_key("primary_email") {
+                    if self.find_user_by_email(&mut bucket, &email)?.is_none() {
+                        bucket.hash_set(
+                            &format!("user:{}", user.id),
+                            "primary_email",
+                            email.as_bytes().to_vec(),
+                        )?;
+                        bucket.set(
+                            &format!("user:by-email:{email}"),
+                            user.id.as_bytes().to_vec(),
+                        )?;
+                        user.email = email;
+                    }
+                } else {
                     // Self-heal the by-email index for records written
                     // before it existed (idempotent set).
                     bucket.set(
-                        &format!("user:by-email:{email}"),
+                        &format!("user:by-email:{}", user.email),
                         user.id.as_bytes().to_vec(),
                     )?;
                 }
@@ -328,13 +338,11 @@ impl Auth {
         }
 
         // First-seen identity. Cross-provider linking (user-model.md):
-        // if a user already holds this verified email as their
-        // primary_email, this is the same person arriving via a new
-        // provider — attach the identity to them. A linear scan over
-        // user:all is the doc-blessed lookup at this deployment scale.
-        if let Some(email) = &email
-            && let Some(mut user) = self.find_user_by_primary_email(&mut bucket, email)?
-        {
+        // if a user already holds this verified email, this is the
+        // same person arriving via a new provider — attach the
+        // identity to them. A linear scan over user:all is the
+        // doc-blessed lookup at this deployment scale.
+        if let Some(mut user) = self.find_user_by_email(&mut bucket, &email)? {
             bucket.set(&identity_key, user.id.as_bytes().to_vec())?;
             if user.is_admin != is_admin {
                 bucket.hash_set(
@@ -347,21 +355,19 @@ impl Auth {
             return Ok(user);
         }
 
-        // No email match: creating a new user. Names are labels, not
-        // identity — a login must never fail because a handle is
-        // taken, so derive a unique one instead of refusing.
-        let name = self.derive_unique_name(&mut bucket, name_hint, email.as_deref())?;
-        let user = self.write_new_user(&mut bucket, &name, email.as_deref(), is_admin)?;
+        let user = self.write_new_user(&mut bucket, &email, is_admin)?;
         bucket.set(&identity_key, user.id.as_bytes().to_vec())?;
         Ok(user)
     }
 
-    /// Look up a user by `primary_email`. Index-first
-    /// (`user:by-email:{email}`); on a miss, falls back to a scan and
-    /// **self-heals** the index — records written before the index
-    /// existed get their entry created the first time anything looks
-    /// them up by email.
-    fn find_user_by_primary_email(
+    /// Look up a user by email. Index-first (`user:by-email:{email}`);
+    /// on a miss, falls back to a scan and **self-heals** the index —
+    /// records written before the index existed get their entry
+    /// created the first time anything looks them up by email. The
+    /// scan also matches legacy records by their old name handle
+    /// (their decoded `email` IS that handle); those are never
+    /// indexed — only real emails go in the index.
+    fn find_user_by_email(
         &self,
         bucket: &mut Bucket,
         email: &str,
@@ -369,57 +375,30 @@ impl Auth {
         if let Some(bytes) = bucket.get(&format!("user:by-email:{email}"))? {
             let id = String::from_utf8(bytes)
                 .map_err(|_| AuthError::Malformed("user:by-email value".into()))?;
-            if let Some(user) = self.read_user_by_id(bucket, &id)? {
+            if let Some(user) = self.read_user_by_id(bucket, &id)?
+                && user.email == email
+            {
                 return Ok(Some(user));
             }
-            // Stale index entry (user deleted out-of-band): drop it and
-            // fall through to the scan.
+            // Stale index entry (user deleted out-of-band, or migrated
+            // to a different identifier): drop it and fall through to
+            // the scan.
             bucket.delete(&format!("user:by-email:{email}"))?;
         }
         for id in bucket.set_members("user:all")? {
             if let Some(user) = self.read_user_by_id(bucket, &id)?
-                && user.primary_email.as_deref() == Some(email)
+                && user.email == email
             {
-                bucket.set(
-                    &format!("user:by-email:{email}"),
-                    user.id.as_bytes().to_vec(),
-                )?;
+                if email.contains('@') {
+                    bucket.set(
+                        &format!("user:by-email:{email}"),
+                        user.id.as_bytes().to_vec(),
+                    )?;
+                }
                 return Ok(Some(user));
             }
         }
         Ok(None)
-    }
-
-    /// Pick a unique name handle for a new OAuth-provisioned user.
-    /// Names are labels, not identity (that's `primary_email` +
-    /// `(provider, subject)`), so a login must never fail because a
-    /// handle is taken: try the provider's hint, then the email local
-    /// part, then numbered suffixes.
-    fn derive_unique_name(
-        &self,
-        bucket: &mut Bucket,
-        name_hint: &str,
-        email: Option<&str>,
-    ) -> Result<String, AuthError> {
-        if self.read_user_by_name(bucket, name_hint)?.is_none() {
-            return Ok(name_hint.to_string());
-        }
-        if let Some(local) = email.and_then(|e| e.split('@').next())
-            && !local.is_empty()
-            && local != name_hint
-            && self.read_user_by_name(bucket, local)?.is_none()
-        {
-            return Ok(local.to_string());
-        }
-        for n in 2..=99 {
-            let candidate = format!("{name_hint}-{n}");
-            if self.read_user_by_name(bucket, &candidate)?.is_none() {
-                return Ok(candidate);
-            }
-        }
-        // 98 same-named collisions is not a real deployment; refuse
-        // loudly rather than loop forever.
-        Err(AuthError::NameTaken(name_hint.to_string()))
     }
 
     /// Toggle a user's admin flag. Idempotent — setting to the current
@@ -459,10 +438,10 @@ impl Auth {
             }
         }
 
-        bucket.delete(&format!("user:by-name:{}", user.name))?;
-        if let Some(email) = &user.primary_email {
-            bucket.delete(&format!("user:by-email:{email}"))?;
-        }
+        bucket.delete(&format!("user:by-email:{}", user.email))?;
+        // Legacy records may still carry a retired user:by-name entry
+        // (their decoded email doubles as that handle).
+        bucket.delete(&format!("user:by-name:{}", user.email))?;
         bucket.set_remove("user:all", &user.id)?;
         for field in ["id", "name", "primary_email", "is_admin", "created_at"] {
             bucket.hash_delete(&format!("user:{}", user.id), field)?;
@@ -478,52 +457,29 @@ impl Auth {
         Ok(Some(decode_user(&fields)?))
     }
 
-    fn read_user_by_name(
-        &self,
-        bucket: &mut Bucket,
-        name: &str,
-    ) -> Result<Option<User>, AuthError> {
-        let Some(bytes) = bucket.get(&format!("user:by-name:{name}"))? else {
-            return Ok(None);
-        };
-        let id = String::from_utf8(bytes)
-            .map_err(|_| AuthError::Malformed("user:by-name value".into()))?;
-        self.read_user_by_id(bucket, &id)
-    }
-
     fn write_new_user(
         &self,
         bucket: &mut Bucket,
-        name: &str,
-        primary_email: Option<&str>,
+        email: &str,
         is_admin: bool,
     ) -> Result<User, AuthError> {
+        // Emails are THE identifier, so the index must stay unique.
+        // Linking lookups usually run first; this guards racing logins
+        // and explicit creation.
+        if self.find_user_by_email(bucket, email)?.is_some() {
+            return Err(AuthError::EmailTaken(email.to_string()));
+        }
         let user = User {
             id: Ulid::new().to_string(),
-            name: name.to_string(),
-            primary_email: primary_email.map(normalize_email),
+            email: email.to_string(),
             is_admin,
             created_at: Utc::now(),
         };
-        if let Some(email) = &user.primary_email {
-            // Emails are the canonical identifier for provider-backed
-            // users, so the index must stay unique. Normal flows never
-            // hit this (the linking lookup runs first); it guards
-            // against racing logins and future callers.
-            if self.find_user_by_primary_email(bucket, email)?.is_some() {
-                return Err(AuthError::EmailTaken(email.clone()));
-            }
-        }
         let key = format!("user:{}", user.id);
         bucket.hash_set(&key, "id", user.id.as_bytes().to_vec())?;
-        bucket.hash_set(&key, "name", user.name.as_bytes().to_vec())?;
-        if let Some(email) = &user.primary_email {
-            bucket.hash_set(&key, "primary_email", email.as_bytes().to_vec())?;
-            bucket.set(
-                &format!("user:by-email:{email}"),
-                user.id.as_bytes().to_vec(),
-            )?;
-        }
+        // Storage field name kept from the pre-email-only era so
+        // existing records need no migration.
+        bucket.hash_set(&key, "primary_email", user.email.as_bytes().to_vec())?;
         bucket.hash_set(
             &key,
             "is_admin",
@@ -535,7 +491,7 @@ impl Auth {
             user.created_at.to_rfc3339().into_bytes(),
         )?;
         bucket.set(
-            &format!("user:by-name:{}", user.name),
+            &format!("user:by-email:{}", user.email),
             user.id.as_bytes().to_vec(),
         )?;
         bucket.set_add("user:all", &user.id)?;
@@ -806,7 +762,7 @@ impl Auth {
         );
         Ok(Some(AuthContext {
             user_id: user.id,
-            user_name: user.name,
+            user_email: user.email,
             is_admin: user.is_admin,
             credential_kind: CredentialKind::Token,
             credential_id: token.id,
@@ -837,7 +793,7 @@ impl Auth {
         };
         Ok(Some(AuthContext {
             user_id: user.id,
-            user_name: user.name,
+            user_email: user.email,
             is_admin: user.is_admin,
             credential_kind: CredentialKind::Token,
             credential_id: access.token_hash,
@@ -868,17 +824,18 @@ fn normalize_email(email: &str) -> String {
 }
 
 fn decode_user(fields: &std::collections::HashMap<String, Vec<u8>>) -> Result<User, AuthError> {
-    let primary_email = match fields.get("primary_email") {
-        None => None,
-        Some(b) => Some(
-            String::from_utf8(b.clone())
-                .map_err(|_| AuthError::Malformed("user.primary_email not utf-8".into()))?,
-        ),
+    // `primary_email` is the stored identifier (field name predates
+    // email-only identity). Records written before it existed carry
+    // only `name`; that legacy handle serves as the identifier until
+    // a bootstrap/login backfills the real email.
+    let email = match fields.get("primary_email") {
+        Some(b) => String::from_utf8(b.clone())
+            .map_err(|_| AuthError::Malformed("user.primary_email not utf-8".into()))?,
+        None => utf8(fields, "name")?,
     };
     Ok(User {
         id: utf8(fields, "id")?,
-        name: utf8(fields, "name")?,
-        primary_email,
+        email,
         is_admin: utf8(fields, "is_admin")? == "1",
         created_at: parse_ts(&utf8(fields, "created_at")?)?,
     })
@@ -942,53 +899,105 @@ mod tests {
         Auth::new(Storage::in_memory())
     }
 
+    /// Write a user record the way the pre-email-only code did: a
+    /// `name` field, no `primary_email`, a `user:by-name` index entry.
+    /// Used to prove the migration/adoption paths.
+    fn write_legacy_named_user(auth: &Auth, name: &str, is_admin: bool) -> String {
+        let mut bucket = auth.bucket().unwrap();
+        let id = Ulid::new().to_string();
+        let key = format!("user:{id}");
+        bucket.hash_set(&key, "id", id.as_bytes().to_vec()).unwrap();
+        bucket
+            .hash_set(&key, "name", name.as_bytes().to_vec())
+            .unwrap();
+        bucket
+            .hash_set(
+                &key,
+                "is_admin",
+                if is_admin { b"1" } else { b"0" }.to_vec(),
+            )
+            .unwrap();
+        bucket
+            .hash_set(&key, "created_at", Utc::now().to_rfc3339().into_bytes())
+            .unwrap();
+        bucket
+            .set(&format!("user:by-name:{name}"), id.as_bytes().to_vec())
+            .unwrap();
+        bucket.set_add("user:all", &id).unwrap();
+        id
+    }
+
     #[test]
     fn bootstrap_creates_admin_user_first_time() {
         let auth = fresh();
-        let created = auth.bootstrap_admin("bootstrap", "wmt_test").unwrap();
+        let created = auth
+            .bootstrap_admin("Root@Test.Example", "wmt_test")
+            .unwrap();
         assert!(created);
         let user = auth
-            .get_user_by_id(
-                &auth
-                    .read_user_by_name(&mut auth.bucket().unwrap(), "bootstrap")
-                    .unwrap()
-                    .unwrap()
-                    .id,
-            )
+            .get_user_by_email("root@test.example")
+            .unwrap()
             .unwrap();
         assert!(user.is_admin);
+        assert_eq!(user.email, "root@test.example", "email is normalized");
     }
 
     #[test]
     fn bootstrap_is_idempotent() {
         let auth = fresh();
-        assert!(auth.bootstrap_admin("bootstrap", "wmt_a").unwrap());
-        assert!(!auth.bootstrap_admin("bootstrap", "wmt_a").unwrap());
+        assert!(auth.bootstrap_admin("root@test.example", "wmt_a").unwrap());
+        assert!(!auth.bootstrap_admin("root@test.example", "wmt_a").unwrap());
         // Idempotent in the sense of "don't re-create"; doesn't overwrite
         // the existing token even with a different plaintext.
-        assert!(!auth.bootstrap_admin("bootstrap", "wmt_b").unwrap());
+        assert!(!auth.bootstrap_admin("root@test.example", "wmt_b").unwrap());
+    }
+
+    #[test]
+    fn bootstrap_adopts_legacy_named_record() {
+        let auth = fresh();
+        // A deployment from before email-only identity: the bootstrap
+        // admin exists under the name handle, no email.
+        let legacy_id = write_legacy_named_user(&auth, "bootstrap", true);
+        // Restart with WM_BOOTSTRAP_EMAIL set: the record is adopted,
+        // not duplicated (and its existing token would keep working —
+        // no new token is minted).
+        let created = auth
+            .bootstrap_admin("root@test.example", "wmt_test")
+            .unwrap();
+        assert!(!created, "adoption, not creation");
+        assert_eq!(auth.list_users().unwrap().len(), 1);
+        let user = auth
+            .get_user_by_email("root@test.example")
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.id, legacy_id);
+        // The old handle no longer addresses it — the identifier moved.
+        assert!(auth.get_user_by_email("bootstrap").unwrap().is_none());
     }
 
     #[test]
     fn authenticate_with_correct_token() {
         let auth = fresh();
-        auth.bootstrap_admin("bootstrap", "wmt_secret").unwrap();
+        auth.bootstrap_admin("root@test.example", "wmt_secret")
+            .unwrap();
         let ctx = auth.authenticate("wmt_secret").unwrap().unwrap();
-        assert_eq!(ctx.user_name, "bootstrap");
+        assert_eq!(ctx.user_email, "root@test.example");
         assert!(ctx.is_admin);
     }
 
     #[test]
     fn authenticate_with_wrong_token_returns_none() {
         let auth = fresh();
-        auth.bootstrap_admin("bootstrap", "wmt_secret").unwrap();
+        auth.bootstrap_admin("root@test.example", "wmt_secret")
+            .unwrap();
         assert!(auth.authenticate("wmt_wrong").unwrap().is_none());
     }
 
     #[test]
     fn authenticate_rejects_non_wmt_prefix() {
         let auth = fresh();
-        auth.bootstrap_admin("bootstrap", "wmt_secret").unwrap();
+        auth.bootstrap_admin("root@test.example", "wmt_secret")
+            .unwrap();
         assert!(auth.authenticate("Bearer wmt_secret").unwrap().is_none());
         assert!(auth.authenticate("plain-secret").unwrap().is_none());
     }
@@ -996,9 +1005,10 @@ mod tests {
     #[test]
     fn create_and_revoke_token() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         let (token, plaintext) = auth.create_token(&user.id, "ci-runner", None).unwrap();
@@ -1017,9 +1027,10 @@ mod tests {
     #[test]
     fn token_with_ttl_expires() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         // Negative TTL → already expired.
@@ -1077,9 +1088,10 @@ mod tests {
     #[test]
     fn list_tokens_returns_owners_tokens() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         auth.create_token(&user.id, "one", None).unwrap();
@@ -1092,9 +1104,10 @@ mod tests {
     #[test]
     fn create_token_rejects_duplicate_name() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         auth.create_token(&user.id, "ci", None).unwrap();
@@ -1105,9 +1118,10 @@ mod tests {
     #[test]
     fn rename_token_updates_record_and_index_and_keeps_plaintext_valid() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         let (token, plaintext) = auth.create_token(&user.id, "laptop-old", None).unwrap();
@@ -1141,9 +1155,10 @@ mod tests {
     #[test]
     fn rename_token_rejects_name_collision() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         auth.create_token(&user.id, "ci", None).unwrap();
@@ -1155,9 +1170,10 @@ mod tests {
     #[test]
     fn rename_token_to_same_name_is_a_noop() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         let (token, _) = auth.create_token(&user.id, "ci", None).unwrap();
@@ -1169,9 +1185,10 @@ mod tests {
     #[test]
     fn rename_token_returns_not_found_for_unknown_name() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
         let user = auth
-            .read_user_by_name(&mut auth.bucket().unwrap(), "alice")
+            .get_user_by_email("alice@test.example")
             .unwrap()
             .unwrap();
         let err = auth.rename_token(&user.id, "no-such", "new").unwrap_err();
@@ -1181,32 +1198,39 @@ mod tests {
     #[test]
     fn list_users_returns_all_users() {
         let auth = fresh();
-        auth.bootstrap_admin("bootstrap", "wmt_b").unwrap();
-        auth.create_user("alice", false).unwrap();
-        auth.create_user("bob", true).unwrap();
-        let mut names: Vec<String> = auth
+        auth.bootstrap_admin("root@test.example", "wmt_b").unwrap();
+        auth.create_user("alice@test.example", false).unwrap();
+        auth.create_user("bob@test.example", true).unwrap();
+        let mut emails: Vec<String> = auth
             .list_users()
             .unwrap()
             .into_iter()
-            .map(|u| u.name)
+            .map(|u| u.email)
             .collect();
-        names.sort();
-        assert_eq!(names, vec!["alice", "bob", "bootstrap"]);
+        emails.sort();
+        assert_eq!(
+            emails,
+            vec![
+                "alice@test.example",
+                "bob@test.example",
+                "root@test.example"
+            ]
+        );
     }
 
     #[test]
     fn count_admins_only_includes_admins() {
         let auth = fresh();
-        auth.bootstrap_admin("bootstrap", "wmt_b").unwrap();
-        auth.create_user("alice", false).unwrap();
-        auth.create_user("bob", true).unwrap();
+        auth.bootstrap_admin("root@test.example", "wmt_b").unwrap();
+        auth.create_user("alice@test.example", false).unwrap();
+        auth.create_user("bob@test.example", true).unwrap();
         assert_eq!(auth.count_admins().unwrap(), 2);
     }
 
     #[test]
     fn set_user_admin_toggles_flag() {
         let auth = fresh();
-        let alice = auth.create_user("alice", false).unwrap();
+        let alice = auth.create_user("alice@test.example", false).unwrap();
         assert!(!alice.is_admin);
         let promoted = auth.set_user_admin(&alice.id, true).unwrap();
         assert!(promoted.is_admin);
@@ -1218,8 +1242,12 @@ mod tests {
     #[test]
     fn delete_user_cascades_tokens() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
-        let alice = auth.get_user_by_name("alice").unwrap().unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
+        let alice = auth
+            .get_user_by_email("alice@test.example")
+            .unwrap()
+            .unwrap();
         let (_t1, t1_plain) = auth.create_token(&alice.id, "extra", None).unwrap();
         // Both the bootstrap token and the extra token should authenticate.
         assert!(auth.authenticate("wmt_alice").unwrap().is_some());
@@ -1228,7 +1256,11 @@ mod tests {
         auth.delete_user(&alice.id).unwrap();
 
         // User is gone.
-        assert!(auth.get_user_by_name("alice").unwrap().is_none());
+        assert!(
+            auth.get_user_by_email("alice@test.example")
+                .unwrap()
+                .is_none()
+        );
         // All of the user's tokens stop authenticating.
         assert!(auth.authenticate("wmt_alice").unwrap().is_none());
         assert!(auth.authenticate(&t1_plain).unwrap().is_none());
@@ -1237,8 +1269,12 @@ mod tests {
     #[test]
     fn new_token_gets_full_access_scopes() {
         let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
-        let user = auth.get_user_by_name("alice").unwrap().unwrap();
+        auth.bootstrap_admin("alice@test.example", "wmt_alice")
+            .unwrap();
+        let user = auth
+            .get_user_by_email("alice@test.example")
+            .unwrap()
+            .unwrap();
         let (token, _) = auth.create_token(&user.id, "ci", None).unwrap();
         assert_eq!(token.scopes, vec!["*".to_string()]);
         // Round-trip through storage preserves the value.
@@ -1247,17 +1283,28 @@ mod tests {
     }
 
     #[test]
+    fn create_user_rejects_duplicate_email() {
+        let auth = fresh();
+        auth.create_user("alice@test.example", false).unwrap();
+        let err = auth.create_user("alice@test.example", true).unwrap_err();
+        assert!(matches!(err, AuthError::EmailTaken(_)));
+        // Case-insensitive: same address, different casing.
+        let err = auth.create_user("Alice@Test.Example", false).unwrap_err();
+        assert!(matches!(err, AuthError::EmailTaken(_)));
+    }
+
+    #[test]
     fn upsert_oauth_user_creates_then_returns_same_record() {
         let auth = fresh();
         let first = auth
-            .upsert_oauth_user("github", "12345", "einarw", None, false)
+            .upsert_oauth_user("github", "12345", "dev@acme.example", false)
             .unwrap();
-        assert_eq!(first.name, "einarw");
+        assert_eq!(first.email, "dev@acme.example");
         assert!(!first.is_admin);
 
         // Second call with the same identity returns the same user.
         let second = auth
-            .upsert_oauth_user("github", "12345", "einarw", None, false)
+            .upsert_oauth_user("github", "12345", "dev@acme.example", false)
             .unwrap();
         assert_eq!(second.id, first.id);
     }
@@ -1266,36 +1313,20 @@ mod tests {
     fn upsert_oauth_user_syncs_admin_flag() {
         let auth = fresh();
         let u = auth
-            .upsert_oauth_user("github", "1", "alice", None, false)
+            .upsert_oauth_user("github", "1", "alice@test.example", false)
             .unwrap();
         assert!(!u.is_admin);
         let u = auth
-            .upsert_oauth_user("github", "1", "alice", None, true)
+            .upsert_oauth_user("github", "1", "alice@test.example", true)
             .unwrap();
         assert!(u.is_admin);
         // Persisted.
         assert!(auth.get_user_by_id(&u.id).unwrap().is_admin);
         // And demote works.
         let u = auth
-            .upsert_oauth_user("github", "1", "alice", None, false)
+            .upsert_oauth_user("github", "1", "alice@test.example", false)
             .unwrap();
         assert!(!u.is_admin);
-    }
-
-    #[test]
-    fn upsert_oauth_user_derives_a_fresh_name_on_collision() {
-        let auth = fresh();
-        auth.bootstrap_admin("alice", "wmt_alice").unwrap();
-        // A fresh github identity using the same login as an existing
-        // user must neither take over that record nor fail the login —
-        // names are labels; it gets a derived handle.
-        let user = auth
-            .upsert_oauth_user("github", "999", "alice", None, false)
-            .unwrap();
-        assert_eq!(user.name, "alice-2");
-        // The bootstrap user is untouched.
-        let bootstrap = auth.get_user_by_name("alice").unwrap().unwrap();
-        assert_ne!(bootstrap.id, user.id);
     }
 
     #[test]
@@ -1303,33 +1334,15 @@ mod tests {
         let auth = fresh();
         // Same human: GitHub first, OIDC second, same verified email.
         let via_github = auth
-            .upsert_oauth_user(
-                "github",
-                "12345",
-                "einarw",
-                Some("dev@acme.example"),
-                false,
-            )
+            .upsert_oauth_user("github", "12345", "dev@acme.example", false)
             .unwrap();
         let via_oidc = auth
-            .upsert_oauth_user(
-                "oidc",
-                "sub-abc",
-                "einarw",
-                Some("dev@acme.example"),
-                false,
-            )
+            .upsert_oauth_user("oidc", "sub-abc", "dev@acme.example", false)
             .unwrap();
         assert_eq!(via_oidc.id, via_github.id, "one account, two providers");
         // Both identities now resolve to the same user.
         let again = auth
-            .upsert_oauth_user(
-                "oidc",
-                "sub-abc",
-                "einarw",
-                Some("dev@acme.example"),
-                false,
-            )
+            .upsert_oauth_user("oidc", "sub-abc", "dev@acme.example", false)
             .unwrap();
         assert_eq!(again.id, via_github.id);
     }
@@ -1338,62 +1351,37 @@ mod tests {
     fn oauth_email_linking_is_case_insensitive_and_trimmed() {
         let auth = fresh();
         let first = auth
-            .upsert_oauth_user("github", "1", "alice", Some("Alice@Corp.Example"), false)
+            .upsert_oauth_user("github", "1", "Alice@Corp.Example", false)
             .unwrap();
-        assert_eq!(first.primary_email.as_deref(), Some("alice@corp.example"));
+        assert_eq!(first.email, "alice@corp.example");
         let linked = auth
-            .upsert_oauth_user(
-                "oidc",
-                "s1",
-                "alice-oidc",
-                Some("  alice@corp.example "),
-                false,
-            )
+            .upsert_oauth_user("oidc", "s1", "  alice@corp.example ", false)
             .unwrap();
         assert_eq!(linked.id, first.id);
     }
 
     #[test]
-    fn oauth_user_without_email_never_links_and_gets_a_fresh_handle() {
+    fn oauth_users_with_different_emails_are_distinct_accounts() {
         let auth = fresh();
         let first = auth
-            .upsert_oauth_user("github", "1", "alice", Some("alice@corp.example"), false)
-            .unwrap();
-        // Same name from a second provider but NO verified email: must
-        // not link (nothing vouches it's the same person); it becomes
-        // a separate account under a derived handle.
-        let second = auth
-            .upsert_oauth_user("oidc", "s1", "alice", None, false)
-            .unwrap();
-        assert_ne!(second.id, first.id);
-        assert_eq!(second.name, "alice-2");
-        assert_eq!(second.primary_email, None);
-    }
-
-    #[test]
-    fn oauth_user_with_different_email_and_same_name_becomes_a_second_account() {
-        let auth = fresh();
-        let first = auth
-            .upsert_oauth_user("github", "1", "alice", Some("alice@corp.example"), false)
+            .upsert_oauth_user("github", "1", "alice@corp.example", false)
             .unwrap();
         // Different verified email = genuinely different person: a
-        // second account, under a derived handle, never a merge.
+        // second account, never a merge.
         let second = auth
-            .upsert_oauth_user("oidc", "s1", "alice", Some("alice@other.example"), false)
+            .upsert_oauth_user("oidc", "s1", "alice@other.example", false)
             .unwrap();
         assert_ne!(second.id, first.id);
-        assert_eq!(second.name, "alice-2");
-        assert_eq!(second.primary_email.as_deref(), Some("alice@other.example"));
         // And both are addressable by their emails.
         assert_eq!(
-            auth.get_user_by_selector("alice@corp.example")
+            auth.get_user_by_email("alice@corp.example")
                 .unwrap()
                 .unwrap()
                 .id,
             first.id
         );
         assert_eq!(
-            auth.get_user_by_selector("alice@other.example")
+            auth.get_user_by_email("alice@other.example")
                 .unwrap()
                 .unwrap()
                 .id,
@@ -1402,85 +1390,65 @@ mod tests {
     }
 
     #[test]
-    fn derive_unique_name_prefers_email_local_part_when_hint_taken() {
+    fn returning_identity_keeps_stored_email() {
         let auth = fresh();
-        auth.bootstrap_admin("einarw", "wmt_x").unwrap();
-        // Hint "einarw" is taken; the email local part "einar" differs
-        // and is free — preferred over a numbered suffix.
-        let user = auth
-            .upsert_oauth_user("oidc", "s1", "einarw", Some("dev@acme.example"), false)
+        let first = auth
+            .upsert_oauth_user("github", "1", "alice@corp.example", false)
             .unwrap();
-        assert_eq!(user.name, "einar");
-    }
-
-    #[test]
-    fn selector_resolves_email_or_name() {
-        let auth = fresh();
-        auth.bootstrap_admin("bootstrap", "wmt_x").unwrap();
-        let alice = auth
-            .upsert_oauth_user("github", "1", "alice", Some("Alice@Corp.Example"), false)
+        // A later login with a DIFFERENT email must not move the
+        // identifier — set-once (user-model.md).
+        let unchanged = auth
+            .upsert_oauth_user("github", "1", "new@corp.example", false)
             .unwrap();
-        // Email selector: case-insensitive, index-backed.
-        assert_eq!(
-            auth.get_user_by_selector("ALICE@corp.example")
-                .unwrap()
-                .unwrap()
-                .id,
-            alice.id
-        );
-        // Name selector still works (the only address bootstrap has).
-        assert_eq!(
-            auth.get_user_by_selector("bootstrap")
-                .unwrap()
-                .unwrap()
-                .name,
-            "bootstrap"
-        );
-        // Unknown email is a clean miss.
+        assert_eq!(unchanged.id, first.id);
+        assert_eq!(unchanged.email, "alice@corp.example");
+        // And no phantom account under the new email.
         assert!(
-            auth.get_user_by_selector("nobody@corp.example")
+            auth.get_user_by_email("new@corp.example")
                 .unwrap()
                 .is_none()
         );
     }
 
     #[test]
-    fn oauth_linking_wins_over_name_even_when_names_differ() {
+    fn legacy_record_backfills_email_on_login() {
         let auth = fresh();
-        let first = auth
-            .upsert_oauth_user("github", "1", "einarw", Some("dev@acme.example"), false)
+        // Record + identity index from before email-only identity.
+        let legacy_id = write_legacy_named_user(&auth, "einarw", false);
+        auth.bucket()
+            .unwrap()
+            .set("user:by-identity:github:1", legacy_id.as_bytes().to_vec())
             .unwrap();
-        // Same email, totally different username at the second
-        // provider: email is the join key, so this still links.
-        let linked = auth
-            .upsert_oauth_user("oidc", "s1", "einarfd", Some("dev@acme.example"), false)
+        // Next login supplies the verified email: backfilled in place.
+        let user = auth
+            .upsert_oauth_user("github", "1", "dev@acme.example", false)
             .unwrap();
-        assert_eq!(linked.id, first.id);
-        assert_eq!(linked.name, "einarw", "existing name is kept");
+        assert_eq!(user.id, legacy_id);
+        assert_eq!(user.email, "dev@acme.example");
+        assert_eq!(
+            auth.get_user_by_email("dev@acme.example")
+                .unwrap()
+                .unwrap()
+                .id,
+            legacy_id
+        );
     }
 
     #[test]
-    fn returning_identity_backfills_primary_email_once() {
+    fn legacy_record_still_addressable_by_old_handle() {
         let auth = fresh();
-        // Record created before the provider supplied an email (or
-        // predating the field).
-        let created = auth
-            .upsert_oauth_user("github", "1", "alice", None, false)
-            .unwrap();
-        assert_eq!(created.primary_email, None);
-        // Next login supplies one: backfilled.
-        let filled = auth
-            .upsert_oauth_user("github", "1", "alice", Some("alice@corp.example"), false)
-            .unwrap();
-        assert_eq!(filled.primary_email.as_deref(), Some("alice@corp.example"));
-        // A later login with a DIFFERENT email must not move it —
-        // primary_email is set-once (user-model.md).
-        let unchanged = auth
-            .upsert_oauth_user("github", "1", "alice", Some("new@corp.example"), false)
-            .unwrap();
-        assert_eq!(
-            unchanged.primary_email.as_deref(),
-            Some("alice@corp.example")
+        let legacy_id = write_legacy_named_user(&auth, "bootstrap", true);
+        // Until a bootstrap/login backfills the email, the old handle
+        // works as the selector (scan fallback)...
+        let user = auth.get_user_by_email("bootstrap").unwrap().unwrap();
+        assert_eq!(user.id, legacy_id);
+        // ...but a bare handle is never written into the email index.
+        assert!(
+            auth.bucket()
+                .unwrap()
+                .get("user:by-email:bootstrap")
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -1488,13 +1456,13 @@ mod tests {
     fn linking_syncs_admin_flag_from_the_linking_provider() {
         let auth = fresh();
         let first = auth
-            .upsert_oauth_user("github", "1", "alice", Some("alice@corp.example"), false)
+            .upsert_oauth_user("github", "1", "alice@corp.example", false)
             .unwrap();
         assert!(!first.is_admin);
         // The OIDC provider's rules say admin: the linked account is
         // promoted, same contract as the returning-identity path.
         let linked = auth
-            .upsert_oauth_user("oidc", "s1", "alice", Some("alice@corp.example"), true)
+            .upsert_oauth_user("oidc", "s1", "alice@corp.example", true)
             .unwrap();
         assert_eq!(linked.id, first.id);
         assert!(linked.is_admin);
@@ -1502,15 +1470,28 @@ mod tests {
     }
 
     #[test]
+    fn upsert_local_user_links_by_email() {
+        let auth = fresh();
+        // OAuth account first; local-auth entry with the same email
+        // addresses the SAME account (one human, two login doors).
+        let via_oauth = auth
+            .upsert_oauth_user("github", "1", "alice@corp.example", false)
+            .unwrap();
+        let via_local = auth.upsert_local_user("alice@corp.example", true).unwrap();
+        assert_eq!(via_local.id, via_oauth.id);
+        assert!(via_local.is_admin, "role synced from the env var");
+    }
+
+    #[test]
     fn deleted_user_leaves_no_stale_email_link() {
         let auth = fresh();
         let user = auth
-            .upsert_oauth_user("github", "1", "alice", Some("alice@corp.example"), false)
+            .upsert_oauth_user("github", "1", "alice@corp.example", false)
             .unwrap();
         auth.delete_user(&user.id).unwrap();
         // A new identity re-using the email starts fresh.
         let fresh_user = auth
-            .upsert_oauth_user("oidc", "s2", "alice", Some("alice@corp.example"), false)
+            .upsert_oauth_user("oidc", "s2", "alice@corp.example", false)
             .unwrap();
         assert_ne!(fresh_user.id, user.id);
     }

@@ -45,7 +45,7 @@ fn no_redirect_client() -> Client {
 async fn start() -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
-    let admin = auth.create_user("admin", true).expect("admin");
+    let admin = auth.create_user("admin@test.example", true).expect("admin");
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let registry = Arc::new(Registry::new(storage.clone()));
     // A known group establishes the `mock.localhost` virtual host

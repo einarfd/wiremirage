@@ -47,7 +47,8 @@ pub struct HostInfo {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct UserInfo {
-    pub name: String,
+    /// The account identifier: a verified email.
+    pub email: String,
     pub is_admin: bool,
 }
 
@@ -284,7 +285,7 @@ impl WmMcpServer {
                 base_url,
             },
             user: UserInfo {
-                name: auth.user_name,
+                email: auth.user_email,
                 is_admin: auth.is_admin,
             },
             groups: summaries,
