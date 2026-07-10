@@ -667,7 +667,7 @@ creation (`wm users create`, bootstrap). Also: `POST /auth/logout`
 now 303s to `/auth/login?signed_out=1` (which renders a signed-out
 notice) instead of returning a bare 204 that left the browser sitting
 on a dead page.
-A follow-up went the rest of the way: identity is **email-only**.
+A follow-up went the rest of the way (ADR-0036): identity is **email-only**.
 `User.name` is deleted — the record is `{ id, email, is_admin,
 created_at }` and the email is the identifier AND the display label on
 every surface (UI owner columns + nav badge, `wm users`, MCP
