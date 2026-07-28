@@ -357,6 +357,91 @@ with an account there is yours. To restrict which Pocket ID users may use
 WireMirage at all, use the client's allowed-groups setting in Pocket ID
 itself, or switch to `WM_OIDC_ALLOW_GROUPS` on this side.)
 
+#### When the IdP won't give you a verified email
+
+Accounts are keyed on the verified email, so a login the IdP can't back
+with one is refused:
+
+```
+OIDC login failed: the IdP returned no verified `email` claim, and
+WireMirage accounts are keyed by email.
+```
+
+WireMirage treats an **absent** `email_verified` as verified (plenty of
+IdPs omit the claim), so this error means one of three things, in
+roughly the order worth checking:
+
+1. **The client isn't granted the `email` scope**, or the IdP has no
+   claim mapping producing it — nothing arrives in userinfo. Check the
+   client's scopes/mappings, and that `email` shows up in
+   `scopes_supported` at `{issuer}/.well-known/openid-configuration`.
+2. **The user record has no email address.** Common for the bootstrap
+   admin account and for users created by an LDAP/SCIM sync that didn't
+   map a mail attribute.
+3. **The IdP explicitly sent `email_verified: false`.** Expect this
+   whenever the IdP has no mailbox-verification step it can point at, or
+   has one that this account never went through. Two shapes:
+   - *Global* — the provider never asserts verification for anyone.
+     **Authentik** is the confirmed case (below).
+   - *Per-user* — the IdP has a verified flag but it defaults to false
+     for accounts an admin created directly rather than via an
+     email-confirmation flow. **Keycloak**'s per-user *Email verified*
+     toggle behaves this way; flip it on the user (or set it in your
+     import/realm export, or via the admin API) rather than changing
+     the mapping.
+
+Whatever the IdP, the fix belongs there — see the trust note at the end
+of this section before you reach for it.
+
+**Authentik**, concretely: its default `email` scope mapping hardcodes
+`email_verified: False`, so a stock Authentik client fails **every**
+login. Create a custom scope mapping (*Customisation → Property Mappings
+→ Create → Scope Mapping*) with scope name `email` and
+
+```python
+return {
+    "email": request.user.email,
+    "email_verified": bool(request.user.email),
+}
+```
+
+then, on the provider, **replace** `authentik default OAuth Mapping:
+OpenID 'email'` with yours in *Selected Scopes* — don't add it alongside,
+or two mappings claim the same scope. As a blueprint entry:
+
+```yaml
+  - model: authentik_providers_oauth2.scopemapping
+    id: wm-scope-email
+    identifiers:
+      name: "WireMirage: OpenID 'email' (verified)"
+    attrs:
+      scope_name: email
+      expression: |
+        return {
+            "email": request.user.email,
+            "email_verified": bool(request.user.email),
+        }
+```
+
+referenced from the provider's `property_mappings` as `!KeyOf
+wm-scope-email` (define it before the provider entry).
+
+**Before you assert verification anywhere, know what you're asserting.**
+`email_verified` means "I checked that this person controls this
+mailbox", and the claim is load-bearing: WireMirage links a first-seen
+identity to any existing account carrying the same verified email, so
+GitHub and your own IdP resolve to one user rather than two.
+
+Asserting it is honest when *you* control who gets an address — accounts
+created by an admin or synced from an authoritative directory, no open
+enrolment, no self-service email edit. It is **not** honest on an IdP
+with self-registration or a user-editable email field: there, anyone
+could put a colleague's address on their own profile and inherit that
+colleague's WireMirage account at the next login. That holds for every
+IdP, not just the ones named above — if the answer to "who can set this
+address?" is "the user", fix the IdP's verification flow instead of
+asserting past it.
+
 ### Browser login — GitHub OAuth (recommended for production)
 
 Two steps. First, register a GitHub **OAuth App** (the simple flavor —
