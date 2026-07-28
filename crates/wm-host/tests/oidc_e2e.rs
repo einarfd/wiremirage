@@ -156,6 +156,12 @@ fn config_for(issuer: &str) -> OidcConfig {
 /// userinfo. Uses `discover()` for the endpoint resolution so every
 /// harness run also exercises the discovery path.
 async fn start(claims: serde_json::Value) -> Harness {
+    start_with(claims, |_| {}).await
+}
+
+/// `start` with the OIDC config adjusted — for postures the default
+/// harness config doesn't cover (e.g. the private-IdP `allow_all`).
+async fn start_with(claims: serde_json::Value, tweak: impl FnOnce(&mut OidcConfig)) -> Harness {
     let mock_issuer = start_mock_issuer(claims, None).await;
 
     let storage = Storage::in_memory();
@@ -165,7 +171,9 @@ async fn start(claims: serde_json::Value) -> Harness {
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
 
-    let provider = config_for(&mock_issuer.base)
+    let mut config = config_for(&mock_issuer.base);
+    tweak(&mut config);
+    let provider = config
         .discover()
         .await
         .expect("discovery against mock issuer");
@@ -352,6 +360,76 @@ async fn full_callback_flow_mints_session_and_creates_user() {
     let body: serde_json::Value = me.json().await.expect("json");
     assert_eq!(body["email"], "einar@kindly.example");
     assert_eq!(body["is_admin"], true, "admin email promotes: {body}");
+}
+
+/// Drive start → callback and hand back what the callback answered.
+async fn login_attempt(h: &Harness) -> (reqwest::StatusCode, String) {
+    let client = no_redirect_client();
+    let start_resp = client
+        .get(url(h, "/auth/start/oidc"))
+        .send()
+        .await
+        .expect("send start");
+    let location = start_resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let state = reqwest::Url::parse(location)
+        .unwrap()
+        .query_pairs()
+        .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+        .expect("state in authorize URL");
+    let cb = client
+        .get(url(
+            h,
+            &format!("/auth/callback/oidc?code=fakecode&state={state}"),
+        ))
+        .send()
+        .await
+        .expect("send callback");
+    let status = cb.status();
+    (status, cb.text().await.unwrap_or_default())
+}
+
+/// Accounts are keyed on the verified email, so a login the IdP can't
+/// back with one is refused — and the refusal names *which* of the
+/// three causes it hit, because each has a different fix at the IdP.
+/// `allow_all` throughout: the private-IdP posture, where nothing else
+/// would have rejected these identities first.
+#[tokio::test]
+async fn login_without_a_verified_email_is_refused_and_names_the_cause() {
+    // A real address the IdP explicitly marks unverified — the shape
+    // Authentik ships by default (its stock `email` scope mapping
+    // hardcodes email_verified: false).
+    let mut claims = einar_claims();
+    claims["email_verified"] = json!(false);
+    let h = start_with(claims, |c| c.allow_all = true).await;
+    let (status, body) = login_attempt(&h).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("email_verified: false"), "{body}");
+
+    // No `email` claim at all — the client isn't granted an email
+    // scope, or no mapping produces the claim.
+    let mut claims = einar_claims();
+    let obj = claims.as_object_mut().unwrap();
+    obj.remove("email");
+    obj.remove("email_verified");
+    let h = start_with(claims, |c| c.allow_all = true).await;
+    let (status, body) = login_attempt(&h).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("no `email` claim"), "{body}");
+
+    // An address-less user record: the claim arrives blank. Refused
+    // even though the IdP calls it verified — a blank string must
+    // never become an account key.
+    let mut claims = einar_claims();
+    claims["email"] = json!("");
+    let h = start_with(claims, |c| c.allow_all = true).await;
+    let (status, body) = login_attempt(&h).await;
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("`email` claim was empty"), "{body}");
 }
 
 #[tokio::test]

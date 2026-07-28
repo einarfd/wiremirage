@@ -392,7 +392,7 @@ impl OidcProvider {
             // allow-list; per-app restrictions live in the IdP.
             return Ok(());
         }
-        if let Some(email) = &identity.email {
+        if let Some(email) = identity.verified_email() {
             let email_lc = email.to_ascii_lowercase();
             if self
                 .config
@@ -425,7 +425,7 @@ impl OidcProvider {
         }
         Err(AllowFailure {
             subject: identity.subject.clone(),
-            email: identity.email.clone(),
+            email: identity.verified_email().map(str::to_string),
             groups: identity.groups.clone(),
         })
     }
@@ -434,7 +434,7 @@ impl OidcProvider {
     /// Operator opts in via `WM_OIDC_ADMIN_EMAILS` / `_ADMIN_GROUPS`;
     /// unset means no OIDC user is admin.
     pub fn is_admin(&self, identity: &OidcIdentity) -> bool {
-        if let Some(email) = &identity.email {
+        if let Some(email) = identity.verified_email() {
             let email_lc = email.to_ascii_lowercase();
             if self
                 .config
@@ -473,17 +473,60 @@ struct EnvValues {
     extra_scopes: String,
 }
 
+/// Why userinfo yielded no usable verified email. Accounts are keyed
+/// on that address, so each of these refuses the login — and each has
+/// a different fix at the IdP, which the operator can't guess from the
+/// refusal alone (README: "When the IdP won't give you a verified
+/// email").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingEmail {
+    /// No `email` key in the userinfo response at all — usually the
+    /// client isn't granted an `email` scope, or no claim mapping
+    /// produces one.
+    NoClaim,
+    /// An `email` claim that is present but blank: the IdP's user
+    /// record carries no address.
+    Blank,
+    /// A real address the IdP explicitly marked `email_verified:
+    /// false` — it has no verification step it can vouch for on this
+    /// account.
+    Unverified,
+}
+
+impl std::fmt::Display for MissingEmail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::NoClaim => {
+                "userinfo carried no `email` claim — check that the client is \
+                 granted an `email` scope and that a claim mapping produces it"
+            }
+            Self::Blank => {
+                "the `email` claim was empty — this user's record at the IdP \
+                 has no address"
+            }
+            Self::Unverified => {
+                "the IdP marked the address `email_verified: false` — it has \
+                 no verification step it can vouch for on this account"
+            }
+        };
+        f.write_str(s)
+    }
+}
+
 /// Identity assembled from userinfo claims.
 #[derive(Debug, Clone)]
 pub struct OidcIdentity {
     /// The `sub` claim — the issuer-stable subject we persist as the
     /// `(provider, subject)` tuple.
     pub subject: String,
-    /// The `email` claim, dropped when the IdP explicitly marked it
-    /// `email_verified: false` — an unverified email must not satisfy
-    /// email/domain allow rules. Absent `email_verified` is treated
-    /// as verified (several IdPs omit the claim entirely).
-    pub email: Option<String>,
+    /// The verified `email` claim, or why there isn't one. An email
+    /// the IdP explicitly marked `email_verified: false` counts as
+    /// absent — an unverified address must not satisfy email/domain
+    /// allow rules, and must not key an account. Absent
+    /// `email_verified` is treated as verified (several IdPs omit the
+    /// claim entirely). Carrying the *reason* rather than a bare
+    /// `None` is what lets the refusal name the fix.
+    pub email: Result<String, MissingEmail>,
     /// Values of the configured groups claim; empty when the claim is
     /// absent. Accepts both an array of strings and a single string
     /// (a real cross-IdP variance).
@@ -502,11 +545,16 @@ impl OidcIdentity {
             .get("email_verified")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let email = claims
-            .get("email")
-            .and_then(|v| v.as_str())
-            .filter(|_| email_verified)
-            .map(str::to_string);
+        // Blank is checked before unverified on purpose: an IdP that
+        // derives `email_verified` from the address (the usual custom
+        // mapping) reports both for an address-less user, and "no
+        // address on the record" is the actionable one.
+        let email = match claims.get("email").and_then(|v| v.as_str()) {
+            None => Err(MissingEmail::NoClaim),
+            Some(e) if e.trim().is_empty() => Err(MissingEmail::Blank),
+            Some(_) if !email_verified => Err(MissingEmail::Unverified),
+            Some(e) => Ok(e.to_string()),
+        };
         let groups = match claims.get(groups_claim) {
             Some(serde_json::Value::Array(items)) => items
                 .iter()
@@ -521,6 +569,13 @@ impl OidcIdentity {
             email,
             groups,
         })
+    }
+
+    /// The verified email, if the IdP supplied one. Allow rules and
+    /// admin promotion read this — never the `Err` side, which is
+    /// diagnostic only.
+    pub fn verified_email(&self) -> Option<&str> {
+        self.email.as_deref().ok()
     }
 }
 
@@ -646,7 +701,7 @@ mod tests {
     fn identity(email: Option<&str>, groups: Vec<&str>) -> OidcIdentity {
         OidcIdentity {
             subject: "sub-1".into(),
-            email: email.map(str::to_string),
+            email: email.map(str::to_string).ok_or(MissingEmail::NoClaim),
             groups: groups.into_iter().map(String::from).collect(),
         }
     }
@@ -751,14 +806,35 @@ mod tests {
             "email_verified": false
         });
         let id = OidcIdentity::from_claims(&claims, "groups").unwrap();
-        assert_eq!(id.email, None);
+        assert_eq!(id.email, Err(MissingEmail::Unverified));
+        assert_eq!(id.verified_email(), None);
     }
 
     #[test]
     fn identity_keeps_email_when_verified_flag_absent() {
         let claims = json!({ "sub": "s1", "email": "a@b.c" });
         let id = OidcIdentity::from_claims(&claims, "groups").unwrap();
-        assert_eq!(id.email.as_deref(), Some("a@b.c"));
+        assert_eq!(id.verified_email(), Some("a@b.c"));
+    }
+
+    #[test]
+    fn identity_distinguishes_why_the_email_is_missing() {
+        // No claim at all — the scope/mapping case.
+        let id = OidcIdentity::from_claims(&json!({ "sub": "s1" }), "groups").unwrap();
+        assert_eq!(id.email, Err(MissingEmail::NoClaim));
+
+        // Present but blank — the IdP record has no address. Reported
+        // as Blank even when the IdP also says unverified, since the
+        // missing address is the root cause.
+        let blank = json!({ "sub": "s1", "email": "   ", "email_verified": false });
+        let id = OidcIdentity::from_claims(&blank, "groups").unwrap();
+        assert_eq!(id.email, Err(MissingEmail::Blank));
+
+        // A blank address must never key an account, even when the
+        // IdP asserts it verified.
+        let blank_verified = json!({ "sub": "s1", "email": "", "email_verified": true });
+        let id = OidcIdentity::from_claims(&blank_verified, "groups").unwrap();
+        assert_eq!(id.email, Err(MissingEmail::Blank));
     }
 
     #[test]
