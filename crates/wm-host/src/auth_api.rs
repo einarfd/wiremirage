@@ -696,24 +696,30 @@ async fn oidc_callback(
         }
     };
     if let Err(deny) = oidc.check_allow(&identity) {
-        tracing::warn!(subject = %identity.subject, email = ?identity.email, groups = ?identity.groups,
+        tracing::warn!(subject = %identity.subject, email = ?identity.verified_email(), groups = ?identity.groups,
             "oidc login denied by allow-rules");
         return (StatusCode::FORBIDDEN, format!("{deny}")).into_response();
     }
 
     // Accounts are keyed by verified email (user-model.md) — refuse
-    // the login when the IdP supplied none. `OidcIdentity` already
-    // drops emails the IdP marked email_verified=false.
-    let Some(email) = identity.email.as_deref() else {
-        tracing::warn!(subject = %identity.subject,
-            "oidc userinfo carried no verified email; refusing login");
-        return (
-            StatusCode::UNAUTHORIZED,
-            "OIDC login failed: the IdP returned no verified `email` claim, \
-             and WireMirage accounts are keyed by email. Configure the IdP \
-             to include a verified email in the userinfo response.",
-        )
-            .into_response();
+    // the login when the IdP supplied none. Each cause has a different
+    // fix at the IdP, so name the one we hit rather than making the
+    // operator guess from a generic refusal.
+    let email = match identity.email.as_deref() {
+        Ok(email) => email,
+        Err(cause) => {
+            tracing::warn!(subject = %identity.subject, %cause,
+                "oidc userinfo carried no verified email; refusing login");
+            return (
+                StatusCode::UNAUTHORIZED,
+                format!(
+                    "OIDC login failed: the IdP returned no verified `email` \
+                     claim, and WireMirage accounts are keyed by email. \
+                     Specifically: {cause}."
+                ),
+            )
+                .into_response();
+        }
     };
 
     let is_admin = oidc.is_admin(&identity);
