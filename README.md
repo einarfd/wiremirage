@@ -364,23 +364,28 @@ with one is refused:
 
 ```
 OIDC login failed: the IdP returned no verified `email` claim, and
-WireMirage accounts are keyed by email.
+WireMirage accounts are keyed by email. Specifically: userinfo carried
+no `email` claim — check that the client is granted an `email` scope
+and that a claim mapping produces it.
 ```
 
-WireMirage treats an **absent** `email_verified` as verified (plenty of
-IdPs omit the claim), so this error means one of three things, in
-roughly the order worth checking:
+That trailing sentence names which of three causes you hit (it's in the
+host log too, alongside the `sub`). WireMirage treats an **absent**
+`email_verified` as verified — plenty of IdPs omit the claim — so the
+three are exhaustive:
 
 1. **The client isn't granted the `email` scope**, or the IdP has no
    claim mapping producing it — nothing arrives in userinfo. Check the
    client's scopes/mappings, and that `email` shows up in
    `scopes_supported` at `{issuer}/.well-known/openid-configuration`.
+   (*"userinfo carried no `email` claim"*.)
 2. **The user record has no email address.** Common for the bootstrap
    admin account and for users created by an LDAP/SCIM sync that didn't
-   map a mail attribute.
+   map a mail attribute. (*"the `email` claim was empty"*.)
 3. **The IdP explicitly sent `email_verified: false`.** Expect this
    whenever the IdP has no mailbox-verification step it can point at, or
-   has one that this account never went through. Two shapes:
+   has one that this account never went through. (*"the IdP marked the
+   address `email_verified: false`"*.) Two shapes:
    - *Global* — the provider never asserts verification for anyone.
      **Authentik** is the confirmed case (below).
    - *Per-user* — the IdP has a verified flag but it defaults to false
