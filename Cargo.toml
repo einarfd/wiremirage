@@ -30,7 +30,7 @@ tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace", "metrics"] }
-wasmtime = "44"
+wasmtime = "47"
 axum = "0.8"
 http = "1"
 http-body-util = "0.1"
