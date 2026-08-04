@@ -71,6 +71,24 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+  # Dependency audit: security advisories, license policy, banned crates,
+  # and source registries. Reads Cargo.lock — no compile — so it skips
+  # ci-setup entirely and finishes in well under a minute, which makes it
+  # the first job to report on a dependency-bump PR. Policy and the
+  # justification for every ignore live in deny.toml.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        # Pinned for the same reason as wasm-tools in ci-setup: a fresh
+        # release whose assets haven't hit the download CDN yet 404s.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo-deny
+        run: cargo deny --workspace check
+
   # ── Container image (push to main only) ──────────────────────────────────
   #
   # Builds the release image from the repo-root Dockerfile and publishes a

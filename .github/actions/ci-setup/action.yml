@@ -13,7 +13,11 @@ runs:
     # remaining disk; the linker then SIGBUSes mid-link. Free the space
     # before we start building.
     - name: Free disk space
-      uses: jlumbroso/free-disk-space@main
+      # Pinned to a release, not @main: a floating branch ref runs
+      # whatever a third party pushed, with the runner's token, on every
+      # CI run. Dependabot can't help with a branch ref either — it only
+      # bumps resolvable versions.
+      uses: jlumbroso/free-disk-space@v1.3.1
       with:
         tool-cache: true
         android: true

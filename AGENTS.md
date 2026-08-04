@@ -781,6 +781,9 @@ Use `just` (see `justfile`):
 
 - `just check` — fmt check + clippy `-D warnings` + tests (skips Docker tests)
 - `just check-all` — like `check` plus tier-3 Valkey tests
+- `just audit` — cargo-deny: advisories, licenses, banned crates, sources.
+  Not part of `check` (needs network for the advisory DB); CI runs it as
+  its own job. Policy + justified ignores live in `deny.toml`.
 - `just fmt` — format
 - `just test` — workspace tests only (no Docker)
 - `just test-valkey` — tier-3 Valkey-backed tests, requires Docker
