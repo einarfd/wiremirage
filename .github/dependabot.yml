@@ -1,0 +1,53 @@
+version: 2
+
+# Keeps the version audit continuous instead of something someone
+# remembers to run. cargo-deny (the `audit` CI job) catches advisories on
+# what we already depend on; Dependabot is the other half — it moves the
+# pins forward before an advisory lands on them.
+#
+# Grouping policy: semver-compatible updates arrive as one PR per
+# ecosystem per week, because reviewing thirty individual patch bumps is
+# how a dependency PR queue gets ignored. Majors stay ungrouped — those
+# are decisions (see the pending typescript 6 -> 7, which is the Go port)
+# and each deserves its own PR.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-compatible:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    # Workflows plus the composite action they share — Dependabot only
+    # scans the directory it is pointed at, and ci-setup pins tool
+    # versions of its own.
+    directories:
+      - "/"
+      - "/.github/actions/ci-setup"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions-compatible:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directories:
+      - "/"                            # release image
+      - "/compiler/js-engine"          # digest-pinned js-engine builder
+      - "/conformance/openai-streaming"
+      - "/conformance/s3-slowdown"
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: npm
+    # componentize-js + typescript, the js-engine build inputs.
+    directory: "/compiler/js-engine"
+    schedule:
+      interval: weekly
+      day: monday

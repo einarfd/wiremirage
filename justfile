@@ -17,6 +17,17 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Policy lives in `deny.toml`; every ignore there has to say why and what
+# clears it. Requires cargo-deny (`cargo install cargo-deny --locked`).
+#
+# Deliberately NOT part of `just check` — it fetches the RustSec advisory
+# database, so it needs network and would make the inner loop fail
+# offline. CI runs it as its own job on every push and PR.
+#
+# Dependency audit: advisories, licenses, banned crates, source registries.
+audit:
+    cargo deny --workspace check
+
 # Run tests with nextest. Parallel test binaries give ~27% speedup over
 # `cargo test` on this workspace (2:50 → 2:04 measured). Requires
 # `cargo-nextest` installed (`cargo install cargo-nextest --locked`).
