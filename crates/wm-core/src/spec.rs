@@ -110,7 +110,7 @@ pub struct ImportSummary {
 /// (and `deny_unknown_fields`); call [`normalize`] for semantic checks.
 pub fn parse_str(text: &str, format: SpecFormat) -> Result<GroupSpec> {
     match format {
-        SpecFormat::Yaml => serde_yml::from_str(text).context("parse YAML spec"),
+        SpecFormat::Yaml => serde_norway::from_str(text).context("parse YAML spec"),
         SpecFormat::Json => serde_json::from_str(text).context("parse JSON spec"),
     }
 }
@@ -203,7 +203,7 @@ fn normalize_route(idx: usize, r: &RouteSpec) -> Result<NormalizedRoute> {
 /// Render a spec back to its on-disk form. Round-trips with [`parse_str`].
 pub fn render(spec: &GroupSpec, format: SpecFormat) -> Result<String> {
     match format {
-        SpecFormat::Yaml => serde_yml::to_string(spec).context("render YAML spec"),
+        SpecFormat::Yaml => serde_norway::to_string(spec).context("render YAML spec"),
         SpecFormat::Json => serde_json::to_string_pretty(spec).context("render JSON spec"),
     }
 }
