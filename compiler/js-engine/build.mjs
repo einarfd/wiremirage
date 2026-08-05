@@ -14,6 +14,13 @@ import { componentize } from "@bytecodealliance/componentize-js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// Pinned to typescript 6 deliberately. 7.x is the Go port, and it does
+// not expose the enum surface this file uses — `ts.ScriptTarget` is
+// undefined there, so `transpileModule` below dies with "Cannot read
+// properties of undefined (reading 'ES2023')". Tried 2026-08; revisit
+// when the port's programmatic API settles. There is nothing to gain in
+// the meantime: this transpiles one small file at build time, so the
+// port's speed is irrelevant here.
 import ts from "typescript";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
