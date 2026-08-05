@@ -616,7 +616,7 @@ impl std::fmt::Display for AllowFailure {
 /// SHA-256.
 pub fn pkce_pair() -> (String, String) {
     use base64::Engine as _;
-    use rand::RngCore as _;
+    use rand::Rng as _;
     use sha2::Digest as _;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);

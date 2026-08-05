@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use rand::RngCore;
+use rand::Rng;
 use thiserror::Error;
 
 /// 16 bytes is the recommended argon2 salt length per OWASP. We use

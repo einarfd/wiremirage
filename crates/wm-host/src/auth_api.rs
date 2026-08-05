@@ -21,7 +21,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use minijinja::context;
-use rand::RngCore;
+use rand::Rng;
 use serde::Deserialize;
 
 use crate::AppState;
