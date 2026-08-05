@@ -3,7 +3,7 @@
 # with WM_BASE pointing at it. Pinned base image + pinned SDK
 # (requirements.txt) so the lane is reproducible — a bump is deliberate,
 # which is the whole point of a conformance check.
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 COPY requirements.txt .
