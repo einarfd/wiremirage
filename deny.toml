@@ -22,16 +22,10 @@ targets = [
 # serde_norway swap); a transitive one usually is not.
 unmaintained = "workspace"
 yanked = "deny"
-ignore = [
-    # RUSTSEC-2026-0145 — PAX header desync in astral-tokio-tar, fixed
-    # in 0.6.2. Reaches us only through testcontainers (a
-    # dev-dependency), which pins the affected version and is already at
-    # its latest release. Never compiled into a shipped binary, and the
-    # attack needs a hostile tar — the tier-3 suite pulls images from
-    # Docker Hub, not from anywhere a test controls. Drop this once
-    # testcontainers bumps.
-    { id = "RUSTSEC-2026-0145", reason = "dev-only via testcontainers; awaiting an upstream bump" },
-]
+# Empty on purpose. Every advisory in the tree is currently cleared by a
+# version, not by an exemption — keep it that way where it's cheap, and
+# make anything added here say why and what would remove it.
+ignore = []
 
 [licenses]
 # WireMirage is Apache-2.0. This list is what the dependency tree
