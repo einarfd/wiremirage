@@ -12,7 +12,7 @@
 //! single lowercase ASCII tokens, so `{adj}-{noun}` is always a valid
 //! single-hyphen DNS label.
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Max length of a single DNS label.
 pub const MAX_LABEL_LEN: usize = 63;
