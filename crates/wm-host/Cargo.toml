@@ -30,7 +30,6 @@ opentelemetry-otlp.workspace = true
 wasmtime = { workspace = true, features = ["component-model", "runtime", "cranelift"] }
 axum.workspace = true
 http.workspace = true
-http-body-util.workspace = true
 redis.workspace = true
 ulid.workspace = true
 base64.workspace = true
@@ -71,7 +70,6 @@ swc_ecma_ast = "23"
 swc_ecma_parser = { version = "39", features = ["typescript"] }
 swc_ecma_transforms_typescript = "47"
 swc_ecma_codegen = "26"
-swc_ecma_visit = "23"
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via
