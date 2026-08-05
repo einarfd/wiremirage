@@ -69,7 +69,7 @@ swc_common = "21"
 swc_ecma_ast = "23"
 swc_ecma_parser = { version = "39", features = ["typescript"] }
 swc_ecma_transforms_typescript = "47"
-swc_ecma_codegen = "26"
+swc_ecma_codegen = "30"
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via
