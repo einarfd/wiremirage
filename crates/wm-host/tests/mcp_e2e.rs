@@ -30,6 +30,22 @@ fn counter_wasm() -> Vec<u8> {
     std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture")
 }
 
+/// Did the tool refuse the call?
+///
+/// rmcp 1.8 reports a tool that returned `Err(ErrorData)` as a
+/// *successful* call whose result carries `is_error: true`, and reserves
+/// the transport-level `Err` for protocol faults. That is the shape the
+/// MCP spec asks for — a handler's refusal is something the model is
+/// meant to read and react to, not a broken session. Earlier rmcp
+/// surfaced both as `Err`, so accept either: what these tests care about
+/// is that the call did not succeed.
+fn tool_refused<E: std::fmt::Debug>(result: &Result<rmcp::model::CallToolResult, E>) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(call) => call.is_error.unwrap_or(false),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct DummyClient;
 impl ClientHandler for DummyClient {
@@ -235,7 +251,10 @@ async fn clear_journal_requires_confirm_and_succeeds() {
             ),
         )
         .await;
-    assert!(denied.is_err(), "clear_journal without confirm must error");
+    assert!(
+        tool_refused(&denied),
+        "clear_journal without confirm must error"
+    );
 
     // With confirm → cleared.
     let ok = client
@@ -289,7 +308,7 @@ async fn clear_group_state_requires_confirm_and_succeeds() {
         )
         .await;
     assert!(
-        denied.is_err(),
+        tool_refused(&denied),
         "clear_group_state without confirm must error"
     );
 
@@ -1242,8 +1261,8 @@ async fn list_routes_bad_sort_returns_filter_error() {
         )
         .await;
     // The handler rejects via map_filter_error → ErrorData; rmcp
-    // surfaces that as a call error.
-    assert!(err.is_err(), "expected error for bogus sort");
+    // surfaces that as a refused call.
+    assert!(tool_refused(&err), "expected error for bogus sort");
 
     client.cancel().await.expect("cancel");
 }
@@ -1879,7 +1898,10 @@ async fn show_unmatched_returns_full_request_envelope() {
                 .with_arguments(json!({ "number": 99999 }).as_object().unwrap().clone()),
         )
         .await;
-    assert!(missing.is_err(), "unknown unmatched number should error");
+    assert!(
+        tool_refused(&missing),
+        "unknown unmatched number should error"
+    );
 
     client.cancel().await.expect("cancel");
 }
