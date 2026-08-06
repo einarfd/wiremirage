@@ -8,7 +8,7 @@
 # it with the cargo OUT_DIR bind-mounted at /out, with the build script
 # writing js-engine.wasm there. `--user $UID:$GID` keeps the output
 # host-owned.
-FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
+FROM node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
 
 WORKDIR /app
 
