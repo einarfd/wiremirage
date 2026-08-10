@@ -37,7 +37,7 @@ hyper = { version = "1", features = ["http1", "server"] }
 reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls", "stream"] }
 redis = "1"
 testcontainers = { version = "0.27", features = ["blocking"] }
-ulid = "1"
+ulid = "3"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 rand = "0.10"
