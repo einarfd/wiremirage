@@ -50,7 +50,7 @@ ipnet = "2"
 # signed session cookies. argon2id is OWASP's recommendation; the
 # `argon2` crate is pure Rust and audit-friendly.
 argon2 = "0.5"
-hmac = "0.12"
+hmac = "0.13"
 subtle = "2.6"
 # Web UI templates (slice 21). minijinja gives us Jinja-like syntax
 # with a small dependency footprint. Templates are embedded via
