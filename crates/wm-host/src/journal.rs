@@ -404,7 +404,7 @@ impl Journal {
             "next_journal_number",
             1,
         )? as u32;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let record = JournalRecord {
             id: id.clone(),
             number: n,
@@ -521,7 +521,7 @@ impl Journal {
     ) -> Result<UnmatchedRecord, JournalError> {
         let mut bucket = self.bucket()?;
         let n = bucket.incr("unmatched:counter", 1)? as u64;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let record = UnmatchedRecord {
             id: id.clone(),
             number: n,
@@ -636,7 +636,7 @@ impl Journal {
             "next_callback_number",
             1,
         )? as u32;
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let record = CallbackRecord {
             id: id.clone(),
             number: n,
