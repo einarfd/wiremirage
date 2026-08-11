@@ -57,7 +57,7 @@ impl ServerHandler for WmMcpServer {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         // The router IS the cardinality allowlist: a name it routes is a
         // registered tool (bounded set). An unrecognized name (client
         // typo / probing) collapses to "unknown" so the metric/span label
