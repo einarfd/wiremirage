@@ -109,7 +109,7 @@ pub async fn dry_run(
     req: DryRunRequest,
 ) -> Result<DryRunResponse, DryRunError> {
     let started = Instant::now();
-    let run_id = Ulid::new().to_string();
+    let run_id = Ulid::generate().to_string();
     let dry_root = format!("dryrun:{run_id}:");
     let storage = runtime.storage().clone();
 

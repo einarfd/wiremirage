@@ -136,7 +136,7 @@ impl SessionStore {
         let token = mint_token();
         let now = Utc::now();
         let session = Session {
-            id: Ulid::new().to_string(),
+            id: Ulid::generate().to_string(),
             user_id: user_id.to_string(),
             provider: provider.to_string(),
             created_at: now,

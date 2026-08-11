@@ -470,7 +470,7 @@ impl Auth {
             return Err(AuthError::EmailTaken(email.to_string()));
         }
         let user = User {
-            id: Ulid::new().to_string(),
+            id: Ulid::generate().to_string(),
             email: email.to_string(),
             is_admin,
             created_at: Utc::now(),
@@ -536,7 +536,7 @@ impl Auth {
         let hash = sha256_hex(plaintext);
         let now = Utc::now();
         let token = Token {
-            id: Ulid::new().to_string(),
+            id: Ulid::generate().to_string(),
             name: name.to_string(),
             owner_id: owner_id.to_string(),
             hash: hash.clone(),
@@ -904,7 +904,7 @@ mod tests {
     /// Used to prove the migration/adoption paths.
     fn write_legacy_named_user(auth: &Auth, name: &str, is_admin: bool) -> String {
         let mut bucket = auth.bucket().unwrap();
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         let key = format!("user:{id}");
         bucket.hash_set(&key, "id", id.as_bytes().to_vec()).unwrap();
         bucket
@@ -1036,7 +1036,7 @@ mod tests {
         // Negative TTL → already expired.
         let mut bucket = auth.bucket().unwrap();
         let token = Token {
-            id: Ulid::new().to_string(),
+            id: Ulid::generate().to_string(),
             name: "expired".into(),
             owner_id: user.id.clone(),
             hash: sha256_hex("wmt_expired"),

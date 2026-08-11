@@ -288,7 +288,7 @@ impl Registry {
         };
         let ttl_seconds = normalize_ttl(params.ttl_seconds.unwrap_or(DEFAULT_GROUP_TTL_SECONDS))?;
         let group = Group {
-            id: Ulid::new().to_string(),
+            id: Ulid::generate().to_string(),
             name,
             implicit: false,
             created_at: Utc::now(),
@@ -679,7 +679,7 @@ impl Registry {
         bucket: &mut Bucket,
         owner_id: &str,
     ) -> Result<Group, RegistryError> {
-        let id = Ulid::new().to_string();
+        let id = Ulid::generate().to_string();
         // Implicit groups get the same friendly, DNS-safe auto-name as any
         // other name-less group (ADR-0030) — the old `_route_{ulid}` scheme
         // is an illegal DNS label (leading underscore) under virtual-host
@@ -737,7 +737,7 @@ impl Registry {
             1,
         )? as u32;
 
-        let route_id = Ulid::new().to_string();
+        let route_id = Ulid::generate().to_string();
         let route = Route {
             id: route_id.clone(),
             group_id: group.id.clone(),
