@@ -10,6 +10,16 @@
 // bind-mounted at /out and `WM_JS_ENGINE_OUT=/out/js-engine.wasm`
 // selects the output path.
 
+// componentize-js -> @bytecodealliance/weval -> decompress (npm) pulls in
+// three known zip-slip / arbitrary-file-write advisories (GHSA, dead since
+// 2020, unmaintained). Dismissed as tolerable risk 2026-08: decompress only
+// runs here, inside this throwaway Docker build stage, to unpack weval's own
+// precompiled binary from a fixed github.com/bytecodealliance/weval release
+// tag — never attacker- or SUT-controlled input, and never part of the
+// shipped image. Upstream already fixed it (bytecodealliance/weval#32,
+// decompress -> tar+fflate, merged 2026-07-08) but hasn't cut a release past
+// it yet (npm latest is still 0.4.1, pre-fix). Re-check on the next
+// componentize-js/weval bump; the advisories should just disappear then.
 import { componentize } from "@bytecodealliance/componentize-js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
