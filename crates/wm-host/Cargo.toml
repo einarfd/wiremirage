@@ -68,7 +68,7 @@ urlencoding = "2"
 swc_common = "24"
 swc_ecma_ast = "27"
 swc_ecma_parser = { version = "43", features = ["typescript"] }
-swc_ecma_transforms_typescript = "53"
+swc_ecma_transforms_typescript = "54"
 swc_ecma_codegen = "30"
 
 [features]
