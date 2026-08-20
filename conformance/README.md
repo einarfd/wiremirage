@@ -33,8 +33,11 @@ points each client's `WM_BASE` at `http://{group}.localhost:PORT` and adds
 inside the container — no DNS needed; the host derives the group from the `Host`
 header.
 
-CI: `.github/workflows/conformance.yml` (`workflow_dispatch` only — heavier than
-the gating CI, so deliberately manual).
+CI: `.github/workflows/conformance.yml` — **weekly** (Mondays 05:17 UTC) plus
+`workflow_dispatch`. Not on PRs: it builds + boots the host and builds SDK
+images, so it's far heavier than the gating CI. The weekly run is what keeps a
+pinned-SDK regression from sitting undiscovered until someone remembers to
+press the button.
 
 ## A lane
 
