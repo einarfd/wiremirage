@@ -1,0 +1,8 @@
+[package]
+name = "s64-runner"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+wasmtime = "47"
+anyhow = "1"

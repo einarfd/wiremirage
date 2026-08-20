@@ -83,7 +83,7 @@ routeStore.listKeys("prefix");           // string[]; null for everything
 
 routeStore.listPush("queue", bytes);     // queues / ordered logs
 routeStore.listPop("queue");             // leftmost, or null
-routeStore.listRange("queue", 0n, 99n);  // Uint8Array[] (see note below)
+routeStore.listRange("queue", 0n, -1n);  // Uint8Array[]; -1 is the last item
 routeStore.listLength("queue");          // bigint
 
 routeStore.hashSet("user:42", "name", bytes);
@@ -96,11 +96,12 @@ routeStore.setContains("seen", "10.0.0.1");  // boolean
 routeStore.setRemove("seen", "10.0.0.1");
 ```
 
-> **Negative indices trap today.** The WIT contract says negative `listRange`
-> indices count from the end, and `incr` takes a signed delta, but on the
-> TypeScript/JavaScript path any negative `s64` argument traps the handler —
-> `listRange(k, 0n, -1n)` and `incr(k, -1n)` both fail. Use a stop index past
-> the end of the list, and add rather than subtract, until that's fixed.
+> **`incr` can't take a negative delta yet.** Lowering a negative 64-bit
+> signed integer out of JavaScript trips a defect in the toolchain that builds
+> the engine ([ComponentizeJS#343](https://github.com/bytecodealliance/ComponentizeJS/issues/343)),
+> so `incr(key, -1n)` throws with an explanation instead of decrementing.
+> Count upwards, or keep the value with `set()`. Negative `listRange` indices
+> *do* work — the engine resolves them before they cross the boundary.
 
 Handlers work a key at a time — bulk seeding and clearing are *external*
 operations (`wm routes state`, `wm groups state`, the equivalent REST/MCP

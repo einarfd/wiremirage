@@ -229,15 +229,16 @@ const n = routeStore.incr("calls", 1n);
 ```ts
 routeStore.listPush("queue", new TextEncoder().encode("item"));
 routeStore.listPop("queue");              // Uint8Array | null (leftmost)
-routeStore.listRange("queue", 0n, 99n);   // Uint8Array[] in [start, stop]
+routeStore.listRange("queue", 0n, -1n);   // entire list as Uint8Array[]
 routeStore.listLength("queue");           // bigint
 ```
 
-**Negative indices trap today.** The contract says a negative index counts
-from the end (`0n, -1n` for the whole list) and `incr` takes a signed delta,
-but any negative `s64` argument currently traps the handler on the
-TypeScript/JavaScript path. Use a stop index past the end of the list, and
-add rather than subtract, until that is fixed.
+**`incr` cannot take a negative delta yet.** A defect in the toolchain that
+builds the engine (bytecodealliance/ComponentizeJS#343) traps when a negative
+64-bit signed value is lowered out of JavaScript, so `incr(key, -1n)` throws
+with an explanation rather than decrementing. Count upwards, or keep the value
+with `set()`. Negative `listRange` indices are unaffected — the engine
+resolves them to their non-negative equivalents first.
 
 ## Hashes (record-shaped data)
 

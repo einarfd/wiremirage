@@ -85,6 +85,11 @@ if (DEBUG) {
   mkdirSync(debugDir, { recursive: true });
 }
 
+// When the componentize-js pin in package.json moves, re-run the repro in
+// ./upstream-343/ before merging: it answers whether ComponentizeJS#343
+// (negative s64 lowering traps the guest) is fixed on the new version, and
+// its README lists what to delete when it is. `grep -rn 'ComponentizeJS#343'`
+// finds the workarounds that depend on the answer.
 try {
   const out = await componentize({
     sourcePath: jsPath,

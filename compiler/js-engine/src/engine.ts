@@ -266,6 +266,81 @@ function withAccessors(req: unknown): unknown {
   return r;
 }
 
+// ---------------------------------------------------------------------------
+// UPSTREAM WORKAROUND — ComponentizeJS#343 (tracked by wiremirage#50)
+//
+// Lowering a *negative* s64 out of JS traps the guest before the host import
+// runs: the value never crosses the boundary and the request dies with an
+// opaque "engine-level fault". Positive s64 (including > 2^32), s32, f64 and
+// u64-with-bit-63-set are all fine, so this is specifically signed-64-bit
+// lowering. Reproduced on componentize-js 0.20.0 and 0.22.0 (current latest)
+// with a three-line guest and no WireMirage code involved.
+//
+// Two store methods take s64 parameters, so both are affected:
+//
+//   * `list-range(key, start, stop)` — the contract says a negative index
+//     counts from the end. We keep that promise by resolving negatives to
+//     their non-negative equivalents here, using the same rule the host
+//     applies (clamp to 0), so the visible semantics are unchanged.
+//
+//   * `incr(key, by)` — a negative delta has no non-negative equivalent, so
+//     it can't be worked around. Throw a legible error instead of letting the
+//     handler trap with no explanation.
+//
+// TO REMOVE (when ComponentizeJS#343 is fixed and the engine is rebuilt on a
+// release containing the fix): delete `wrapBucketForNegativeS64` and the two
+// call sites below, then drop the negative-index notes from
+// `crates/wm-host/src/capabilities.rs` and `docs/handlers.md`. The tier-2
+// test `negative_list_range_indices_count_from_the_end` asserts the
+// *semantics*, not the workaround, so it must keep passing either way — it is
+// the check that says removal was safe.
+// ---------------------------------------------------------------------------
+
+/** Mirror of the host's index normalisation, so both agree on edge cases. */
+function normalizeIndex(i: bigint, len: bigint): bigint {
+  if (i >= 0n) return i;
+  const from_end = len + i;
+  return from_end > 0n ? from_end : 0n;
+}
+
+function wrapBucketForNegativeS64(bucket: any): any {
+  if (bucket === null || typeof bucket !== "object") return bucket;
+  return new Proxy(bucket, {
+    get(target, prop, receiver) {
+      if (prop === "listRange") {
+        return (key: string, start: bigint | number, stop: bigint | number) => {
+          let s = BigInt(start);
+          let e = BigInt(stop);
+          if (s < 0n || e < 0n) {
+            const len = BigInt(target.listLength(key));
+            if (len === 0n) return [];
+            s = normalizeIndex(s, len);
+            e = normalizeIndex(e, len);
+          }
+          return target.listRange(key, s, e);
+        };
+      }
+      if (prop === "incr") {
+        return (key: string, by: bigint | number) => {
+          const delta = BigInt(by);
+          if (delta < 0n) {
+            throw new Error(
+              "incr(): negative deltas are not supported on the TypeScript/" +
+                "JavaScript handler path — a ComponentizeJS defect " +
+                "(bytecodealliance/ComponentizeJS#343) traps the handler when a " +
+                "negative s64 crosses the component boundary. Count upwards, or " +
+                "keep the value with set() instead of incr().",
+            );
+          }
+          return target.incr(key, delta);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 // Each call to `handle` is a fresh wasmtime instance, so caching the
 // compiled user-handle function across requests doesn't pay rent.
 // (If we ever move to an instance pool, this is where the cache
@@ -304,8 +379,8 @@ export function handle(
   try {
     const result = (userHandle as (a: unknown, b: unknown, c: unknown) => unknown)(
       withAccessors(req),
-      routeStore,
-      groupStore,
+      wrapBucketForNegativeS64(routeStore),
+      wrapBucketForNegativeS64(groupStore),
     );
     // A streaming handler emits its body via `host.responseStream` and
     // may return nothing. The host ignores this return value once

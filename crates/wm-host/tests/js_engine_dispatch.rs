@@ -688,3 +688,96 @@ async fn request_convenience_accessors_resolve_header_pathparam_queryparam() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn negative_list_range_indices_count_from_the_end() {
+    // The contract (wit/wiremirage.wit) says a negative `list-range` index
+    // counts from the end, and the store layer implements that. This asserts
+    // the *semantics* reach a JS handler — which today they only do because
+    // the engine shim resolves negatives before they cross the component
+    // boundary (ComponentizeJS#343 / wiremirage#50).
+    //
+    // Keep this test when that workaround is removed: it is exactly the check
+    // that says removal was safe.
+    let source = r#"
+        function handle(req, route, group) {
+          for (const c of ["a", "b", "c", "d"]) {
+            route.listPush("q", new TextEncoder().encode(c));
+          }
+          const dec = (xs) => xs.map((x) => new TextDecoder().decode(x)).join("");
+          const out = [
+            "all=" + dec(route.listRange("q", 0n, -1n)),
+            "lastTwo=" + dec(route.listRange("q", -2n, -1n)),
+            "underflow=" + dec(route.listRange("q", -99n, -1n)),
+            "crossed=" + dec(route.listRange("q", -1n, 0n)),
+            "missing=" + dec(route.listRange("nokey", 0n, -1n)),
+          ].join(" ");
+          return { status: 200, headers: [], body: new TextEncoder().encode(out) };
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("body");
+    // Same normalisation the store applies: a negative index below the start
+    // of the list clamps to 0, and a resolved start past the stop is empty.
+    assert_eq!(body, "all=abcd lastTwo=cd underflow=abcd crossed= missing=");
+    server.abort();
+}
+
+#[tokio::test]
+async fn negative_incr_delta_reports_the_upstream_limitation() {
+    // WORKAROUND TEST (ComponentizeJS#343 / wiremirage#50): a negative s64
+    // cannot cross the component boundary, and `incr` has no non-negative
+    // equivalent, so the shim throws a catchable error rather than letting
+    // the handler die with an opaque engine trap.
+    //
+    // DELETE this test along with the shim workaround once upstream is fixed
+    // — at that point a negative delta should simply work, and the assertion
+    // below becomes wrong.
+    let source = r#"
+        function handle(req, route, group) {
+          try {
+            route.incr("k", -1n);
+          } catch (e) {
+            return {
+              status: 400,
+              headers: [],
+              body: new TextEncoder().encode("caught: " + e.message),
+            };
+          }
+          return { status: 200, headers: [], body: new Uint8Array() };
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.contains("negative deltas are not supported"),
+        "expected the shim's explanation, got: {body}"
+    );
+    assert!(
+        body.contains("ComponentizeJS#343"),
+        "the error should name the upstream defect, got: {body}"
+    );
+    server.abort();
+}
