@@ -1,0 +1,60 @@
+name: Bug report
+description: Something doesn't behave the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues don't belong here — see
+        [SECURITY.md](https://github.com/einarfd/wiremirage/blob/main/SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you got, what you expected instead.
+      placeholder: |
+        $ wm routes add --group demo --method POST --path /v1/charges --source-file handler.ts
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: handler
+    attributes:
+      label: Handler source
+      description: If a handler is involved, paste it (trimmed to the smallest failing version).
+      render: typescript
+  - type: textarea
+    id: logs
+    attributes:
+      label: Host log / journal entry
+      description: |
+        Host stderr around the failure, and `wm journal show <group>/<n>` if the
+        request reached the host. Sanitize anything sensitive.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`wm --version`, or the commit / image tag the host is running."
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage backend
+      options:
+        - memory
+        - Valkey / Redis
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      multiple: true
+      options:
+        - CLI
+        - MCP
+        - Web UI
+        - REST API
+        - Mock dispatch (traffic from a SUT)
