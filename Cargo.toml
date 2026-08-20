@@ -8,7 +8,7 @@ members = [
 # Wasm guest fixtures live outside the workspace so the wasm32 target
 # doesn't pollute `cargo check --workspace` / `cargo clippy --workspace`.
 # Each fixture crate is self-contained with its own Cargo.lock.
-exclude = ["crates/wm-host/tests/fixtures"]
+exclude = ["crates/wm-host/tests/fixtures", "compiler/js-engine/upstream-343/runner"]
 
 [workspace.package]
 edition = "2024"

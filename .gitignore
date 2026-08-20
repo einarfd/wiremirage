@@ -35,3 +35,7 @@ Thumbs.db
 
 # Local Arkiv spec snapshots (if introduced later)
 docs/specs/snapshot/
+
+# Scratch output from the upstream-343 repro (see its README)
+compiler/js-engine/upstream-343/out/
+compiler/js-engine/upstream-343/runner/target/

@@ -1,0 +1,7 @@
+package example:signed;
+
+world guest {
+  export sink-s64: func(v: s64);          // negative IN only (no return)
+  export source-s64: func() -> s64;       // negative OUT only (no params)
+  export sink-u64: func(v: u64);          // control: u64 with bit 63 set
+}

@@ -1,0 +1,6 @@
+{
+  "name": "s64-repro",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@bytecodealliance/componentize-js": "0.22.0" }
+}
