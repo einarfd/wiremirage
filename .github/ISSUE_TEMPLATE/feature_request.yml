@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a capability WireMirage doesn't have
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A few things are deliberately out of scope — record-and-replay, general
+        handler egress, durable storage. See
+        [CONTRIBUTING.md](https://github.com/einarfd/wiremirage/blob/main/CONTRIBUTING.md#things-that-are-deliberately-out-of-scope)
+        and the [ADRs](https://github.com/einarfd/wiremirage/tree/main/docs/adr)
+        before filing.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        What were you trying to mock or test when you hit this? Concrete beats
+        general — "the Stripe SDK retries with an idempotency key and I can't
+        assert on it" is actionable in a way that "better assertions" isn't.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you did instead
+      description: How you worked around it, if you did. This often shows how big the gap really is.
+  - type: textarea
+    id: shape
+    attributes:
+      label: What you think it should look like
+      description: Optional. A CLI invocation, a handler API, an MCP tool — whatever form you'd expect.
+  - type: dropdown
+    id: surfaces
+    attributes:
+      label: Which surfaces would need it
+      multiple: true
+      options:
+        - Handler API
+        - CLI
+        - MCP
+        - Web UI
+        - REST API
