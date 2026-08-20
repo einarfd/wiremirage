@@ -11,7 +11,23 @@ The first move in almost every case is to check the journal — it tells you whe
 
 ## "My SUT gets 404 from the mock"
 
-Two cases: the request reached the host but didn't match a route, or it never reached the host at all.
+Three cases, in order of likelihood: the SUT is addressing the **wrong host**, the request reached the host but didn't match a route, or it never reached the host at all.
+
+**Check the host first.** Mock traffic is served on the group's subdomain
+`{group}.{apex}`; the apex (whatever `WM_HOST` points at) is control-plane
+only and answers mock paths with a 404. So a SUT pointed at
+`http://localhost:8080/v1/charges` gets 404 no matter how correct the route
+is. The route's own `url` is the truth:
+
+```sh
+wm routes show <group>/<n> --json | jq -r .url   # what the SUT should call
+```
+
+A request to the apex is a *control-plane* 404 and is deliberately **not**
+journaled (there's no group to attribute it to). So the signature of
+apex-addressing is: the SUT sees 404, and `wm unmatched list` shows
+nothing. If the request had reached the right subdomain and simply missed
+every route, it would be in the unmatched log.
 
 ```sh
 # What would the host actually do with this request, in this group?

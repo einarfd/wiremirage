@@ -23,6 +23,8 @@ WireMirage is a programmable mock HTTP server. You write small TypeScript handle
 
 A **route** matches on `(method, path-pattern)` and runs a TypeScript handler that returns a response. Routes live inside a **group** (TTL-bounded — default 24h, sliding by default; explicit DELETE cascades all the group's state). The handler has access to two stores: a per-route key-value store and a per-group shared store. Groups + routes are addressed by ULIDs internally and by `{group}/{n}` slugs externally (e.g. `stripe-mock/7`). Mock traffic doesn't need a token; the admin API at `/api/*` does.
 
+**Where mock traffic goes.** Each group is served on **its own subdomain** — `{group}.{apex}` (ADR-0030). The apex host you point `WM_HOST` at (e.g. `http://localhost:8080`) is **control-plane only**: `/api/*`, `/ui/*`, `/auth/*`, `/health`, `/ready`. Sending your SUT at the apex is the single most common "my mock returns 404". Every create/show response carries the route's full `url` — point the SUT at that.
+
 ## Setup
 
 ```sh
@@ -83,9 +85,15 @@ wm routes add --group stripe-mock --method POST --path /v1/charges \
 # happening against a discarded snapshot. No journal entry.
 # wm routes test stripe-mock/1 --method POST --body '{"x":1}'
 
-# Run your test that hits http://$WM_HOST/v1/charges. Mock traffic is
-# unauthenticated.
-curl -X POST $WM_HOST/v1/charges -d '{}'
+# Run your test against the ROUTE'S OWN URL — mock traffic is served on
+# the group's subdomain, not on $WM_HOST (which is control-plane only).
+# `wm routes add` printed it; `--json` puts it in `.url`.
+MOCK_URL=$(wm routes show stripe-mock/1 --json | jq -r .url)
+curl -X POST "$MOCK_URL" -d '{}'          # unauthenticated by design
+
+# Locally, where {group}.localhost has no DNS entry, the Host header is
+# all the host needs:
+#   curl -X POST -H 'Host: stripe-mock.localhost' http://localhost:8080/v1/charges -d '{}'
 
 # Check the journal to confirm the SUT actually called the mock.
 wm journal list stripe-mock
@@ -125,7 +133,7 @@ The `scripts/` directory next to this `SKILL.md` ships ready-to-run examples you
 
 - **`scripts/setup-stripe-mock.sh`** — creates a multi-route Stripe mock (charges, refunds, customers). The shape demonstrates a typical "set up before tests, tear down after" flow.
 - **`scripts/reset-state.sh GROUP`** — clears all per-route and per-group state for the named group. Use between test phases when you need a clean slate without recreating routes.
-- **`scripts/flaky-mock.sh PATH [EVERY_N]`** — creates a single route that returns 503 on every Nth call. Demonstrates stateful behavior (`ctx.store.incr`) and is the canonical pattern for testing retry logic.
+- **`scripts/flaky-mock.sh PATH [EVERY_N]`** — creates a single route that returns 503 on every Nth call. Demonstrates stateful behavior (`routeStore.incr`) and is the canonical pattern for testing retry logic.
 - **`scripts/latency-mock.sh PATH`** — creates a single route whose response latency *grows* with elapsed time since first call (default: +50ms per second, capped at 30s). Demonstrates `host.sleep` and `host.monotonicMs` from ADR-0021. Canonical pattern for reproducing API-gateway cascading-failure modes that depend on response time creeping up toward a timeout threshold.
 - **`scripts/streaming-llm-mock.sh PATH`** — creates a route that streams an OpenAI-style chat completion token-by-token over Server-Sent Events (default 60ms/token). Demonstrates `host.responseStream` from ADR-0022 — the pattern for mocking streaming LLM APIs (Vertex `streamGenerateContent`, OpenAI/Anthropic streaming) and the MCP streamable-HTTP transport. Pace with `DELAY_MS`, change the text with `PROMPT`.
 
@@ -181,7 +189,7 @@ For host-wide observation, the MCP server exposes two *live* streaming tools —
 ## Gotchas
 
 - **Group TTL.** Default 24h, sliding on every request match. Tests that span more than a day, or non-sliding groups that pause for hours, can have routes vanish from under them. Bump TTL via `wm groups update` or `wm groups refresh`.
-- **Route conflicts.** Within a group, two routes with overlapping path patterns conflict at create time (the error names the conflicting route). Conflicts are **per-group** under virtual-host routing (ADR-0030): each group is its own subdomain and path namespace, so two groups can each define the same `path`/`method` without colliding. (Path patterns are literal segments + `{param}` captures only — there's no `{path...}` trailing-segment catch-all; that matcher is designed but deferred, ADR-0028.)
+- **Route conflicts.** Within a group, two routes with overlapping path patterns conflict at create time (the error names the conflicting route). Conflicts are **per-group** under virtual-host routing (ADR-0030): each group is its own subdomain and path namespace, so two groups can each define the same `path`/`method` without colliding. (Path patterns are literal segments, `{param}` single-segment captures, and a `{name...}` trailing-segment catch-all as the **final** segment — `/v1/{rest...}` matches `/v1/a/b/c` and zero segments too. The catch-all has the lowest match precedence, so a literal route always wins over it; ADR-0028.)
 - **No bulk state ops from inside handlers.** Handlers read/write individual keys but can't bulk-clear or bulk-seed. That's an *external* operation: `wm {routes,groups} state --set / --snapshot / --reset-from / --clear`. Values seeded externally are UTF-8 strings (or base64 for binary), capped at 1 MiB per key.
 - **Ownership.** Routes carry an `owner_id`; non-admin callers can read shared state but only modify their own routes. Admins bypass.
 - **Implicit groups.** If you `wm routes add` without `--group`, the host creates a single-route group with an auto-assigned **friendly DNS-safe name** (adjective-noun, e.g. `swift-otter`; ADR-0030) — it doubles as the group's subdomain. Useful for one-offs; filter them in or out with `wm groups list --implicit true|false`.
