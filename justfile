@@ -168,5 +168,24 @@ wipe-dev:
 run-cli *ARGS:
     cargo run -p wm-cli -- {{ARGS}}
 
-run-mcp:
-    cargo run -p wm-mcp
+# Re-export the ADRs from the Arkiv design workspace into docs/adr/.
+# Maintainer-only: needs the authed `arkiv` CLI built with the publish extra
+# (`uv tool install --with markdown2 --with nh3 <arkiv checkout>`). Arkiv is
+# where the ADRs are authored; docs/adr/ is a published snapshot, so anything
+# wrong in the output gets fixed upstream and re-exported, never patched here.
+#
+# No `--strict`: the ADRs deliberately reference design docs that stay in the
+# workspace (route-model.md, storage-model.md, …), so ~70 "outside the
+# published set" warnings are the expected steady state, not a regression.
+# Read them for *new* names — a warning about another ADR would mean a real
+# broken link.
+export-adrs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ws=$(arkiv list-workspaces --json | jq -r '.. | select(type == "object" and .slug? == "wiremirage") | .id' | head -1)
+    [ -n "$ws" ] || { echo "wiremirage workspace not found (arkiv login?)"; exit 1; }
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    arkiv publish "$tmp" -w "$ws" --include 'adrs/**' --format md
+    rm -f docs/adr/*.md
+    cp "$tmp"/adrs/*.md docs/adr/
+    echo "re-export complete; review 'git diff docs/adr' before committing"
