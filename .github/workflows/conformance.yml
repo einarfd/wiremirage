@@ -1,13 +1,22 @@
 name: Conformance
 
-# Opt-in / manual. Runs real third-party client libraries (each in its own
-# Docker image) against WireMirage mocks to smoke out fidelity gaps (SSE
-# framing, content-type, error shape) the unit suite can't see. NOT on every
-# PR — it builds + boots the host and builds/pulls SDK images, so it's heavier
-# than the gating CI. Trigger it from the Actions tab (or on a schedule) when
-# touching dispatch / streaming / the engine.
+# Runs real third-party client libraries (each in its own Docker image)
+# against WireMirage mocks to smoke out fidelity gaps (SSE framing,
+# content-type, error shape) the unit suite can't see. NOT on every PR — it
+# builds + boots the host and builds/pulls SDK images, so it's heavier than
+# the gating CI.
+#
+# Weekly + manual. The schedule exists because the lanes pin third-party SDKs
+# and base images: without it, a fidelity regression (ours or an SDK's) sits
+# undiscovered until someone remembers to press the button. Weekly bounds that
+# to seven days without gating anyone's PR. Trigger it by hand when touching
+# dispatch / streaming / the engine.
 on:
   workflow_dispatch:
+  schedule:
+    # Mondays, 05:17 UTC. Off the hour so it doesn't pile into the
+    # top-of-hour runner crush.
+    - cron: "17 5 * * 1"
 
 jobs:
   conformance:
