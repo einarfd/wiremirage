@@ -1,0 +1,43 @@
+# ADR-0028: Trailing-segment path matcher (`{path...}`) for catch-all / echo routes
+
+**Status:** Accepted — implemented 2026-06-07 as part of the ADR-0030 rollout (`crates/wm-host/src/pattern.rs`, `route_table.rs`). Was briefly *Deferred (2026-06-03)*; the deferral note below is kept because it records why the matcher is a lowest-precedence backstop rather than a general routing feature.
+
+**Why deferred:** the need that prompted this ADR — an agent discovering what an SDK posts to undefined paths — turned out to be **already served** by the unmatched journal, which captures the full request envelope (method, path, headers, body) of anything that doesn't match. The only real gap was reading all of it over MCP, closed by the `show_unmatched` tool (see ../mcp-surface.md) rather than by adding a catch-all route. The remaining justifications below (whole-surface outage simulation, provider-shaped fallback errors) are genuine but currently hypothetical — nobody has asked — while the cost is fixed regardless of use case: it relaxes the "route set is unambiguous" invariant and adds match precedence, and a *global* catch-all would silently take over every undefined path and empty the very unmatched journal that already solves the discovery problem. Decision: don't build speculatively. The design below is kept ready to implement as-is; the most likely concrete trigger is whole-API / per-tenant mocking — see the namespace discussion in ../route-model.md.
+
+**Context:**
+
+A first user driving WireMirage through MCP against real SDK clients hit a discovery wall: to learn the exact path/method/body an SDK actually posts to, the only tool was "let the request 404, then read `list_recent_unmatched`." There was no way to stand up an **echo route** — one handler that matches anything under a path and reflects the request back — because the path grammar is single-segment only. `{name}` captures exactly one non-empty segment (../route-model.md); there is no multi-segment matcher.
+
+../route-model.md already anticipated this under "Future possibilities": *"Path patterns beyond `{param}`. Wildcards (`*`), trailing-segment matchers (`/files/{path...}`). Add only if a real use case appears."* The use case has appeared. This ADR adds the **trailing-segment matcher** (`{path...}`) and explicitly **keeps glob wildcards (`*`, `**`) unsupported** — we are adding a bounded tail capture, not arbitrary globbing.
+
+The non-trivial part is not parsing. It's that a trailing matcher is, by construction, an **intentional overlap** with everything beneath its prefix — and the matcher has never had to represent overlaps. Today the route set is guaranteed *unambiguous*: conflict detection rejects any two routes that could match the same request at create time (host-wide, `(method, path)` + segment compatibility), so `find_match` can return the first pattern that matches and be correct. A catch-all breaks that invariant on purpose, which forces two concepts into the model: **match precedence** and a **conflict-detection exemption**.
+
+**Decision:**
+
+Add a single new segment kind, the **trailing-segment param `{name...}`**, with these semantics:
+
+- **Syntax & position.** `{name...}` is a normal `{name}` param with a `...` suffix. It is valid **only as the final segment** of a path; anywhere else is a create-time validation error. Name rules are unchanged (`[A-Za-z0-9_-]`, unique within the path). It captures the remaining path as a single path-param value (the joined tail, possibly empty).
+- **Breadth: zero-or-more.** `{path...}` matches the prefix itself *and* any deeper path. `/v1/{path...}` matches `/v1`, `/v1/`, and `/v1/a/b` (tail capture `""`, `""`, `a/b`). `/{path...}` matches `/` and everything below it. The tail param can therefore be the empty string.
+- **Precedence: specific-first.** Matching tries all **non-tail** routes first — those remain mutually unambiguous, so at most one matches; if one does, it wins. Only if no specific route matches do **tail** routes get a turn. Among tail routes, the one with the **longest literal prefix** wins (`/v1/{path...}` beats `/{path...}`). This is deterministic and independent of creation order.
+- **Conflict exemption.** A tail route does **not** conflict with the specific routes it back-stops — that is its purpose. Conflict detection treats a tail route as conflicting only with **another tail route whose non-tail prefix is conflict-compatible under the existing rule** (so two `/{path...}` ANY routes, or `/v1/{path...}` vs `/v1/{other...}` on overlapping methods, are rejected at create as ambiguous; `/v1/{path...}` and `/v2/{path...}` coexist fine, as do a tail route and any number of specific routes).
+- **Reserved-path interaction (unchanged, safe by construction).** `/__api`, `/__ui`, `/__auth`, `/__health`, `/__ready` are matched by the host's router *before* mock dispatch, so a `/{path...}` route physically cannot capture them. The create-time `/__` prefix rejection still applies to a tail route's literal prefix.
+- **`GET /` redirect precedence.** The implicit `GET /` → `/__ui/` / `/__auth/login` redirect (route-model.md) still takes precedence over a catch-all. Only an **explicit** `GET /` route overrides the redirect, exactly as today — adding an echo route does not silently break the browser landing redirect.
+
+**Consequences:**
+
+- **Echo / backstop routes become possible.** `ANY /{path...}` (global) or `ANY /webhooks/{path...}` (scoped) lets an agent capture method/path/headers/body for discovery and then narrow — directly answering the first-user friction, and pairing naturally with the new `list_journal` MCP tool (capture → inspect).
+- **The "unambiguous route set" invariant is relaxed, deliberately and in a bounded way.** Ambiguity is now possible *only* between tail routes, and is resolved by a stated rule (longest literal prefix) or rejected at create (exact-prefix ties). Specific routes keep their existing guarantee untouched.
+- **A global catch-all empties the unmatched journal.** With `ANY /{path...}` present, nothing is ever "unmatched," so `list_recent_unmatched` / the unmatched UI go quiet. This is the intended effect (the echo route *is* now handling those requests) but it **replaces** the 404-then-`list_recent_unmatched` discovery trick rather than complementing it. Documented as a gotcha; the natural workflow is scope the catch-all to a prefix you're actively reverse-engineering, not the whole host.
+- **`find_match` changes from first-match to best-match.** A bounded change: partition specific vs tail, return the specific match if any, else the longest-prefix tail match. Still linear in route count, same as today.
+- **The conflict contract in route-model.md gains a clause.** Already flagged non-invariant for the project's lifetime (the virtual-host note), so extending it is in-bounds.
+- **Per [0016-ai-friendly-identifiers.md](0016-ai-friendly-identifiers.md) and the existing param rules, the captured tail is just another entry in `path-params`** — handlers read it the same way as `{id}`. No WIT change.
+
+**Alternatives considered:**
+
+- **Bare global `/**` backstop (no prefix, no capture).** Rejected: smaller, but you can only have one echo route host-wide, can't scope it per-service, and it diverges from the doc's own documented `{path...}` syntax. `{path...}` is ~10 lines more and strictly more useful (prefix-scoped backstops, and a captured tail the handler can read — though `req.path` is available regardless).
+- **Glob wildcards (`*` / `**`).** Rejected: route-model.md keeps these deliberately unsupported. Globs invite precedence ambiguity (`/a/*/c` vs `/a/b/*`) far worse than a single trailing capture, for no use case anyone has asked for.
+- **One-or-more tail (require at least one segment beyond the prefix).** Rejected (chose zero-or-more): a backstop that doesn't match its own bare prefix leaves a gap an echo route arguably should cover, and forces a second route to plug it.
+- **Creation-order or explicit-priority tie-break among catch-alls.** Rejected: longest-literal-prefix is more predictable and order-independent; exact-prefix ties are genuinely ambiguous and better rejected at create (consistent with how the rest of the route model treats ambiguity) than silently resolved.
+- **Solve it at the product layer instead** (ship an "echo handler" fixture/recipe a user registers at each concrete path). Rejected: doesn't help discover *unknown* paths — the whole point is matching paths you don't know yet.
+
+**See also:** ../route-model.md, [0016-ai-friendly-identifiers.md](0016-ai-friendly-identifiers.md), ../script-api-wit.md, ../mcp-surface.md
