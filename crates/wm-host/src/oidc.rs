@@ -476,8 +476,8 @@ struct EnvValues {
 /// Why userinfo yielded no usable verified email. Accounts are keyed
 /// on that address, so each of these refuses the login — and each has
 /// a different fix at the IdP, which the operator can't guess from the
-/// refusal alone (README: "When the IdP won't give you a verified
-/// email").
+/// refusal alone (docs/configuration.md: "When the IdP won't give you
+/// a verified email").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingEmail {
     /// No `email` key in the userinfo response at all — usually the

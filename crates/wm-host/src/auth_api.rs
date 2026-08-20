@@ -287,7 +287,7 @@ fn format_set_cookie(value: &str, max_age: u64, secure: bool) -> String {
     // never get the cookie back if we set it, so we lean on an
     // operator switch (`WM_TRUSTED_PROXY`) rather than emitting it
     // unconditionally. Deployments behind a TLS edge MUST set it
-    // — see the production-hardening section in README.
+    // — see the production-hardening section in docs/deployment.md.
     let suffix = if secure { "; Secure" } else { "" };
     format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{suffix}")
 }

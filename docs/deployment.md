@@ -1,0 +1,194 @@
+# Deployment
+
+WireMirage is a single binary plus a Valkey instance. This page covers running
+it for real: the DNS and TLS shape virtual-host routing needs, the container
+image, and the hardening checklist.
+
+For the full env-var reference see [configuration](configuration.md).
+
+## The routing shape you have to plan for
+
+Mock traffic is served on **per-group subdomains** — a group named
+`stripe-mock` on an instance whose apex is `wm.example.com` serves its routes
+at `https://stripe-mock.wm.example.com/...`
+([ADR-0030](adr/0030-virtual-host-routing.md)). The apex itself is
+**control-plane only**: `/api/*`, `/ui/*`, `/auth/*`, `/health`, `/ready`. It
+serves no mock traffic, and an unmatched apex path is a plain 404 that is
+deliberately not journaled.
+
+Consequences for a deployment:
+
+- You need **wildcard DNS** — an `A`/`AAAA` record for `wm.example.com` and
+  one for `*.wm.example.com`.
+- You need a **wildcard TLS certificate** for `*.wm.example.com`. Public CAs
+  only issue those over the **DNS-01** challenge, so your ACME client needs
+  API credentials for the zone. HTTP-01 will not work for the wildcard.
+- Set `WM_APEX_HOST=wm.example.com` so the host knows which label is the
+  group and which requests are control-plane.
+- Set `WM_TRUSTED_PROXY=wm.example.com` (see
+  [hardening](#production-hardening)). Include any other hostnames the edge
+  serves.
+
+Locally none of this applies: the default apex is `localhost`, and
+`{group}.localhost` needs no DNS because the `Host` header alone drives group
+resolution:
+
+```sh
+curl -H 'Host: demo.localhost' http://localhost:8080/v1/charges
+```
+
+### DNS and TLS
+
+Whatever proxy you run, it has three jobs: terminate TLS for the apex **and**
+the wildcard, pass the original `Host` through untouched (the host resolves
+the group from it), and set `X-Forwarded-Proto` / `-Host` / `-For`.
+
+The shortest complete example is Caddy — one site block covers both:
+
+```caddyfile
+*.wm.example.com, wm.example.com {
+    tls {
+        dns <your-provider> {env.DNS_API_TOKEN}
+        propagation_delay 2m      # some providers converge slowly
+    }
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+(`dns` needs a Caddy build that includes your DNS provider's plugin; the
+stock binary has none.)
+
+Traefik is what the maintainer's own deployment runs. It needs the wildcard
+spelled out on the router — without `tls.domains` it tries to mint a
+certificate per hostname, which is the failure you hit the first time a group
+subdomain is requested:
+
+```yaml
+# dynamic config
+http:
+  routers:
+    wm-apex:
+      rule: "Host(`wm.example.com`)"
+      entryPoints: [websecure]
+      service: wiremirage
+      tls: { certResolver: myresolver }
+    wm-groups:
+      rule: 'HostRegexp(`^[a-z0-9-]+\.wm\.example\.com$`)'
+      entryPoints: [websecure]
+      service: wiremirage
+      tls:
+        certResolver: myresolver
+        domains:
+          - main: "*.wm.example.com"
+  services:
+    wiremirage:
+      loadBalancer:
+        servers:
+          - url: "http://wiremirage:8080"
+```
+
+```yaml
+# static config
+certificatesResolvers:
+  myresolver:
+    acme:
+      dnsChallenge:
+        provider: <your-provider>
+        delayBeforeCheck: 120s    # same propagation problem, different knob
+```
+
+**Budget for DNS propagation.** Both examples carry a deliberate delay before
+the ACME check. Some providers (Hetzner among them) converge across their
+nameservers slowly enough that the challenge is verified against a stale
+record and the issuance fails — with an error that points at the challenge,
+not at DNS. If wildcard issuance fails on the first try and succeeds on a
+retry, that's this.
+
+## Running the container
+
+CI builds the release image from the repo-root `Dockerfile` and publishes a
+multi-arch manifest to `ghcr.io/einarfd/wiremirage` (`latest` plus a `sha-`
+tag) on every push to `main`. `docker-compose.yml`'s `wm-host` service (the
+`full` profile) pulls that image, so a deployment never builds on the host:
+
+```sh
+WM_BOOTSTRAP_TOKEN=wmt_... WM_BOOTSTRAP_EMAIL=you@example.com \
+  docker compose --profile full up -d
+```
+
+Override the tag with `WM_IMAGE` (e.g.
+`WM_IMAGE=ghcr.io/einarfd/wiremirage:sha-abc1234`). To build the image from
+source instead — to test a local change in the prod-shaped build — layer the
+dev override:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+  --profile full up -d --build
+```
+
+The image binds `0.0.0.0:8080` inside the container. Publish it to loopback
+only (`-p 127.0.0.1:8080:8080`) when a reverse proxy is in front.
+
+## Probes
+
+Two unauthenticated endpoints for orchestrators:
+
+- `GET /health` — liveness, always 200 while the process is up.
+- `GET /ready` — readiness; checks the configured backends and reports
+  per-dependency status (e.g. `valkey: unreachable: ...`).
+
+Neither is recorded in metrics or traces (high frequency, low value).
+
+## Storage
+
+`WM_STORAGE=redis://valkey:6379` is the deployment shape. Everything
+WireMirage stores is **ephemeral by design** — routes and groups expire on
+their TTL, journal entries default to 1 h, and state dies with its group.
+There is nothing here to back up; users and tokens are the only durable
+records, and they are cheap to recreate. Plan for the Valkey instance to be
+disposable and you have the operational model right.
+
+## Production hardening
+
+The defaults are tuned for plain-HTTP dev workflows. Before exposing the host
+even on a trusted network behind a TLS edge, set the one behind-a-proxy
+switch:
+
+- **`WM_TRUSTED_PROXY=<hostname>`** (comma-separated for several) — turns on
+  `Secure` cookies, `X-Forwarded-*` trust, and the MCP `Host` allowlist
+  together ([ADR-0027](adr/0027-single-trusted-proxy-switch.md)). It's one
+  setting so the posture can't be half-configured.
+
+Then the first-deploy checklist:
+
+- **Generate a strong `WM_BOOTSTRAP_TOKEN`** (`openssl rand -hex 32`) with
+  `WM_BOOTSTRAP_EMAIL` set to your own email, so a later browser login reaches
+  the same account. After the first deploy, mint an operator token
+  (`wm tokens create operator/default`), revoke the bootstrap token
+  (`wm tokens revoke bootstrap`), and unset both env vars — leaving them set
+  re-creates the account on the next restart.
+- **Generate a strong `SESSION_SECRET`** of at least 32 bytes (`openssl rand
+  -base64 48`). Rotating it invalidates every existing session by design.
+- **Bind the host to `127.0.0.1`** so the proxy is the only ingress.
+  Combined with `WM_TRUSTED_PROXY`, the login throttle keys to the
+  proxy-reported client IP and isn't spoofable. A directly reachable host with
+  forwarded-header trust on can be hit with a spoofed `X-Forwarded-For`.
+- **At the TLS edge**: turn on HSTS, set `X-Content-Type-Options: nosniff`,
+  and consider a strict CSP — the UI only loads same-origin scripts (Ace is
+  vendored under `/ui/static/ace/`).
+- **Decide on egress.** `WM_EGRESS` is off by default; turn it on only if you
+  want handlers to be able to call back into your systems, and keep the
+  special-use default-deny in place (see
+  [configuration](configuration.md#outbound-callbacks--egress)).
+- **Think about who can log in.** Mock traffic is unauthenticated by design,
+  so anything registered on this instance is world-reachable at its subdomain.
+  Don't mock anything whose *responses* are sensitive, and don't put secrets
+  in route paths.
+
+## Scaling
+
+One replica. Several pieces of per-process state — the route-table cache, the
+journal live-tail broadcast bus, the MCP transport's session map, the login
+throttle, and the group sweeper — assume a single host today.
+[ADR-0037](adr/0037-multi-replica-readiness.md) is the plan for lifting that;
+until it lands, run one instance and scale Valkey instead.
