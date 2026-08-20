@@ -22,16 +22,27 @@ cd runner && cargo run --release -- ../out/guest.wasm
 ## Expected while the defect is present
 
 ```
-sink-s64(-1)    [negative IN, no return ] = ok
-source-s64()    [negative OUT, no params] = TRAP
-sink-u64(2^63)  [control: bit 63 set    ] = ok
+sink-s64(-1)       [lift export param      ] = ok
+pull-from-import() [lift import return     ] = ok
+source-s64()       [lower export return    ] = TRAP
+pull-and-return()  [lift then lower        ] = TRAP
+sink-u64(2^63)     [control: bit 63 set    ] = ok
 ```
 
-`sink-s64` passing and `source-s64` trapping is the whole finding: negatives
-*lift into* JS fine and fail when JS *lowers them back out*. The `u64` control
-rules out "any 64-bit value with the high bit set". Positive `s64` beyond 2^32,
-`s32` and `f64` negatives all pass too — earlier revisions of this repro
-covered them.
+The four s64 cases isolate the direction, which is the whole finding:
+negatives **lift into** JS fine — both as an export parameter and as an
+import's return value — and trap when JS **lowers** one back out, whether
+that's an import argument or an export's return. `pull-and-return` traps on
+the lowering half, not the lift, which `pull-from-import` proves by doing the
+lift alone.
+
+That matters for reading upstream #343: it is written up as *import argument*
+lowering, which is one instance of the defect. A fix scoped to that path would
+leave export returns broken.
+
+`sink-u64` is the control — a u64 with bit 63 set crosses fine, so this is not
+"any 64-bit value with the high bit set". Positive s64 beyond 2^32, and
+negative s32 and f64, all pass as well.
 
 ## When `source-s64()` returns -3
 
