@@ -65,11 +65,11 @@ urlencoding = "2"
 # delete the Node sidecar entirely. Heavy dep tree but the only
 # proven-mature pure-Rust path; the alternatives (sucrase/tsc
 # baked into the engine) tripped wasm traps inside StarlingMonkey.
-swc_common = "24"
-swc_ecma_ast = "27"
-swc_ecma_parser = { version = "43", features = ["typescript"] }
-swc_ecma_transforms_typescript = "53"
-swc_ecma_codegen = "30"
+swc_common = "26"
+swc_ecma_ast = "29"
+swc_ecma_parser = { version = "45", features = ["typescript"] }
+swc_ecma_transforms_typescript = "55"
+swc_ecma_codegen = "32"
 
 [features]
 # Enables tier-3 integration tests that spin up a real Valkey container via
