@@ -1,0 +1,69 @@
+# ADR-0038: One transpiler for every TypeScript path; `tsc` demoted to an engine-only checker
+
+**Status:** Accepted (2026-08)
+
+## Context
+
+Two separate things turn TypeScript into JavaScript in this project, and only one of them was ever a decision.
+
+[0020-shared-wasm-engine-for-interpreted-languages.md](0020-shared-wasm-engine-for-interpreted-languages.md) chose **pure-Rust swc in the host process** (`crate::ts_transpile`) for *user handlers*: TS bytes in at create/patch time, JS bytes stored on the `Route` record, no Node and no network hop. That part was argued and is working.
+
+The other one arrived as build plumbing. `compiler/js-engine/build.mjs` transpiles `engine.ts` — the 416-line shim every source-language handler runs inside — with **`tsc`**, because the build already ran in Node and `ts.transpileModule` was ten lines away. Nobody wrote that down, because at the time it wasn't a choice.
+
+It became one. TypeScript 7 is the Go port, and Dependabot has had an open PR (#26) since 2026-08-04 that cannot merge. A spike (2026-08-22) established why, and found more than the pin comment in `build.mjs` claims:
+
+- The root `typescript` export in 7.0.2 resolves to `lib/version.cjs` — **version constants only**. `ts.transpileModule`, `ts.ScriptTarget` and `ts.ModuleKind` are all `undefined`; there is no string-valued-options workaround, because there is no function to call.
+- The programmatic API moved behind `typescript/unstable/sync`, and it is a language-service surface: `Program`, `Project`, `Checker`, an `Emitter` **class**. Replacing a ten-line `transpileModule` call means standing up a Program over a virtual filesystem and driving an emitter, against an entry point whose own path says `unstable`.
+- The **`tsc` CLI works fine.** Only the programmatic API changed.
+
+The same spike established a second fact that matters more than the blocked PR. **Nothing type-checks `engine.ts` today.** `transpileModule` is emit-only and reports syntactic diagnostics; it never ran a semantic check. Running the TS 7 CLI over the file surfaced ten real errors — every WIT import (`wiremirage:handler/clock@0.1.0` and its four siblings) is an untyped hole. Those errors have been latent for as long as the file has existed. The 85 type annotations in it are editor documentation, not a build gate.
+
+A third fact belongs here, because it is the same subject seen from the user's side. [0007-typescript-first.md](0007-typescript-first.md) committed to shipping a `.d.ts` describing the script API, generated from the WIT. [0020-shared-wasm-engine-for-interpreted-languages.md](0020-shared-wasm-engine-for-interpreted-languages.md) dropped `tsc` from the create path but explicitly *kept* that artefact — "an LSP/editor artefact — it costs nothing at create time and benefits both Ace and the agent's editor context". **It was never built.** No `.d.ts` exists anywhere in the tree. So handler authors have no types at all: not in their editor, not in the UI's Ace pane, not in an agent's context window. Every documented handler-API trap — `pathParams` rather than `path_params`, `incr` taking and returning `bigint` — is a thing a type would have said and a comment has to say instead.
+
+That reframes the question. It was "which tool transpiles one file"; it is really "which tool emits, which tool checks, and are those the same tool" — for a shim where a mistake surfaces to the user as an opaque wasm trap rather than a stack trace.
+
+## Decision
+
+**swc emits every TypeScript→JavaScript byte in this project, including the engine build. `tsc` stays, on the maintained major, and only checks.**
+
+Concretely:
+
+- `crate::ts_transpile` gains a sibling entry point (`transpile_module`) that keeps the ES module export instead of rewriting `export function handle` to script shape. The existing `transpile` keeps the rewrite: user handlers are evaluated through the engine's `new Function(source + "; return handle;")` wrapper and must be script-shaped. The engine's own build is a module. That difference is currently implicit inside one function; it becomes two named entry points.
+- `crates/wm-host/build.rs` transpiles `compiler/js-engine/src/engine.ts` through that entry point before invoking the engine Dockerfile, and hands the resulting JS to the container. `build.mjs` consumes pre-transpiled JS and no longer imports `typescript`.
+- The shared code lives in a **workspace library crate**, `wm-transpile`, which `wm-host` takes as both a normal dependency and a `[build-dependencies]` path dependency. A build script cannot call into the crate it is building, so the transpiler has to live somewhere both can reach.
+
+  *Corrected during implementation (2026-08-22).* This ADR was drafted saying swc must not be a build dependency, because build dependencies get their own feature resolution and would compile the tree twice. Measured: with matching features on a host-target build, cargo unifies them — adding the build dependency compiled nothing a second time and left `Cargo.lock` untouched. The drafted alternative was also worse than stated: it said "small workspace **binary**", and a binary would mean `build.rs` invoking nested cargo *inside its own workspace*, which contends on the target-directory lock. The wasm fixtures get away with nested cargo precisely because they live outside the workspace. A library dependency avoids both problems.
+- **`tsc --noEmit` becomes a real check step for `engine.ts`**, on TypeScript 7, with `declare module` shims for the five WIT virtual modules. TypeScript's dependency entry survives as a checker; Dependabot #26 merges instead of being ignored or closed.
+
+- **The handler `.d.ts` promised by ADR-0007 ships**, describing the `handler` world — request, response, both stores, `log`, and the `host` globals. It and the engine's `declare module` shims describe two different WIT worlds (handler-facing versus engine-internal) but derive from the same contract in `wit/`, so they are produced and kept in step together rather than hand-maintained twice.
+- **User handlers are still not type-checked by the host.** The `.d.ts` puts types where the author is — editor, Ace, an agent's context — and anyone keeping handlers in files can run `tsc --noEmit` in their own CI. The create path stays swc-only: transpile, no check. See the alternatives below for why.
+
+**This amends [0020-shared-wasm-engine-for-interpreted-languages.md](0020-shared-wasm-engine-for-interpreted-languages.md), it does not reverse it.** That ADR's "On type checking" section rejects `tsc` for *user handlers*, on the argument that dry-run is a better feedback loop than waiting on a type checker. That argument stands and is untouched: handler authors still get write → dry-run → iterate, with no type checking in the create path. This ADR is about *our own* shim, a different file with a different audience — written by maintainers, read by nobody at runtime, and debugged through wasm backtraces when it is wrong.
+
+## Consequences
+
+- **One transpiler, one version, exercised by both paths.** The engine build becomes a continuous test of the exact swc that transpiles user handlers. A regression in it fails the build rather than reaching handler authors first.
+- **`typescript` stops being pinned to a dead major.** The pin exists because the emit API vanished; once we do not emit with it, the maintained line is usable for what it is now good at.
+- **Type checking on the file that most needs it, for the first time.** Writing the WIT `declare module` shims is a real gain in its own right: the shim's contract with the host becomes explicit and checked, instead of five untyped imports.
+- **Docker's role in the engine build shrinks.** The container still runs componentize-js, but it no longer needs a TypeScript toolchain — one fewer npm dependency inside the pinned image.
+- **swc becomes a single point of failure for both transpile paths.** Accepted, and mitigated by the split this ADR creates: `tsc --noEmit` catches syntax and type problems independently of swc, and the tier-2 engine tests catch emit problems. Today a swc regression would reach user handlers with nothing checking it at all, so the exposure is strictly lower than the status quo.
+- **A clean build gains one workspace member and no extra compilation.** Warm rebuilds are unaffected — the same `rerun-if-changed` gating that keeps the Docker step at ~0 ms covers the transpile step.
+- **Handler authors get types for the first time.** This is the larger user-visible effect of the ADR, and it costs nothing at runtime: the artefact is documentation that a compiler happens to be able to read. It also gives file-based workflows a real check — `tsc --noEmit` against the `.d.ts`, run by the user, on their machine, with no compiler in our image.
+- **A new sync obligation.** The `.d.ts` must track `wit/wiremirage.wit` or it produces false errors, which is worse than no types. Generating both it and the engine shims from the WIT is the mitigation, and the reason to build them together.
+- **`engine.ts` stays TypeScript.** No migration of 85 annotations, and the file keeps the authoring affordances that suit a typed shim of this size.
+
+## Alternatives considered
+
+- **Keep `tsc` for emit; adapt to TypeScript 7's `unstable/sync` API.** Rejected on the spike's evidence. It trades ten lines for a Program-plus-Emitter construction against an API the vendor labels unstable, to obtain output swc already produces. The port's speed advantage — the reason the port exists — is irrelevant here: this transpiles one small file at build time.
+- **Stay on TypeScript 6 indefinitely and add a Dependabot ignore for `7.x`.** Rejected as the default outcome rather than a decision. It preserves a dependency for a job it is no longer good at, silences the notification that would tell us the situation changed, and leaves `engine.ts` unchecked. Worth revisiting only if this ADR is rejected, in which case the ignore should carry the reason and what would clear it, per the convention `deny.toml` sets for its own ignores.
+- **`@swc/core` from npm inside the build container.** Rejected. It is the smallest change and removes the blocker, but it puts a *second* copy of swc in the project at a version that drifts independently of the Rust one. Handlers and the shim that runs them would then be transpiled by different swc versions, with nothing reporting the divergence.
+- **Rewrite `engine.ts` as plain JavaScript with JSDoc types.** Rejected. It removes the transpile step outright, which is genuinely attractive, and the spike confirmed componentize-js consumes plain JS directly. But 85 annotations across 416 lines are materially worse to read and maintain as JSDoc typedefs, on the file where authoring quality matters most — and it still leaves the checking question open, since JSDoc is only useful with a checker pointed at it.
+- **Type-check user handlers in the host, at create/patch time.** Rejected, and the reasoning is the point of writing this down, because it is the question that will recur. The engine's checker runs at *build* time; this would run at *runtime*, which means putting a compiler back in the image — the thing [0020-shared-wasm-engine-for-interpreted-languages.md](0020-shared-wasm-engine-for-interpreted-languages.md) deleted when it removed the sidecar ("No Node, no runtime Docker, no network hop"). The available shapes are Node plus ~7 MB of JS, or the TypeScript 7 Go binary as a per-architecture native dependency; `tsc` inside the engine component is already ruled out, having trapped at Wizer init. On top of the dependency: a subprocess spawn on every route create, in the loop agents use most; false rejections on twenty-line LLM-written scripts unless checking runs loose enough to catch little; a full compiler with module resolution over untrusted source, where today only a parser sees it; and no story for `language: "javascript"` handlers at all. Against that, dry-run already catches the semantic errors types cannot see, and the `.d.ts` covers the author-time case for everyone except a pure-MCP agent — which `get_capabilities` serves instead. ADR-0020 set the bar for revisiting as "measurement, or actual agent failure modes that dry-run doesn't catch"; that bar is not met, and this ADR does not lower it. If it is ever met, the least-bad shape is the Go binary, opt-in rather than default, in an ADR of its own.
+- **Commit the generated `engine.js` and drop the build-time step.** Rejected: a generated artifact in the tree that must be regenerated by hand is the failure mode `vendored/` was removed to avoid ([0020-shared-wasm-engine-for-interpreted-languages.md](0020-shared-wasm-engine-for-interpreted-languages.md) slice C).
+
+## See also
+
+- [0020-shared-wasm-engine-for-interpreted-languages.md](0020-shared-wasm-engine-for-interpreted-languages.md) — the engine architecture this amends; its "On type checking" section is the one this ADR is careful not to contradict
+- [0007-typescript-first.md](0007-typescript-first.md) — the original commitment to `tsc` at create time (superseded by ADR-0020's dry-run argument) and to the `.d.ts` this ADR finally delivers
+- [0023-source-only-public-handler-input.md](0023-source-only-public-handler-input.md) — why source is the only public handler input, which makes the transpile path load-bearing
+- ../script-api-wit.md — the WIT contract the `declare module` shims will describe

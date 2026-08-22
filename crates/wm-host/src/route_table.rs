@@ -297,7 +297,7 @@ impl RouteTable {
                 return Ok(js.to_string());
             }
         }
-        let js = crate::ts_transpile::transpile(source)
+        let js = wm_transpile::transpile(source)
             .map_err(|e| anyhow::anyhow!("transpile route {}: {e}", route.id))?;
         self.engine_js
             .lock()

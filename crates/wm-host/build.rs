@@ -180,6 +180,22 @@ fn build_js_engine(workspace_root: &Path, out_dir: &Path) {
     let gid = read_id("id", &["-g"]);
 
     std::fs::create_dir_all(out_dir).expect("create OUT_DIR");
+
+    // TS -> JS happens here, in the same swc that transpiles user
+    // handlers (ADR-0038), and the container only componentizes. The
+    // engine build is therefore a standing test of the transpiler the
+    // handler path depends on: break `wm-transpile` and `cargo build`
+    // fails before anyone's handler does.
+    let engine_ts = engine_dir.join("src/engine.ts");
+    let ts_source = std::fs::read_to_string(&engine_ts)
+        .unwrap_or_else(|e| panic!("read {}: {e}", engine_ts.display()));
+    // Module shape, not the handler's script shape: componentize-js
+    // resolves the world's export from `export function handle`.
+    let js = wm_transpile::transpile_module(&ts_source).unwrap_or_else(|e| {
+        panic!("transpile {}: {e}", engine_ts.display());
+    });
+    let engine_js = out_dir.join("engine.prebuilt.js");
+    std::fs::write(&engine_js, js).unwrap_or_else(|e| panic!("write {}: {e}", engine_js.display()));
     let status = Command::new("docker")
         .args([
             "run",
@@ -190,6 +206,8 @@ fn build_js_engine(workspace_root: &Path, out_dir: &Path) {
             &format!("{}:/out", out_dir.display()),
             "-e",
             "WM_JS_ENGINE_OUT=/out/js-engine.wasm",
+            "-e",
+            "WM_JS_ENGINE_SRC=/out/engine.prebuilt.js",
             image_tag,
         ])
         .status()

@@ -7,8 +7,13 @@ WebAssembly engine component, one fresh instance per request
 is no build step and no toolchain to install: you hand the host source, it
 hands back a live route.
 
-The contract handlers program against is `wit/wiremirage.wit`. The live,
-always-current version of everything below is `wm capabilities [topic]`
+The contract handlers program against is `wit/wiremirage.wit`, and
+[`types/wiremirage-handler.d.ts`](../types/wiremirage-handler.d.ts) is that
+contract as TypeScript: drop it beside your handler (or point a `tsconfig.json`
+at it) and your editor knows every shape below — including the two traps that
+cost the most time, camelCased field names and `bigint` counters. The host
+doesn't type-check handlers; `wm routes test` is the server-side feedback loop.
+The live, always-current version of everything below is `wm capabilities [topic]`
 (topics: `overview`, `request`, `response`, `store`, `log`, `clock`,
 `streaming`, `callbacks`, `gotchas`), or the `get_capabilities` MCP tool —
 both read from the running host rather than a static copy.

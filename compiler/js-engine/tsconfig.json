@@ -1,0 +1,14 @@
+{
+  "//": "Type-check only — emit is swc's job (ADR-0038). Kept strict: this file is the engine shim every source-language handler runs inside, and a mistake here surfaces to users as a wasm trap rather than a stack trace.",
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2023"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["src/**/*.ts"]
+}

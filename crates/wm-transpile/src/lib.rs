@@ -1,4 +1,18 @@
-//! In-host TypeScript → JavaScript transpile (ADR-0020 slice B).
+//! TypeScript → JavaScript transpile (ADR-0020 slice B, ADR-0038).
+//!
+//! Two entry points over one pipeline, differing only in the shape of
+//! the output:
+//!
+//! * [`transpile`] — **script shape**, for user handlers. The engine
+//!   evaluates handler source through `new Function(src + "; return
+//!   handle;")`, which needs a bare `function handle`, so a leading
+//!   `export` is rewritten away.
+//! * [`transpile_module`] — **ES module shape**, for the engine's own
+//!   `engine.ts`. componentize-js resolves the world's export from a
+//!   real `export function handle`, so the export must survive.
+//!
+//! Both are the same swc pipeline: that is the point (ADR-0038). The
+//! engine build exercises the transpiler that user handlers depend on.
 //!
 //! Pure-Rust path via swc. Lets the host accept `language:
 //! "typescript"` routes without an external compiler. swc's `strip`
@@ -21,12 +35,13 @@ use swc_ecma_parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 use swc_ecma_transforms_typescript::strip;
 
 /// Strip TypeScript syntax from `source` and return the JS that
-/// remains. Returns the swc parse-error message on failure —
-/// usually with line + column.
+/// remains, **as an ES module** — imports and exports untouched.
+/// Returns the swc parse-error message on failure, usually with line
+/// and column.
 ///
 /// The function is synchronous and CPU-bound. Callers in async
 /// contexts must run it via `tokio::task::spawn_blocking`.
-pub fn transpile(source: &str) -> Result<String, String> {
+pub fn transpile_module(source: &str) -> Result<String, String> {
     let cm: Lrc<SourceMap> = Lrc::default();
     let fm = cm.new_source_file(FileName::Anon.into(), source.to_string());
 
@@ -79,17 +94,20 @@ pub fn transpile(source: &str) -> Result<String, String> {
         String::from_utf8(buf).map_err(|e| format!("utf8: {e}"))
     })?;
 
-    // The engine's `handle` eval wrapper looks for a top-level
-    // `handle` declaration. TS source that wrote `export function
-    // handle(...)` becomes `export function handle(...)` after
-    // strip (the ES module export survives). We patch that to a
-    // plain `function handle(...)` so the wrapper's
-    // `; return handle;` works. The patching is a literal-string
-    // swap because the only place `export` appears in our handler
-    // contract is in front of `function handle`; if someone
-    // sneaks an `export const`, that's user error.
-    let patched = output.replace("export function handle", "function handle");
-    Ok(patched)
+    Ok(output)
+}
+
+/// Strip TypeScript syntax and return **script-shape** JS: the same
+/// output as [`transpile_module`], with a leading `export` removed from
+/// `export function handle`.
+///
+/// This is the handler path. The engine's eval wrapper looks for a
+/// top-level `handle` declaration, so `; return handle;` only resolves
+/// against a bare `function handle`. The rewrite is a literal-string
+/// swap because the only place `export` appears in the handler contract
+/// is in front of `function handle`; an `export const` is user error.
+pub fn transpile(source: &str) -> Result<String, String> {
+    Ok(transpile_module(source)?.replace("export function handle", "function handle"))
 }
 
 #[cfg(test)]
@@ -123,5 +141,44 @@ mod tests {
         let bad = "function handle(req: unknown {";
         let err = transpile(bad).unwrap_err();
         assert!(err.contains("parse"), "error mentions parse: {err}");
+    }
+}
+
+#[cfg(test)]
+mod module_shape_tests {
+    use super::*;
+
+    #[test]
+    fn module_entry_point_keeps_the_export() {
+        // What the engine build needs: componentize-js resolves the
+        // world's export from this declaration.
+        let js = transpile_module("export function handle(req: unknown) { return req; }").unwrap();
+        assert!(js.contains("export function handle"), "got: {js}");
+    }
+
+    #[test]
+    fn handler_entry_point_strips_it() {
+        // What the engine's eval wrapper needs.
+        let js = transpile("export function handle(req: unknown) { return req; }").unwrap();
+        assert!(js.contains("function handle"));
+        assert!(!js.contains("export function handle"), "got: {js}");
+    }
+
+    #[test]
+    fn both_entry_points_strip_the_same_types() {
+        let ts = "interface R { a: number }\nexport function handle(r: R): number { return r.a; }";
+        let (m, s) = (transpile_module(ts).unwrap(), transpile(ts).unwrap());
+        for js in [&m, &s] {
+            assert!(!js.contains("interface R"));
+            assert!(!js.contains(": number"));
+        }
+        assert_eq!(m.replace("export function handle", "function handle"), s);
+    }
+
+    #[test]
+    fn module_entry_point_keeps_imports() {
+        // engine.ts imports the WIT interfaces; componentize-js needs them.
+        let js = transpile_module("import { x } from 'a:b/c@0.1.0';\nexport const y = x;").unwrap();
+        assert!(js.contains("import"), "got: {js}");
     }
 }

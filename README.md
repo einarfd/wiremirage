@@ -192,8 +192,11 @@ the SDK is the only honest judge of whether the bytes are right.
 crates/wm-core/     shared types, REST client, auth
 crates/wm-host/     the server: axum + wasmtime + Valkey; MCP under src/mcp/
 crates/wm-cli/      the wm binary
+crates/wm-transpile/ TypeScript -> JavaScript (swc), shared by the runtime
+                    handler path and the engine build
 compiler/js-engine/ TypeScript shim + Dockerfile producing js-engine.wasm
 wit/                the handler contract (wiremirage.wit) and engine world
+types/              the handler contract as TypeScript, for handler authors
 skill/              the user-facing skill shipped to agents
 conformance/        opt-in lanes running real SDKs against real mocks
 docs/               documentation and ADRs

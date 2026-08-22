@@ -1,0 +1,22 @@
+[package]
+name = "wm-transpile"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# Its own crate rather than a module of wm-host, because wm-host's
+# build.rs needs it too (ADR-0038: the engine's own engine.ts goes
+# through the same transpiler as user handlers). A build script cannot
+# call into the crate it is building, so the shared code has to live
+# somewhere both can depend on. A library, not a binary — nested cargo
+# inside the same workspace would contend on the target-dir lock, which
+# is why the wasm fixtures live outside the workspace.
+[dependencies]
+swc_common.workspace = true
+swc_ecma_ast.workspace = true
+swc_ecma_parser.workspace = true
+swc_ecma_transforms_typescript.workspace = true
+swc_ecma_codegen.workspace = true

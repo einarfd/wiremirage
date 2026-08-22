@@ -21,20 +21,11 @@
 // it yet (npm latest is still 0.4.1, pre-fix). Re-check on the next
 // componentize-js/weval bump; the advisories should just disappear then.
 import { componentize } from "@bytecodealliance/componentize-js";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-// Pinned to typescript 6 deliberately. 7.x is the Go port, and it does
-// not expose the enum surface this file uses — `ts.ScriptTarget` is
-// undefined there, so `transpileModule` below dies with "Cannot read
-// properties of undefined (reading 'ES2023')". Tried 2026-08; revisit
-// when the port's programmatic API settles. There is nothing to gain in
-// the meantime: this transpiles one small file at build time, so the
-// port's speed is irrelevant here.
-import ts from "typescript";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SRC = resolve(HERE, "src/engine.ts");
 const WIT = resolve(HERE, "wit");
 
 if (!process.env.WM_JS_ENGINE_OUT) {
@@ -43,40 +34,29 @@ if (!process.env.WM_JS_ENGINE_OUT) {
   );
   process.exit(1);
 }
+if (!process.env.WM_JS_ENGINE_SRC) {
+  console.error(
+    "WM_JS_ENGINE_SRC is required (absolute path to the transpiled engine JS).\n" +
+      "wm-host's build.rs transpiles src/engine.ts with wm-transpile and passes\n" +
+      "the result in — see ADR-0038. To run this container by hand, transpile\n" +
+      "engine.ts yourself and point WM_JS_ENGINE_SRC at the .js.",
+  );
+  process.exit(1);
+}
 const OUT = resolve(process.env.WM_JS_ENGINE_OUT);
 const OUT_DIR = dirname(OUT);
 
-// 1. Transpile TS → JS. ESNext module shape — componentize-js wants
-//    a real ES module, not script-shape. The `export function handle`
-//    is what componentize-js looks for to satisfy the world's export.
-const tsSrc = readFileSync(SRC, "utf8");
-const { outputText, diagnostics } = ts.transpileModule(tsSrc, {
-  compilerOptions: {
-    target: ts.ScriptTarget.ES2023,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    strict: false,
-  },
-  reportDiagnostics: true,
-});
-if (diagnostics && diagnostics.length > 0) {
-  const messages = diagnostics.map((d) =>
-    typeof d.messageText === "string"
-      ? d.messageText
-      : d.messageText.messageText,
-  );
-  console.error("engine.ts transpile failed:");
-  for (const m of messages) console.error("  -", m);
+// TS → JS already happened, in Rust, using the same swc that transpiles
+// user handlers (ADR-0038). This container only componentizes. That is
+// why there is no typescript dependency here for emit: `tsc` runs in the
+// image as a *checker* (npm run typecheck, wired into the Dockerfile),
+// never as the thing producing this file.
+const jsPath = resolve(process.env.WM_JS_ENGINE_SRC);
+if (!existsSync(jsPath)) {
+  console.error(`WM_JS_ENGINE_SRC does not exist: ${jsPath}`);
   process.exit(1);
 }
-
-// 2. componentize-js needs a file on disk. Write into OUT_DIR so the
-//    container's bind-mount is writable; /app and /app/src are owned
-//    by root (from the Dockerfile COPY) and the build runs as the
-//    host UID, so writing inside /app would EACCES.
 mkdirSync(OUT_DIR, { recursive: true });
-const jsPath = resolve(OUT_DIR, "engine.generated.js");
-writeFileSync(jsPath, outputText);
 
 // Optional: pass `--debug` to dump generated bindings to ./debug/.
 const DEBUG = process.argv.includes("--debug");
@@ -90,8 +70,7 @@ if (DEBUG) {
 // (negative s64 lowering traps the guest) is fixed on the new version, and
 // its README lists what to delete when it is. `grep -rn 'ComponentizeJS#343'`
 // finds the workarounds that depend on the answer.
-try {
-  const out = await componentize({
+const out = await componentize({
     sourcePath: jsPath,
     witPath: WIT,
     worldName: "engine",
@@ -116,14 +95,8 @@ try {
           },
         }
       : {}),
-  });
-  mkdirSync(OUT_DIR, { recursive: true });
-  writeFileSync(OUT, out.component);
-  console.log(
-    `wrote ${OUT} (${(out.component.length / (1024 * 1024)).toFixed(2)} MiB)`,
-  );
-} finally {
-  // Leave engine.generated.js around for diagnostic purposes; the
-  // .gitignore keeps it out of commits.
-  void 0;
-}
+});
+writeFileSync(OUT, out.component);
+console.log(
+  `wrote ${OUT} (${(out.component.length / (1024 * 1024)).toFixed(2)} MiB)`,
+);

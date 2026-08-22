@@ -34,7 +34,6 @@ pub mod server;
 pub mod session;
 pub mod store;
 pub mod telemetry;
-pub mod ts_transpile;
 pub mod ui;
 pub mod wire;
 
