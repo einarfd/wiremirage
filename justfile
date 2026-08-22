@@ -6,7 +6,25 @@ default:
 check: fmt-check clippy test
 
 # Like `check` but also runs the tier-3 testcontainers suite. Requires Docker.
-check-all: check test-valkey
+check-all: check test-valkey typecheck
+
+# Type-check the shipped handler types (ADR-0038) by compiling
+# types/example-handler.ts against types/wiremirage-handler.d.ts. The .d.ts
+# is hand-written and describes a contract users write code against, so
+# "does a real handler still compile against it" is the thing worth
+# asserting; tests/handler_types_track_wit.rs covers the other half, that it
+# still matches the WIT.
+#
+# Runs in the js-engine builder image, which already carries the typescript
+# the engine's own `npm run typecheck` uses — no second toolchain to pin.
+# That means Docker, which is why this is in check-all and not check.
+typecheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker build --quiet -t wm-js-engine-builder:dev compiler/js-engine >/dev/null
+    docker run --rm -v "$PWD/types":/types -w /app wm-js-engine-builder:dev \
+      npx tsc --noEmit -p /types/tsconfig.json
+    echo "handler types: example-handler.ts compiles against wiremirage-handler.d.ts"
 
 fmt:
     cargo fmt --all

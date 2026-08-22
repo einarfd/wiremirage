@@ -71,6 +71,20 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      # `types/wiremirage-handler.d.ts` is what handler authors write code
+      # against, and it is hand-written (ADR-0038), so something has to prove
+      # a real handler still compiles against it. The Rust test
+      # `handler_types_track_wit` covers the other half — that it still
+      # matches the WIT. This step is cheap here because `cargo build` above
+      # already built the js-engine image this borrows typescript from.
+      # Mirrors `just typecheck` — inlined because ci-setup doesn't install
+      # just, and pulling it in for one step would slow every job.
+      - name: Type-check the shipped handler types
+        run: |
+          docker build --quiet -t wm-js-engine-builder:dev compiler/js-engine
+          docker run --rm -v "$PWD/types":/types -w /app wm-js-engine-builder:dev \
+            npx tsc --noEmit -p /types/tsconfig.json
+
   # Dependency audit: security advisories, license policy, banned crates,
   # and source registries. Reads Cargo.lock — no compile — so it skips
   # ci-setup entirely and finishes in well under a minute, which makes it

@@ -1,0 +1,13 @@
+{
+  "//": "Used by `just typecheck` to compile example-handler.ts against wiremirage-handler.d.ts. Copy this alongside your own handlers to get the same checking in your editor and CI.",
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2023"],
+    "strict": true,
+    "noEmit": true,
+    "types": []
+  },
+  "include": ["*.ts", "*.d.ts"]
+}
