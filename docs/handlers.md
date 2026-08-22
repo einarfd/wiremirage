@@ -17,9 +17,11 @@ written against it, and `types/tsconfig.json` is a config you can copy to get
 the same checking in your own CI. The host doesn't type-check handlers;
 `wm routes test` is the server-side feedback loop.
 The live, always-current version of everything below is `wm capabilities [topic]`
-(topics: `overview`, `request`, `response`, `store`, `log`, `clock`,
+(topics: `overview`, `types`, `request`, `response`, `store`, `log`, `clock`,
 `streaming`, `callbacks`, `gotchas`), or the `get_capabilities` MCP tool —
-both read from the running host rather than a static copy.
+both read from the running host rather than a static copy. If you're not
+working in a clone, `wm capabilities types > wiremirage-handler.d.ts` fetches
+the type definitions from the host you're already talking to.
 
 ## The shape
 

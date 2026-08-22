@@ -304,6 +304,7 @@ async fn capabilities_endpoint_lists_overview_and_topics() {
         .collect();
     for needle in [
         "overview",
+        "types",
         "request",
         "response",
         "store",
@@ -363,5 +364,35 @@ async fn capabilities_endpoint_unknown_topic_falls_back_to_overview() {
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["topic"], "overview");
 
+    server.abort();
+}
+
+/// The `types` topic exists so an agent with no repo checkout can still get
+/// the handler `.d.ts` — over MCP or the CLI against a remote host
+/// (ADR-0038). It is `include_str!`'d from the shipped file, so this asserts
+/// the delivery path, not the content.
+#[tokio::test]
+async fn capabilities_types_topic_serves_the_handler_dts() {
+    let (addr, server) = start_empty().await;
+    let body = reqwest::Client::new()
+        .get(format!("http://{addr}/api/capabilities/types"))
+        .header(reqwest::header::AUTHORIZATION, "Bearer wmt_test")
+        .send()
+        .await
+        .expect("send")
+        .text()
+        .await
+        .expect("body");
+
+    // A caller pipes this to a file and points tsc at it, so the declarations
+    // have to survive the round trip.
+    for needle in [
+        "export interface WireMirageRequest",
+        "export interface WireMirageStore",
+        "incr(key: string, by: bigint): bigint",
+        "declare global",
+    ] {
+        assert!(body.contains(needle), "types topic is missing `{needle}`");
+    }
     server.abort();
 }

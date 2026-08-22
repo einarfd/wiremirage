@@ -23,6 +23,7 @@
 /// argument). Order matters — the overview lists topics in this order.
 pub const TOPICS: &[(&str, &str)] = &[
     ("overview", OVERVIEW),
+    ("types", TYPES),
     ("request", REQUEST),
     ("response", RESPONSE),
     ("store", STORE),
@@ -85,6 +86,8 @@ Fetch each via the appropriate surface:
 
 Topics:
 
+- **`types`** — the whole API as a TypeScript `.d.ts`, ready to save next
+  to your handler
 - **`request`** — the request object's fields and types
 - **`response`** — the response shape and reserved headers
 - **`store`** — per-route and per-group state (kv + lists + hashes + sets)
@@ -107,6 +110,32 @@ Topics:
 - **The body is bytes.** `req.body` is a `Uint8Array`; the response's
   `body` must also be `Uint8Array`. Use TextEncoder/TextDecoder.
 "#;
+
+/// The shipped handler `.d.ts`, inlined at compile time so this topic and
+/// `types/wiremirage-handler.d.ts` cannot disagree — there is one copy, and
+/// the build fails if the path moves (ADR-0038).
+const TYPES: &str = concat!(
+    r#"# TypeScript types
+
+The handler API as a `.d.ts`. Save it next to your handler and your editor
+knows every shape below; point a `tsconfig.json` at it and `tsc --noEmit`
+will catch the two mistakes that cost the most time — camelCased field
+names, and `bigint` where a counter is involved (`incr("n", 1n)`, not
+`incr("n", 1)`).
+
+The host does **not** type-check handlers. This file is for your side of
+the wire; `wm routes test` (MCP: `dry_run_route`) is the server-side
+feedback loop, and it catches things types cannot — wrong status, empty
+body, a content-type that doesn't match what you actually returned.
+
+Save as `wiremirage-handler.d.ts`:
+
+```ts
+"#,
+    include_str!("../../../types/wiremirage-handler.d.ts"),
+    r#"```
+"#
+);
 
 const REQUEST: &str = r#"# Request
 

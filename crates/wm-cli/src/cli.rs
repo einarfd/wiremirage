@@ -83,9 +83,10 @@ pub enum Command {
     },
     /// Print handler-API documentation (same content as the MCP
     /// `get_capabilities` tool). Call without `topic` for the
-    /// overview + topic list. Known topics: `overview`, `request`,
-    /// `response`, `store`, `log`, `clock`, `streaming`, `callbacks`,
-    /// `gotchas`.
+    /// overview + topic list. Known topics: `overview`, `types`,
+    /// `request`, `response`, `store`, `log`, `clock`, `streaming`,
+    /// `callbacks`, `gotchas`. `types` prints the handler `.d.ts` —
+    /// `wm capabilities types > wiremirage-handler.d.ts`.
     Capabilities {
         /// Topic name. Omit for the overview. Unknown topics fall
         /// back to the overview.

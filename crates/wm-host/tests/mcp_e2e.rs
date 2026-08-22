@@ -426,6 +426,9 @@ async fn get_capabilities_returns_overview_and_clock_topic() {
     assert!(topic_names.contains(&"clock"));
     assert!(topic_names.contains(&"store"));
     assert!(topic_names.contains(&"gotchas"));
+    // The `.d.ts` is only reachable over the network for an MCP agent —
+    // there is no repo checkout on that side (ADR-0038).
+    assert!(topic_names.contains(&"types"));
 
     // Specific topic → clock section with the new primitives named.
     let result = client
