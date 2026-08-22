@@ -202,7 +202,7 @@ If you've created a route and your SUT still gets 404, the journal isn't showing
 
 ## Where to look for more
 
-- `wm capabilities [topic]` — the full handler API as markdown, fetched live from the connected host. Topics: `overview`, `request`, `response`, `store`, `log`, `clock`, `streaming`, `gotchas`. Always agrees with the host's actual capabilities (the CLI fetches `/api/capabilities` rather than embedding a static copy). The same content is reachable via the MCP `get_capabilities` tool.
+- `wm capabilities [topic]` — the full handler API as markdown, fetched live from the connected host. Topics: `overview`, `types`, `request`, `response`, `store`, `log`, `clock`, `streaming`, `callbacks`, `gotchas`. **`types` is worth fetching before you write a handler**: it prints a `.d.ts` covering the whole API — save it beside your handler (`wm capabilities types > wiremirage-handler.d.ts`) and your editor catches the camelCase and `bigint` traps before the host ever sees the code. Always agrees with the host's actual capabilities (the CLI fetches `/api/capabilities` rather than embedding a static copy). The same content is reachable via the MCP `get_capabilities` tool.
 - `wm <command> --help` — the source of truth for command details. Always more current than this skill.
 - `wm --help` — the surface map.
 - `wm completion bash|zsh|fish|powershell` — emit a completion script for your shell. Pipe it into the appropriate location once.
