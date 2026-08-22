@@ -366,7 +366,7 @@ async fn run_engine_in_snapshot(
         });
     };
     let source = if route.language == "typescript" {
-        match crate::ts_transpile::transpile(original) {
+        match wm_transpile::transpile(original) {
             Ok(js) => js,
             Err(e) => {
                 return Err(RunFail {

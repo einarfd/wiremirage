@@ -4,6 +4,7 @@ members = [
     "crates/wm-core",
     "crates/wm-host",
     "crates/wm-cli",
+    "crates/wm-transpile",
 ]
 # Wasm guest fixtures live outside the workspace so the wasm32 target
 # doesn't pollute `cargo check --workspace` / `cargo clippy --workspace`.
@@ -47,6 +48,14 @@ clap = { version = "4", features = ["derive", "env"] }
 assert_cmd = "2"
 rmcp = { version = "3.1", default-features = false, features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 schemars = { version = "1", features = ["chrono04"] }
+# Pure-Rust TypeScript transpile (ADR-0020 slice B, ADR-0038). Declared at
+# workspace level because wm-transpile and wm-host's build script both pull
+# the same set; one version, one compile.
+swc_common = "26"
+swc_ecma_ast = "29"
+swc_ecma_parser = { version = "45", features = ["typescript"] }
+swc_ecma_transforms_typescript = "55"
+swc_ecma_codegen = "32"
 
 [profile.release]
 lto = "thin"

@@ -19,7 +19,15 @@ RUN npm ci --silent
 
 COPY src ./src
 COPY wit ./wit
-COPY build.mjs ./
+COPY build.mjs tsconfig.json ./
+
+# Type-check engine.ts (ADR-0038). Emit is swc's job in wm-host's
+# build.rs; typescript is here purely as a checker, which is the one job
+# the 7.x Go port is good at — its programmatic transpile API is gone,
+# but the CLI is fine. Runs at image build so a type error fails
+# `cargo build`, and the layer cache means it costs nothing on a rebuild
+# where src/ hasn't changed.
+RUN npm run typecheck
 
 ENV WM_JS_ENGINE_OUT=/out/js-engine.wasm
 

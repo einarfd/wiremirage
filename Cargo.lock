@@ -5301,11 +5301,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "subtle",
- "swc_common",
- "swc_ecma_ast",
- "swc_ecma_codegen",
- "swc_ecma_parser",
- "swc_ecma_transforms_typescript",
  "testcontainers",
  "thiserror 2.0.20",
  "tokio",
@@ -5318,6 +5313,18 @@ dependencies = [
  "urlencoding",
  "wasmtime",
  "wm-core",
+ "wm-transpile",
+]
+
+[[package]]
+name = "wm-transpile"
+version = "0.1.0"
+dependencies = [
+ "swc_common",
+ "swc_ecma_ast",
+ "swc_ecma_codegen",
+ "swc_ecma_parser",
+ "swc_ecma_transforms_typescript",
 ]
 
 [[package]]

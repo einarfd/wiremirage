@@ -5,7 +5,7 @@
 //! "typescript"`, `source`); pre-compiled wasm upload was retired in
 //! ADR-0023. Requests are handled in-process: JS is stored verbatim and
 //! dispatched through the shared `js-engine.wasm` component, TS goes
-//! through `ts_transpile::transpile` (pure-Rust swc) first and is stored
+//! through `wm_transpile::transpile` (pure-Rust swc) first and is stored
 //! as JS. No external compiler.
 //!
 //! Tokens (`/api/tokens`): POST/GET/DELETE for the caller's own
@@ -624,7 +624,7 @@ pub(crate) async fn create_route_core(
             // store the *original* TS — the engine-runnable JS is derived and
             // cached at dispatch (ADR-0020; preserves the authored source so
             // show_route_source / export return what the author wrote).
-            tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
+            tokio::task::spawn_blocking(move || wm_transpile::transpile(&ts_source))
                 .await
                 .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
                 .map_err(ApiError::compile_failed)?;
@@ -977,7 +977,7 @@ pub(crate) async fn patch_route_core(
                 let ts_source = source.to_string();
                 // Validate (compile_failed) but store the original TS; the JS
                 // is derived + cached at dispatch (ADR-0020).
-                tokio::task::spawn_blocking(move || crate::ts_transpile::transpile(&ts_source))
+                tokio::task::spawn_blocking(move || wm_transpile::transpile(&ts_source))
                     .await
                     .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
                     .map_err(ApiError::compile_failed)?;

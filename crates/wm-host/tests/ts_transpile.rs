@@ -41,7 +41,7 @@ async fn transpile_strips_typescript_type_annotations() {
     "#;
     let _ = runtime;
     let ts_owned = ts.to_string();
-    let js = tokio::task::spawn_blocking(move || wm_host::ts_transpile::transpile(&ts_owned))
+    let js = tokio::task::spawn_blocking(move || wm_transpile::transpile(&ts_owned))
         .await
         .expect("spawn")
         .expect("transpile");
@@ -145,7 +145,7 @@ async fn transpile_surfaces_typescript_syntax_errors() {
     "#;
     let _ = runtime;
     let bad_owned = bad.to_string();
-    let err = tokio::task::spawn_blocking(move || wm_host::ts_transpile::transpile(&bad_owned))
+    let err = tokio::task::spawn_blocking(move || wm_transpile::transpile(&bad_owned))
         .await
         .expect("spawn")
         .unwrap_err();

@@ -6,10 +6,13 @@
   "description": "WireMirage shared JS engine component (ADR-0020). Built once via componentize-js; the resulting js-engine.wasm is vendored under crates/wm-host/vendored/.",
   "license": "Apache-2.0",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@bytecodealliance/componentize-js": "0.22.0",
-    "typescript": "6.0.3"
+    "@bytecodealliance/componentize-js": "0.22.0"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
   }
 }

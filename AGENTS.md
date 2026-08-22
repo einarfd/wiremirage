@@ -22,13 +22,24 @@ Cargo workspace, three crates:
   `mcp/` (MCP service, mounted at `/api/mcp`), `ui/` (minijinja templates),
   `auth.rs` / `oidc.rs` / `github_oauth.rs` / `session.rs`
 - `wm-cli` — the `wm` binary
+- `wm-transpile` — TS→JS via swc. Its own crate because `wm-host`'s
+  `build.rs` needs it too: `engine.ts` goes through the same transpiler as
+  user handlers (ADR-0038). `transpile` returns script shape (handlers),
+  `transpile_module` keeps the ES export (the engine build)
 
 Outside the workspace:
 
 - `compiler/js-engine/` — TypeScript shim + Dockerfile producing the shared
   `js-engine.wasm` (componentize-js over StarlingMonkey). Built at cargo build
   time by `crates/wm-host/build.rs` into `OUT_DIR` and `include_bytes!`'d into
-  the host. Not vendored, not in the workspace.
+  the host. Not vendored, not in the workspace. `build.rs` transpiles
+  `engine.ts` with `wm-transpile` and passes the JS in; the container
+  componentizes it and runs `tsc --noEmit` as a *checker* (ADR-0038 —
+  TypeScript 7's programmatic emit API is gone, its CLI is fine).
+- `types/wiremirage-handler.d.ts` — the handler contract as TypeScript, shipped
+  for handler authors. Hand-written (the handler surface is a JS-ergonomics
+  layer over the WIT), so `tests/handler_types_track_wit.rs` fails if it and
+  the WIT disagree in either direction.
 - `crates/wm-host/tests/fixtures/<name>/` — wasm guest fixtures as standalone
   crates. `build.rs` compiles them to `wasm32-unknown-unknown`, runs
   `wasm-tools component new`, and stamps the paths into
