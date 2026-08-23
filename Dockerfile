@@ -1,21 +1,45 @@
 # Multi-stage Dockerfile for the WireMirage host.
 #
-# Stage 1 (js-engine-builder) builds the shared js-engine.wasm via
+# Stage 1 (engine-js) transpiles compiler/js-engine/src/engine.ts to
+# JavaScript with wm-transpile — the same swc the runtime uses for user
+# handlers (ADR-0038). It needs its own stage because the node stage that
+# componentizes runs before any Rust would otherwise be built, and the
+# alternative (a second, npm-side transpiler) is the version drift that ADR
+# rejected. It shares the cargo cache mounts with stage 3, so the swc tree it
+# compiles is reused there rather than built twice.
+#
+# Stage 2 (js-engine-builder) builds the shared js-engine.wasm via
 # componentize-js, mirroring compiler/js-engine/Dockerfile. We don't
 # reuse that Dockerfile directly because it would require docker-in-
 # docker; instead we inline the same steps as a build stage and pass
 # the output to the Rust builder via WM_JS_ENGINE_WASM_OVERRIDE so
 # build.rs skips its own docker invocation.
 #
-# Stage 2 (rust-builder) compiles wm-host in release mode.
+# Stage 3 (rust-builder) compiles wm-host in release mode.
 #
-# Stage 3 (runtime) ships the binary on debian:bookworm-slim with
+# Stage 4 (runtime) ships the binary on debian:bookworm-slim with
 # ca-certificates and libgcc only.
 
 # syntax=docker/dockerfile:1.7
 
 
-# ── Stage 1: js-engine builder ───────────────────────────────────────────
+# ── Stage 1: engine.ts → engine.js ───────────────────────────────────────
+FROM rust:1-bookworm AS engine-js
+
+WORKDIR /src
+COPY . .
+
+# Same cache mount paths as stage 3, so this stage's swc build is not
+# repeated there.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release -p wm-transpile --bin wm-engine-transpile && \
+    mkdir -p /out && \
+    /src/target/release/wm-engine-transpile \
+      compiler/js-engine/src/engine.ts /out/engine.js
+
+
+# ── Stage 2: js-engine builder ───────────────────────────────────────────
 FROM node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS js-engine-builder
 
 WORKDIR /app
@@ -26,18 +50,27 @@ RUN npm ci --silent
 
 COPY compiler/js-engine/src ./src
 COPY compiler/js-engine/wit ./wit
-COPY compiler/js-engine/build.mjs ./
+COPY compiler/js-engine/build.mjs compiler/js-engine/tsconfig.json ./
+
+# Same checker step compiler/js-engine/Dockerfile runs, for the same reason
+# (ADR-0038): typescript is here to check engine.ts, never to emit it. Keeping
+# both paths identical is what stops this inlined copy from drifting.
+RUN npm run typecheck
+
+# The JS from stage 1. build.mjs consumes it and only componentizes.
+COPY --from=engine-js /out/engine.js ./engine.prebuilt.js
 
 # componentize-js spawns wizer with a synthesised env that strips HOME.
 # wasmtime's cache config then can't find ProjectDirs and errors out.
 # /tmp is universally writable. See compiler/js-engine/Dockerfile.
 ENV HOME=/tmp \
-    WM_JS_ENGINE_OUT=/out/js-engine.wasm
+    WM_JS_ENGINE_OUT=/out/js-engine.wasm \
+    WM_JS_ENGINE_SRC=/app/engine.prebuilt.js
 
 RUN mkdir -p /out && node build.mjs
 
 
-# ── Stage 2: Rust builder ────────────────────────────────────────────────
+# ── Stage 3: Rust builder ────────────────────────────────────────────────
 FROM rust:1-bookworm AS rust-builder
 
 # cmake: aws-lc-sys (via rustls). clang: some swc / wasmtime crates
@@ -98,7 +131,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp /src/target/release/wm-host /usr/local/bin/wm-host
 
 
-# ── Stage 3: runtime ─────────────────────────────────────────────────────
+# ── Stage 4: runtime ─────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 # ca-certificates: outbound TLS (rediss://, OIDC providers).
