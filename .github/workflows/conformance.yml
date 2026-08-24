@@ -25,6 +25,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/ci-setup
+        with:
+          # Weekly cadence means this job usually builds cold (GitHub evicts
+          # caches unused for 7 days, which is exactly this cron's period).
+          # Keeping the cache from a failed run means a re-run — or a hand
+          # triggered retry of a genuinely failing lane — doesn't pay for the
+          # whole workspace again.
+          cache-on-failure: "true"
       # Docker + jq are preinstalled on ubuntu-latest; ci-setup provides the
       # Rust toolchain + wasm-tools the host build needs.
       - name: Run conformance lanes
