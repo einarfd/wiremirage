@@ -54,11 +54,15 @@ WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" \
 HOST_PID=$!
 trap 'kill "$HOST_PID" 2>/dev/null || true' EXIT
 
-# Startup only — the binary already exists. Bail immediately if it exited
-# (bad config, port in use): waiting out the full timeout on a dead process
-# tells you nothing.
+# Startup only — the binary already exists. Still generous, because a cold
+# machine's first boot Cranelift-compiles the ~12 MB StarlingMonkey engine
+# component (~30 s in debug, see runtime.rs). That result is memoized to a
+# .cwasm in the temp dir, so a dev box that has run the tests is ready in
+# milliseconds and a fresh CI runner is not. Bail immediately if the process
+# exited (bad config, port in use) rather than waiting out the timeout on a
+# dead PID.
 echo "waiting for host on ${BASE} ..."
-for _ in $(seq 1 30); do
+for _ in $(seq 1 120); do
   curl -fsS "${BASE}/health" >/dev/null 2>&1 && break
   kill -0 "$HOST_PID" 2>/dev/null || { echo "host exited during startup"; wait "$HOST_PID" || true; exit 1; }
   sleep 1
