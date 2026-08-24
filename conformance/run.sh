@@ -54,20 +54,31 @@ WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" \
 HOST_PID=$!
 trap 'kill "$HOST_PID" 2>/dev/null || true' EXIT
 
-# Startup only — the binary already exists. Still generous, because a cold
-# machine's first boot Cranelift-compiles the ~12 MB StarlingMonkey engine
-# component (~30 s in debug, see runtime.rs). That result is memoized to a
-# .cwasm in the temp dir, so a dev box that has run the tests is ready in
-# milliseconds and a fresh CI runner is not. Bail immediately if the process
-# exited (bad config, port in use) rather than waiting out the timeout on a
-# dead PID.
+# Wait for the host to listen. On a cold machine first boot Cranelift-compiles
+# the ~12 MB StarlingMonkey engine component before binding (runtime.rs says
+# ~30 s in debug; an unoptimised Cranelift on a 2-core CI runner has taken
+# over 2 min). The result is memoized to a .cwasm in the temp dir, so a dev
+# box that has run the tests binds in ~200 ms and a fresh runner does not —
+# a range too wide to pick a wall-clock number for, and guessing one is how
+# this loop failed twice.
+#
+# So gate on liveness, not the clock: keep waiting while the process is
+# alive, and exit the moment it isn't (bad config, port in use). The cap is
+# a backstop against a genuinely wedged host, not a startup estimate — the
+# job timeout is the real outer bound. Progress is printed so a slow first
+# boot reads as "compiling", not "hung". Every probe is time-bounded: a port
+# that accepts a connection but never answers (something else squatting on it)
+# hangs a bare `curl` indefinitely, stranding the loop before it re-checks
+# liveness — the cap counts iterations, so it would never fire.
 echo "waiting for host on ${BASE} ..."
-for _ in $(seq 1 120); do
-  curl -fsS "${BASE}/health" >/dev/null 2>&1 && break
+ready=""
+for i in $(seq 1 600); do
+  if curl -fsS --connect-timeout 2 --max-time 5 "${BASE}/health" >/dev/null 2>&1; then ready=1; break; fi
   kill -0 "$HOST_PID" 2>/dev/null || { echo "host exited during startup"; wait "$HOST_PID" || true; exit 1; }
+  [ $((i % 30)) -eq 0 ] && echo "  ... still starting (${i}s; first boot compiles the JS engine)"
   sleep 1
 done
-curl -fsS "${BASE}/health" >/dev/null || { echo "host never became ready"; exit 1; }
+[ -n "$ready" ] || { echo "host alive but never listened after 600s"; exit 1; }
 
 fail=0
 for lane in "${LANES[@]}"; do
