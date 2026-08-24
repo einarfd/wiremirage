@@ -103,10 +103,44 @@ RUN case "$TARGETARCH" in \
 
 WORKDIR /src
 
+# ── Dependency layer ─────────────────────────────────────────────────────
+#
+# Build the third-party dependency tree from manifests alone, before any
+# source is copied in, so this layer's cache key is Cargo.lock + the four
+# crate manifests rather than "any file in the repo". A push that doesn't
+# touch dependencies reuses it.
+#
+# This deliberately does NOT use `--mount=type=cache`. Cache mounts live on
+# the builder, and `cache-to: type=gha` does not export them — so on CI,
+# where every run gets a fresh runner and a fresh builder, they start empty
+# and the whole release dependency tree was being recompiled on every push
+# (~14 min of the ~21 min CI wall clock). Writing the artifacts into a real
+# layer is what makes them survive, because layers are what the GHA cache
+# actually stores.
+#
+# The stubs are the minimum that satisfies each manifest's declared targets:
+# a lib for the libraries, a main for the binaries, and a no-op build.rs for
+# wm-host so its [build-dependencies] (wm-transpile → swc, the single most
+# expensive subtree) are compiled here too. Adding a workspace member
+# without adding it here fails loudly at this step rather than silently
+# skipping the cache.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/wm-core/Cargo.toml crates/wm-core/
+COPY crates/wm-host/Cargo.toml crates/wm-host/
+COPY crates/wm-cli/Cargo.toml crates/wm-cli/
+COPY crates/wm-transpile/Cargo.toml crates/wm-transpile/
+RUN mkdir -p crates/wm-core/src crates/wm-host/src crates/wm-cli/src crates/wm-transpile/src && \
+    : > crates/wm-core/src/lib.rs && \
+    : > crates/wm-host/src/lib.rs && \
+    : > crates/wm-transpile/src/lib.rs && \
+    echo 'fn main() {}' > crates/wm-host/src/main.rs && \
+    echo 'fn main() {}' > crates/wm-cli/src/main.rs && \
+    echo 'fn main() {}' > crates/wm-host/build.rs && \
+    cargo build --release -p wm-host --bin wm-host && \
+    rm -rf crates
+
 # Whole repo copy — .dockerignore controls what gets pulled in (no
-# target/, no node_modules, no .git). For workspaces with N crates, the
-# usual "Cargo.toml-only pre-build" trick is awkward; cargo's BuildKit
-# cache mount below keeps incremental builds fast on a warm builder.
+# target/, no node_modules, no .git).
 COPY . .
 
 # build.rs componentizes the fixtures via `cargo build --target
@@ -122,13 +156,17 @@ RUN rustup show && rustup target add wasm32-unknown-unknown
 COPY --from=js-engine-builder /out/js-engine.wasm /tmp/js-engine.wasm
 ENV WM_JS_ENGINE_WASM_OVERRIDE=/tmp/js-engine.wasm
 
-# Cache mounts persist /src/target and the cargo registry across builds
-# (per-builder, not in the image). The `cp` copies the binary out of the
-# cache mount and into a regular layer so the next stage can COPY it.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target,sharing=locked \
+# Real build, reusing the dependency layer's target/ and registry.
+#
+# `touch` first: cargo fingerprints on mtime, and the stub sources compiled
+# above can end up newer than the real ones COPYed over them (COPY preserves
+# the context's mtimes). Without this cargo can consider the stub build
+# fresh and ship an empty binary — a silent, shipped-artifact failure, so it
+# is asserted below rather than trusted.
+RUN find crates -name '*.rs' -exec touch {} + && \
     cargo build --release -p wm-host --bin wm-host && \
-    cp /src/target/release/wm-host /usr/local/bin/wm-host
+    cp /src/target/release/wm-host /usr/local/bin/wm-host && \
+    grep -q "wm-host listening" /usr/local/bin/wm-host
 
 
 # ── Stage 4: runtime ─────────────────────────────────────────────────────
