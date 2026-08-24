@@ -15,11 +15,11 @@
 //! Skipped automatically when the vendored binary isn't present —
 //! re-runners on a fresh checkout don't need node installed.
 
-use std::path::Path;
 use std::sync::Mutex;
 
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Engine, Store};
+use wm_host::Runtime;
 use wm_host::bindings::engine_bindings::Engine as EngineWorld;
 use wm_host::bindings::engine_bindings::wiremirage::handler::callback::Host as CallbackHost;
 use wm_host::bindings::engine_bindings::wiremirage::handler::clock::Host as ClockHost;
@@ -258,6 +258,40 @@ impl HostBucket for EngineState {
     }
 }
 
+/// The engine `Component` plus the `Engine` it belongs to, obtained
+/// through `Runtime`'s cross-process artifact cache.
+///
+/// These tests drive the engine world directly with their own linker and
+/// host-import implementations, but they used to build their own
+/// `Engine` and `Component::from_file` it — a full Cranelift compile of
+/// the ~12 MB engine in every test process, every run. That cannot hit
+/// the shared `.cwasm` cache: an artifact only deserializes on an
+/// `Engine` whose `Config` matches the one that produced it, and these
+/// built their own `Config`. It made these the two slowest tests in the
+/// suite (>240 s each on CI).
+///
+/// Borrowing `Runtime`'s engine and component keeps the test's own
+/// linker and state while paying the compile at most once per machine.
+/// The store setup below has to match that `Config`: it enables fuel
+/// and epoch interruption, so a store that sets neither traps
+/// immediately.
+fn cached_engine_component() -> Option<(Engine, std::sync::Arc<Component>)> {
+    let path = vendored_engine_path()?;
+    let runtime = Runtime::new(Storage::in_memory())
+        .expect("runtime")
+        .with_js_engine(&path)
+        .expect("load js-engine.wasm");
+    let component = runtime.js_engine_component().expect("engine component");
+    Some((runtime.engine().clone(), component))
+}
+
+/// Fuel and epoch budgets generous enough that neither fires; the
+/// engine `Config` requires both to be set.
+fn prepare_store(store: &mut Store<EngineState>) {
+    store.set_fuel(u64::MAX).expect("set fuel");
+    store.set_epoch_deadline(u64::MAX);
+}
+
 fn vendored_engine_path() -> Option<std::path::PathBuf> {
     let p = std::path::PathBuf::from(env!("WM_JS_ENGINE_WASM"));
     if p.exists() { Some(p) } else { None }
@@ -265,22 +299,14 @@ fn vendored_engine_path() -> Option<std::path::PathBuf> {
 
 #[test]
 fn js_engine_runs_user_handler_via_get_source_host_import() {
-    let Some(engine_path) = vendored_engine_path() else {
-        // Vendored binary not present on this checkout. The build
-        // script under compiler/js-engine/ writes it; the spike test
-        // is no-op until it's been run at least once.
+    let Some((wasm_engine, component)) = cached_engine_component() else {
+        // Vendored binary not present on this checkout; build.rs writes it.
         eprintln!(
             "skipping: js-engine.wasm not present at {} — build.rs should have produced it",
             env!("WM_JS_ENGINE_WASM")
         );
         return;
     };
-
-    // Build engine + linker.
-    let mut config = Config::new();
-    config.consume_fuel(false);
-    let wasm_engine = Engine::new(&config).expect("wasm engine");
-    let component = Component::from_file(&wasm_engine, &engine_path).expect("load js-engine.wasm");
 
     let mut linker: Linker<EngineState> = Linker::new(&wasm_engine);
     EngineWorld::add_to_linker::<_, wasmtime::component::HasSelf<EngineState>>(&mut linker, |s| s)
@@ -305,6 +331,7 @@ fn js_engine_runs_user_handler_via_get_source_host_import() {
     let route_handle = state.push_bucket(route_bucket);
     let group_handle = state.push_bucket(group_bucket);
     let mut store = Store::new(&wasm_engine, state);
+    prepare_store(&mut store);
 
     let engine_world =
         EngineWorld::instantiate(&mut store, &component, &linker).expect("instantiate js-engine");
@@ -335,13 +362,14 @@ fn js_engine_runs_user_handler_via_get_source_host_import() {
 
 #[test]
 fn js_engine_surfaces_handler_throw_as_500() {
-    let Some(engine_path) = vendored_engine_path() else {
+    let Some((wasm_engine, component)) = cached_engine_component() else {
+        // Vendored binary not present on this checkout; build.rs writes it.
+        eprintln!(
+            "skipping: js-engine.wasm not present at {} — build.rs should have produced it",
+            env!("WM_JS_ENGINE_WASM")
+        );
         return;
     };
-    let mut config = Config::new();
-    config.consume_fuel(false);
-    let wasm_engine = Engine::new(&config).expect("wasm engine");
-    let component = Component::from_file(&wasm_engine, &engine_path).expect("load");
 
     let mut linker: Linker<EngineState> = Linker::new(&wasm_engine);
     EngineWorld::add_to_linker::<_, wasmtime::component::HasSelf<EngineState>>(&mut linker, |s| s)
@@ -359,6 +387,7 @@ fn js_engine_surfaces_handler_throw_as_500() {
     let r = state.push_bucket(route_bucket);
     let g = state.push_bucket(group_bucket);
     let mut store = Store::new(&wasm_engine, state);
+    prepare_store(&mut store);
     let engine_world = EngineWorld::instantiate(&mut store, &component, &linker).expect("inst");
 
     let req = WitRequest {
@@ -380,8 +409,3 @@ fn js_engine_surfaces_handler_throw_as_500() {
         "error body surfaces the message: {body}"
     );
 }
-
-// Pulled in only to silence the unused-Path warning when the
-// vendored binary is missing.
-#[allow(dead_code)]
-fn _unused(_: &Path) {}

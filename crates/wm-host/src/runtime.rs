@@ -315,6 +315,22 @@ impl Runtime {
         self.components_built.load(Ordering::Relaxed)
     }
 
+    /// The shared engine `Component`, when one is wired in.
+    ///
+    /// Public so a test can drive the engine world with its own linker
+    /// and host-import implementations while still obtaining the
+    /// component through the cached path. Building one with
+    /// `Component::from_file` instead Cranelift-compiles the ~12 MB
+    /// engine from scratch — ~40 s locally and over 240 s on a CI
+    /// runner, per test process. The `Engine` from [`Self::engine`]
+    /// pairs with it: a precompiled artifact only deserializes on an
+    /// `Engine` whose `Config` matches the one that produced it, which
+    /// is why a test that builds its own `Config` cannot share the
+    /// cache.
+    pub fn js_engine_component(&self) -> Option<Arc<Component>> {
+        self.js_engine.as_ref().map(|e| Arc::clone(&e.component))
+    }
+
     /// True when `with_js_engine` has been called successfully and
     /// shared-engine dispatch is available.
     pub fn has_js_engine(&self) -> bool {
