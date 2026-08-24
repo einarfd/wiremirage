@@ -127,8 +127,9 @@ and is `include_bytes!`'d via `env!("WM_JS_ENGINE_WASM")`. On
 every dispatched request the host instantiates the engine, evaluates
 the per-route source via a `get-source` host import, and runs the
 user `handle` function in a script-shape `Function` wrapper. The
-`Arc<Component>` is shared across requests so the wasmtime JIT cost
-amortizes (see `tests/js_engine_perf.rs`).
+`Arc<Component>` is shared across requests so the wasmtime compile cost
+is paid once (see `tests/js_engine_reuse.rs`, which counts component
+builds rather than timing requests).
 
 When changing the WIT contract or the engine shim: update
 `wit/wiremirage.wit` and/or `compiler/js-engine/wit/*.wit`, edit

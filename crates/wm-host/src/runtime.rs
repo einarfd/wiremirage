@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -102,6 +103,17 @@ pub struct Runtime {
     /// deadline stops being the ~30s buffered cap and is re-extended
     /// until this budget is reached, then the handler traps.
     engine_stream_max: Duration,
+    /// Count of `Component`s built by this runtime, for the invariant
+    /// that the engine component is built **once** and then reused for
+    /// every request (ADR-0020). Compiling is the dominant cost on the
+    /// engine path, so a change that rebuilds per request would be a
+    /// severe regression that still passes every behavioural test.
+    ///
+    /// **Every `Component` construction in this file must increment
+    /// this** — `components_built` is only meaningful as a total, and a
+    /// new construction site that skips it makes the guard silently
+    /// blind.
+    components_built: Arc<AtomicU64>,
 }
 
 struct JsEngine {
@@ -153,6 +165,7 @@ impl Runtime {
             js_engine: None,
             engine_epoch_ticks: ENGINE_EPOCH_TICKS,
             engine_stream_max: ENGINE_STREAM_MAX,
+            components_built: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -235,6 +248,7 @@ impl Runtime {
             drop(guard);
             // SAFETY: produced by `precompile_component` on an `Engine`
             // with the identical `Config` + wasmtime version.
+            self.components_built.fetch_add(1, Ordering::Relaxed);
             return unsafe { Component::deserialize(&self.engine, cwasm.as_slice()) };
         }
         let (component, cwasm) = self.load_or_precompile_engine(bytes, hash)?;
@@ -261,6 +275,7 @@ impl Runtime {
         if let Ok(cached) = std::fs::read(&cache_path) {
             // SAFETY: see `engine_component`. An incompatible artifact
             // returns Err here rather than misbehaving, and we recompile.
+            self.components_built.fetch_add(1, Ordering::Relaxed);
             if let Ok(component) = unsafe { Component::deserialize(&self.engine, &cached) } {
                 return Ok((component, Arc::new(cached)));
             }
@@ -268,6 +283,7 @@ impl Runtime {
 
         let compiled = self.engine.precompile_component(bytes)?;
         // SAFETY: just produced by this engine's `precompile_component`.
+        self.components_built.fetch_add(1, Ordering::Relaxed);
         let component = unsafe { Component::deserialize(&self.engine, &compiled)? };
         // Publish for other processes. Write to a unique temp path then
         // rename so a concurrent reader never sees a half-written file;
@@ -288,6 +304,15 @@ impl Runtime {
             component: Arc::new(component),
             linker,
         });
+    }
+
+    /// How many `Component`s this runtime has built. The engine
+    /// component is built once at startup and shared across requests
+    /// (ADR-0020); `tests/js_engine_reuse.rs` asserts this does not
+    /// grow while requests are served, which is the reuse invariant
+    /// stated as a fact rather than inferred from a stopwatch.
+    pub fn components_built(&self) -> u64 {
+        self.components_built.load(Ordering::Relaxed)
     }
 
     /// True when `with_js_engine` has been called successfully and
@@ -331,6 +356,7 @@ impl Runtime {
     /// Compile a component from a file (typically a `.component.wasm`
     /// produced by `wasm-tools component new`).
     pub fn load_component(&self, path: &Path) -> Result<Component> {
+        self.components_built.fetch_add(1, Ordering::Relaxed);
         Component::from_file(&self.engine, path)
     }
 

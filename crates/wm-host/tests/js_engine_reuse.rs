@@ -1,12 +1,23 @@
-//! Slice 57 sanity check: confirm the shared-engine path has the
-//! expected first-call-expensive / steady-state-cheap shape.
+//! The shared-engine reuse invariant (ADR-0020): the JS engine
+//! component is built once at startup and reused for every request.
 //!
-//! Not a real benchmark (debug mode runs are 15× release) — exists
-//! so a future change that breaks the amortization shows up loudly.
+//! Compiling that component is the dominant cost on the engine path
+//! (~4 min on a CI runner, see `runtime.rs`), so a change that rebuilds
+//! it per request would be a severe regression that every behavioural
+//! test still passes.
+//!
+//! This used to assert the shape with a stopwatch — "subsequent
+//! requests are ≥1.5× faster than the first". That measured a shadow of
+//! the property rather than the property: the ratio depends on runner
+//! load, the absolute times are ~15 ms in debug, and it failed twice on
+//! noise after already being loosened once from 3× to 1.5×. Each
+//! failure skipped the image publish, because `image-build` needs
+//! `test`. Counting the builds tests the same invariant as a fact, is
+//! immune to how loaded the machine is, and fails with the actual
+//! reason instead of a ratio.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
@@ -20,7 +31,7 @@ fn vendored_engine_path() -> Option<PathBuf> {
 }
 
 #[tokio::test]
-async fn engine_dispatch_amortizes_jit_cost_across_requests() {
+async fn engine_component_is_built_once_and_reused_across_requests() {
     let Some(engine_path) = vendored_engine_path() else {
         eprintln!("skipping: vendored js-engine.wasm not present");
         return;
@@ -58,6 +69,9 @@ async fn engine_dispatch_amortizes_jit_cost_across_requests() {
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     routes.refresh_after_create(route);
     let journal = Journal::new(storage);
+    // Keep a handle: `AppState` takes the Arc, and the counter has to be
+    // read from the very runtime that serves the requests.
+    let runtime_handle = Arc::clone(&runtime);
     let app = router(AppState::new(runtime, routes, auth, journal));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -69,59 +83,36 @@ async fn engine_dispatch_amortizes_jit_cost_across_requests() {
 
     let client = reqwest::Client::new();
 
-    // First request eats the JIT cost. We don't gate on a specific
-    // wall time (debug vs release vary 15×) — just sanity-check
-    // that the steady-state requests are dramatically cheaper than
-    // the first.
-    let t0 = Instant::now();
-    client
-        .post(format!("http://{addr}/v1/perf"))
-        .header(reqwest::header::HOST, format!("{group}.localhost"))
-        .send()
-        .await
-        .expect("first")
-        .text()
-        .await
-        .ok();
-    let first = t0.elapsed();
+    // Wiring the engine in builds the component exactly once. Anything
+    // above 1 here means startup itself is rebuilding it.
+    let after_startup = runtime_handle.components_built();
+    assert_eq!(
+        after_startup, 1,
+        "engine setup should build exactly one component, built {after_startup}",
+    );
 
-    // Steady-state: 10 sequential requests, averaged. The total of
-    // these should be substantially less than the first request's
-    // cost. (10 rather than 5 to dampen per-request timing noise on
-    // shared CI runners.)
-    const STEADY_N: u32 = 10;
-    let t1 = Instant::now();
-    for _ in 0..STEADY_N {
+    // Serve enough requests that a per-request rebuild could not hide.
+    const REQUESTS: u32 = 10;
+    for i in 0..REQUESTS {
         let resp = client
             .post(format!("http://{addr}/v1/perf"))
             .header(reqwest::header::HOST, format!("{group}.localhost"))
             .send()
             .await
-            .expect("subsequent");
-        assert_eq!(resp.status(), 200);
+            .unwrap_or_else(|e| panic!("request {i} failed: {e}"));
+        assert_eq!(resp.status(), 200, "request {i}");
+        assert_eq!(resp.text().await.expect("body"), "ok", "request {i}");
     }
-    let steady = t1.elapsed();
-    let per_subsequent = steady / STEADY_N;
 
-    eprintln!(
-        "js engine perf: first={first:?} {STEADY_N}-total={steady:?} per-subsequent={per_subsequent:?}"
-    );
-
-    // The contract this test enforces: subsequent requests are
-    // meaningfully faster than the first, because the shared
-    // `Arc<Component>` lets subsequent instantiations reuse the JIT'd
-    // code instead of recompiling. If someone accidentally kills that
-    // sharing, every request recompiles and the ratio collapses to
-    // ~1×. We gate at 1.5× rather than a tight 3×: a broken cache
-    // (~1×) is caught decisively, while the headroom keeps the test
-    // from flaking when a fast/contended CI runner makes the absolute
-    // times small and noisy (the original 3× tripped at an observed
-    // 2.6× on a fast runner).
-    assert!(
-        per_subsequent.saturating_mul(3) < first.saturating_mul(2),
-        "subsequent requests should be ≥1.5× faster than the first — a \
-         collapse toward 1× means the component cache was lost \
-         (first={first:?}, per_subsequent={per_subsequent:?})",
+    // The invariant. If dispatch ever instantiates from a freshly built
+    // component instead of the shared `Arc<Component>`, this is
+    // 1 + REQUESTS rather than 1.
+    let after_requests = runtime_handle.components_built();
+    assert_eq!(
+        after_requests, after_startup,
+        "the engine component must be reused across requests, not rebuilt: \
+         {after_startup} built at startup, {after_requests} after {REQUESTS} \
+         requests — a per-request rebuild means the shared component was lost",
     );
 
     server.abort();
