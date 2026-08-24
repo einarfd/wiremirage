@@ -4,6 +4,19 @@ description: >-
   Rust toolchain (+ wasm32 target for the build.rs fixture/js-engine
   componentization), restore the cargo cache, and install wasm-tools.
 
+inputs:
+  cache-on-failure:
+    description: >-
+      Save the cargo cache even when the job fails. Off for the gating CI
+      jobs (a failed build's target/ isn't worth persisting when the next
+      push rebuilds anyway); on for the weekly conformance job, where a
+      cold build is most of the runtime and a failure otherwise throws it
+      away — which is how the first scheduled run became a permanent
+      failure: no cache, build overran the readiness wait, failure saved
+      nothing, repeat.
+    required: false
+    default: "false"
+
 runs:
   using: composite
   steps:
@@ -37,6 +50,8 @@ runs:
     # valkey-tests feature the others don't, so a shared key would
     # invalidate on every run).
     - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: ${{ inputs.cache-on-failure }}
 
     - name: Install wasm-tools
       # The host's build.rs invokes wasm-tools to componentize fixture

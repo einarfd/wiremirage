@@ -36,16 +36,31 @@ PORT="${WM_PORT:-8080}"
 BASE="http://localhost:${PORT}"
 TOKEN="wmt_conformance_$$"
 
-# --- boot the host (native, in-memory) ---
-( cd "$ROOT" && WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" \
-    WM_BOOTSTRAP_EMAIL=conformance@local WM_LISTEN_ADDR="127.0.0.1:${PORT}" \
-    cargo run -q -p wm-host ) &
+# --- build the host, then boot it (native, in-memory) ---
+# Build as its own step rather than letting `cargo run` compile inside the
+# readiness wait. A cold workspace build (swc + wasmtime + cranelift, plus the
+# js-engine Docker stage in build.rs) takes minutes, which on a cache-less CI
+# runner overran the wait and reported "host never became ready" while rustc
+# was still going. Separating them means the wait covers process startup only,
+# and a compile error surfaces as a compile error.
+echo "building wm-host ..."
+( cd "$ROOT" && cargo build -p wm-host )
+HOST_BIN="$(cd "$ROOT" && cargo metadata --format-version 1 --no-deps \
+  | jq -r '.target_directory')/debug/wm-host"
+
+WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" \
+  WM_BOOTSTRAP_EMAIL=conformance@local WM_LISTEN_ADDR="127.0.0.1:${PORT}" \
+  "$HOST_BIN" &
 HOST_PID=$!
 trap 'kill "$HOST_PID" 2>/dev/null || true' EXIT
 
+# Startup only — the binary already exists. Bail immediately if it exited
+# (bad config, port in use): waiting out the full timeout on a dead process
+# tells you nothing.
 echo "waiting for host on ${BASE} ..."
-for _ in $(seq 1 180); do
+for _ in $(seq 1 30); do
   curl -fsS "${BASE}/health" >/dev/null 2>&1 && break
+  kill -0 "$HOST_PID" 2>/dev/null || { echo "host exited during startup"; wait "$HOST_PID" || true; exit 1; }
   sleep 1
 done
 curl -fsS "${BASE}/health" >/dev/null || { echo "host never became ready"; exit 1; }
