@@ -32,8 +32,13 @@ else
 fi
 [ "${#LANES[@]}" -gt 0 ] || { echo "no conformance lanes found"; exit 1; }
 
-PORT="${WM_PORT:-8080}"
-BASE="http://localhost:${PORT}"
+# Port 0 by default: the OS assigns a free one and the host logs the resolved
+# address (it logs `listener.local_addr()`, not the requested string), so we
+# read the real port back out of the log. Race-free, unlike probing for a free
+# port and hoping it's still free a moment later — and it means a conformance
+# run no longer collides with a `just run-web` already holding 8080, or with
+# another conformance run. Set WM_PORT to pin one.
+PORT="${WM_PORT:-0}"
 TOKEN="wmt_conformance_$$"
 
 # --- build the host, then boot it (native, in-memory) ---
@@ -48,11 +53,17 @@ echo "building wm-host ..."
 HOST_BIN="$(cd "$ROOT" && cargo metadata --format-version 1 --no-deps \
   | jq -r '.target_directory')/debug/wm-host"
 
+# Host output goes to a log we can parse for the assigned port, and is
+# mirrored to stdout in the background so a failing lane still shows the
+# host's side of the story in the CI log.
+HOST_LOG="$(mktemp -t wm-conformance-host.XXXXXX.log)"
 WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" \
   WM_BOOTSTRAP_EMAIL=conformance@local WM_LISTEN_ADDR="127.0.0.1:${PORT}" \
-  "$HOST_BIN" &
+  "$HOST_BIN" >"$HOST_LOG" 2>&1 &
 HOST_PID=$!
-trap 'kill "$HOST_PID" 2>/dev/null || true' EXIT
+tail -f "$HOST_LOG" 2>/dev/null &
+TAIL_PID=$!
+trap 'kill "$HOST_PID" "$TAIL_PID" 2>/dev/null || true; rm -f "$HOST_LOG"' EXIT
 
 # Wait for the host to listen. On a cold machine first boot Cranelift-compiles
 # the ~12 MB StarlingMonkey engine component before binding (runtime.rs says
@@ -70,15 +81,30 @@ trap 'kill "$HOST_PID" 2>/dev/null || true' EXIT
 # that accepts a connection but never answers (something else squatting on it)
 # hangs a bare `curl` indefinitely, stranding the loop before it re-checks
 # liveness — the cap counts iterations, so it would never fire.
-echo "waiting for host on ${BASE} ..."
-ready=""
+echo "waiting for host to listen ..."
+BASE=""
 for i in $(seq 1 600); do
-  if curl -fsS --connect-timeout 2 --max-time 5 "${BASE}/health" >/dev/null 2>&1; then ready=1; break; fi
+  # The host logs the bound address once it is actually listening, so the
+  # log line is both the readiness signal and the source of the port.
+  # One sed, not a grep pipeline: `grep -o '[0-9]*$'` looks right but the log
+  # line ends in a quote, so the pattern only ever matches the empty string —
+  # GNU grep skips empty matches and exits 1, and the port never appears.
+  # `|| true` because until the line is written the pipeline fails, and under
+  # `set -e` a failing command substitution kills the script with no message.
+  addr=$(sed -n 's/.*"addr":"127\.0\.0\.1:\([0-9]\{1,\}\)".*/\1/p' "$HOST_LOG" 2>/dev/null | head -1 || true)
+  if [ -n "$addr" ]; then BASE="http://localhost:${addr}"; break; fi
   kill -0 "$HOST_PID" 2>/dev/null || { echo "host exited during startup"; wait "$HOST_PID" || true; exit 1; }
   [ $((i % 30)) -eq 0 ] && echo "  ... still starting (${i}s; first boot compiles the JS engine)"
   sleep 1
 done
-[ -n "$ready" ] || { echo "host alive but never listened after 600s"; exit 1; }
+[ -n "$BASE" ] || { echo "host alive but never listened after 600s"; exit 1; }
+PORT="${BASE##*:}"
+
+# Listening is not the same as serving, so still confirm /health answers.
+# Bounded so a socket that accepts but never replies can't hang the run.
+curl -fsS --connect-timeout 2 --max-time 10 --retry 5 --retry-delay 1 \
+  "${BASE}/health" >/dev/null || { echo "host listening on ${BASE} but /health failed"; exit 1; }
+echo "host ready on ${BASE}"
 
 fail=0
 for lane in "${LANES[@]}"; do
