@@ -46,29 +46,6 @@ jobs:
         with:
           tool: cargo-nextest@0.9.140
 
-      # EXPERIMENT (revert if it does not pay): warm the shared engine
-      # artifact before the suite.
-      #
-      # Building the JS engine component costs ~255s on a runner. It is
-      # memoized to a .cwasm in the temp dir and shared across processes,
-      # but nextest starts 42 test binaries at once, so several miss the
-      # cache simultaneously and each compiles its own copy — that is what
-      # the four >240s tests in the baseline are. Compiling once, serially,
-      # should let the rest deserialize instead.
-      #
-      # Measured locally: 169.8s cold vs 25.4s warm-up + 66.8s suite. CI has
-      # fewer cores and a 10x slower compile, so this may not transfer —
-      # compare against the baseline of Summary [657.310s] with 4 slow tests.
-      #
-      # This filter runs the reuse test, which is the one that goes through
-      # Runtime::with_js_engine and therefore actually populates the cache
-      # (js_engine_spike builds its own Engine and would warm nothing).
-      # It builds the same test binaries the next step needs, so the compile
-      # is shared, not repeated. If the test is renamed nextest exits
-      # non-zero rather than silently warming nothing — deliberate.
-      - name: Warm the shared engine artifact
-        run: cargo nextest run -E 'test(engine_component_is_built_once_and_reused_across_requests)'
-
       - name: Test (host)
         run: cargo nextest run --workspace --profile ci
 
