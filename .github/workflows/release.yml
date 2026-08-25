@@ -1,0 +1,216 @@
+# Tag-triggered release. Produces `wm` binaries and promotes the container
+# image that CI already built and tested for this commit.
+#
+# The image is NOT rebuilt here. `image-retag` copies the existing manifest
+# by digest, so the released image is bit-identical to the one the test
+# suite ran against — not merely built from the same source. That also keeps
+# a tag from re-running the full ~25 minute suite for no new information.
+#
+# Requires: the tagged commit must already be on main with a published
+# `sha-<short>` image. `verify` fails fast if it isn't.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Cheap gate — catches the two mistakes that are expensive to discover
+  # after publishing: a tag that disagrees with the manifests, and a tag on
+  # a commit that never got an image.
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag matches the crate manifests
+        id: v
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # wm-cli ships as the binary, wm-host as the image; both must agree
+          # with the tag or the artifacts misreport their own version.
+          for crate in wm-cli wm-host; do
+            manifest="crates/$crate/Cargo.toml"
+            declared=$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -1)
+            if [ "$declared" != "$version" ]; then
+              echo "::error file=$manifest::$manifest declares $declared but the tag is $GITHUB_REF_NAME"
+              exit 1
+            fi
+          done
+          # A hyphen means a pre-release tag (v0.1.0-rc1): GitHub marks the
+          # release accordingly and we skip the floating X.Y image tag.
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: CI already published an image for this commit
+        run: |
+          set -euo pipefail
+          ref="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA:0:7}"
+          if ! docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+            echo "::error::no image at $ref — tag a commit that has been pushed to main and finished CI"
+            exit 1
+          fi
+          echo "Found $ref"
+
+  build:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl for Linux: statically linked, so no glibc version skew for
+          # users on older distros, Alpine, or distroless bases.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            native: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            native: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            native: true
+          # Cross-compiled from the arm64 runner; Apple's SDK is universal so
+          # this needs no extra toolchain. Not natively runnable there, hence
+          # no smoke test below.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            native: false
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get install -y musl-tools
+
+      # -p wm-cli only. wm-host is a dev-dependency of wm-cli, so it stays
+      # out of this graph — no wasmtime, and no Docker for the js-engine.
+      - name: Build wm
+        run: cargo build --release --locked --target ${{ matrix.target }} -p wm-cli --bin wm
+
+      # Catch a binary that cannot execute before it reaches a release page,
+      # rather than after a user downloads it.
+      - name: Smoke test
+        if: matrix.native
+        run: ./target/${{ matrix.target }}/release/wm --version
+
+      # Tarball rather than a bare binary so the install script has one shape
+      # across platforms, and extraction lands in a named directory instead
+      # of the current one.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist/wm-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/wm" "$stage/wm"
+          cp LICENSE NOTICE README.md "$stage/"
+          tar czf "dist/wm-${{ matrix.target }}.tar.gz" -C dist "wm-${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/wm-${{ matrix.target }}.tar.gz
+
+  # Promote the tested image by digest. Instant, and provably the same
+  # artifact CI validated.
+  image-retag:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag the tested manifest with the release version
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}"
+          digest=$(docker buildx imagetools inspect "${image}:sha-${GITHUB_SHA:0:7}" \
+                     --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "Promoting ${image}@${digest}"
+
+          tags=(-t "${image}:${VERSION}")
+          # Floating minor tag (0.1 -> newest 0.1.x) only for real releases;
+          # a pre-release must never become what `:0.1` resolves to.
+          if [ "$PRERELEASE" = "false" ]; then
+            tags+=(-t "${image}:${VERSION%.*}")
+          fi
+
+          docker buildx imagetools create "${tags[@]}" "${image}@${digest}"
+          docker buildx imagetools inspect "${image}:${VERSION}" >/dev/null
+          echo "Published ${image}:${VERSION}"
+
+  release:
+    needs: [verify, build, image-retag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum wm-*.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          flags=(--generate-notes --verify-tag)
+          [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            "${flags[@]}" \
+            artifacts/wm-*.tar.gz \
+            artifacts/checksums.txt
