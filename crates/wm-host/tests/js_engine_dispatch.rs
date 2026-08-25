@@ -735,6 +735,50 @@ async fn negative_list_range_indices_count_from_the_end() {
 }
 
 #[tokio::test]
+async fn incr_on_a_negative_counter_returns_the_true_value() {
+    // SEMANTICS TEST — not a workaround test. `incr` returns the new counter
+    // value, and the store parses counters as i64 (store/memory.rs), so that
+    // value is negative whenever the stored value is. docs/handlers.md tells
+    // users to keep a decrementing value with `set()`, which is exactly how a
+    // negative counter arises without a negative delta ever being passed.
+    //
+    // ComponentizeJS#343 lifts a negative s64 into JS as n + 2^64, so this
+    // read 18446744073709551612 before the engine shim corrected it.
+    //
+    // KEEP this test when the workaround is removed — it asserts the contract,
+    // so it is the check that says removal was safe.
+    let source = r#"
+        function handle(req, route, group) {
+          route.set("k", new TextEncoder().encode("-5"));
+          const n = route.incr("k", 1n);
+          return {
+            status: 200,
+            headers: [],
+            body: new TextEncoder().encode("n=" + n),
+          };
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .body("{}")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("body");
+    assert_eq!(
+        body, "n=-4",
+        "incr must report the true signed counter value"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn negative_incr_delta_reports_the_upstream_limitation() {
     // WORKAROUND TEST (ComponentizeJS#343 / wiremirage#50): a negative s64
     // cannot cross the component boundary, and `incr` has no non-negative

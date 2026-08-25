@@ -46,6 +46,15 @@ fn main() -> Result<()> {
     println!("pull-and-return()  [lift then lower        ] = {}",
         match f.call(&mut s, ()) { Ok((v,)) => format!("{v}"), Err(_) => "TRAP".to_string() });
     let (mut s, i) = build();
+    let f = i.get_typed_func::<(), (bool,)>(&mut s, "lift-matches")?;
+    println!("lift-matches()     [lift import VALUE      ] = {}",
+        match f.call(&mut s, ()) {
+            Ok((true,)) => "ok".to_string(),
+            Ok((false,)) => "WRONG VALUE (lifted as unsigned)".to_string(),
+            Err(_) => "TRAP".to_string(),
+        });
+
+    let (mut s, i) = build();
     let f = i.get_typed_func::<(u64,), ()>(&mut s, "sink-u64")?;
     println!("sink-u64(2^63)     [control: bit 63 set    ] = {}",
         match f.call(&mut s, (1u64 << 63,)) { Ok(_) => "ok".into(), Err(_) => "TRAP".to_string() });

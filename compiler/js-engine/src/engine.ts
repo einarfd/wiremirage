@@ -224,31 +224,56 @@ function withAccessors(req: unknown): unknown {
 // ---------------------------------------------------------------------------
 // UPSTREAM WORKAROUND — ComponentizeJS#343 (tracked by wiremirage#50)
 //
-// Lowering a *negative* s64 out of JS traps the guest before the host import
-// runs: the value never crosses the boundary and the request dies with an
-// opaque "engine-level fault". Positive s64 (including > 2^32), s32, f64 and
-// u64-with-bit-63-set are all fine, so this is specifically signed-64-bit
-// lowering. Reproduced on componentize-js 0.20.0 and 0.22.0 (current latest)
-// with a three-line guest and no WireMirage code involved.
+// ComponentizeJS's coreabi layer represents a core i64 in JS as an *unsigned*
+// BigInt in both directions, while jco's glue assumes the WebAssembly JS API
+// convention (signed). That one root cause surfaces as two different symptoms
+// depending on which way an s64 is crossing:
 //
-// Two store methods take s64 parameters, so both are affected:
+//   * Lowering a negative s64 OUT of JS traps the guest before the host
+//     import runs. The value never crosses and the request dies with an
+//     opaque "engine-level fault".
 //
-//   * `list-range(key, start, stop)` — the contract says a negative index
-//     counts from the end. We keep that promise by resolving negatives to
-//     their non-negative equivalents here, using the same rule the host
-//     applies (clamp to 0), so the visible semantics are unchanged.
+//   * Lifting a negative s64 INTO JS does not trap — it silently yields the
+//     value plus 2^64. Absence of a trap is precisely why this half went
+//     unnoticed: it looks like it works.
 //
-//   * `incr(key, by)` — a negative delta has no non-negative equivalent, so
-//     it can't be worked around. Throw a legible error instead of letting the
-//     handler trap with no explanation.
+// Positive s64 (including > 2^32), s32, f64 and u64 are unaffected in both
+// directions. Reproduced on componentize-js 0.20.0 and 0.22.0 (current
+// latest); compiler/js-engine/upstream-343/ has a standalone repro.
+//
+// s64 appears in exactly two places in wiremirage.wit, so the corrections are:
+//
+//   * `list-range(key, start, stop)` — s64 params, lowering only. The
+//     contract says a negative index counts from the end. We keep that
+//     promise by resolving negatives to their non-negative equivalents here,
+//     using the same rule the host applies (clamp to 0), so the visible
+//     semantics are unchanged.
+//
+//   * `incr(key, by) -> s64` — affected in *both* directions.
+//       - `by` is lowered: a negative delta has no non-negative equivalent,
+//         so it can't be worked around. Throw a legible error rather than
+//         letting the handler trap with no explanation.
+//       - The return is lifted: a negative counter arrives as n + 2^64, and
+//         `BigInt.asIntN(64, ...)` inverts that exactly. This is reachable
+//         through documented usage — store/memory.rs parses counters as i64,
+//         and docs/handlers.md recommends `set()` for decrements, so any
+//         later incr() on a negative counter hits it without a negative
+//         delta ever being passed.
 //
 // TO REMOVE (when ComponentizeJS#343 is fixed and the engine is rebuilt on a
-// release containing the fix): delete `wrapBucketForNegativeS64` and the two
-// call sites below, then drop the negative-index notes from
+// release containing the fix): both corrections come out together. They are
+// two faces of one defect, and a fix for the lowering half alone would leave
+// the lift silently wrong. Delete `wrapBucketForNegativeS64` and the two call
+// sites below, then drop the negative-delta notes from
 // `crates/wm-host/src/capabilities.rs` and `docs/handlers.md`. The tier-2
-// test `negative_list_range_indices_count_from_the_end` asserts the
-// *semantics*, not the workaround, so it must keep passing either way — it is
-// the check that says removal was safe.
+// tests `negative_list_range_indices_count_from_the_end` and
+// `incr_on_a_negative_counter_returns_the_true_value` assert *semantics*
+// rather than the workaround, so they must keep passing either way — they are
+// the checks that say removal was safe.
+//
+// Note that `BigInt.asIntN(64, ...)` is a no-op on correctly-signed values,
+// so the lift correction stays right after upstream is fixed. It comes out
+// for tidiness, not because it would break.
 // ---------------------------------------------------------------------------
 
 /** Mirror of the host's index normalisation, so both agree on edge cases. */
@@ -287,7 +312,8 @@ function wrapBucketForNegativeS64(bucket: any): any {
                 "keep the value with set() instead of incr().",
             );
           }
-          return target.incr(key, delta);
+          // Lift correction: see the s64 note above.
+          return BigInt.asIntN(64, target.incr(key, delta));
         };
       }
       const value = Reflect.get(target, prop, receiver);

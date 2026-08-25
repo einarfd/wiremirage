@@ -10,5 +10,6 @@ world guest {
   export source-s64: func() -> s64;     // negative OUT of js, no params
   export pull-from-import: func();      // negative INTO js from an import return, never returned
   export pull-and-return: func() -> s64; // both: lift from import, then lower out
+  export lift-matches: func() -> bool;  // lift VALUE check: bool return dodges s64 lowering
   export sink-u64: func(v: u64);        // control: u64 with bit 63 set
 }
