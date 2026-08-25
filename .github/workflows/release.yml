@@ -144,8 +144,12 @@ jobs:
 
   # Promote the tested image by digest. Instant, and provably the same
   # artifact CI validated.
+  #
+  # Ordered after `build` on purpose: nothing gets published until the
+  # binaries have compiled and passed their smoke tests, so a failed build
+  # can't leave a :X.Y.Z image tag behind with no release to match it.
   image-retag:
-    needs: verify
+    needs: [verify, build]
     runs-on: ubuntu-latest
     permissions:
       packages: write
