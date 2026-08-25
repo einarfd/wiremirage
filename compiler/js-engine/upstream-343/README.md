@@ -11,6 +11,33 @@ Nothing here is part of the build. It exists so "has upstream fixed it?" is a
 two-minute question instead of a rediscovery — **run it after every
 componentize-js bump**.
 
+## Status
+
+| | |
+|---|---|
+| Upstream issue | open, filed 2026-06-24, untouched since (0 comments, unlabelled) |
+| Reproduced on | componentize-js 0.20.0 and 0.22.0 (0.22.0 is what we pin) |
+| Workaround | shipped, `wrapBucketForNegativeS64` in `../src/engine.ts` |
+| User-visible effect | `incr(key, negative)` throws a legible error; negative `listRange` indices work normally |
+
+Everything on our side is done and shipped. Tracking for what we still owe
+upstream lives on wiremirage#50, not here.
+
+## Already ruled out
+
+Don't spend time re-deriving these:
+
+- **Not a 0.22 regression.** 0.20.0 behaves identically.
+- **Not WireMirage-specific.** The repro here is a three-line guest with no
+  host framework, no wasmtime configuration of ours, no engine shim.
+- **Not "any 64-bit value with the high bit set".** `sink-u64(2^63)` crosses
+  fine. Positive s64 beyond 2^32, negative s32 and negative f64 all pass.
+- **Not a lifting problem.** Negatives lift *into* JS correctly in both
+  directions — as an export parameter and as an import's return value. Only
+  lowering *out* of JS traps.
+- **Not fixable in the host.** The guest traps before the import runs, so the
+  value never reaches host code; there is nothing host-side to intercept.
+
 ## Run
 
 ```sh
