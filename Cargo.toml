@@ -13,6 +13,11 @@ exclude = ["crates/wm-host/tests/fixtures", "compiler/js-engine/upstream-343/run
 
 [workspace.package]
 edition = "2024"
+# Floor, not a pin: rust-toolchain.toml selects `stable`, but that resolves
+# to whatever stable a contributor already has installed. wasmtime 48 needs
+# 1.95, so without this a 1.94 toolchain fails deep in a dependency build
+# instead of saying which rustc it wants. Raise it when a dependency does.
+rust-version = "1.95"
 license = "Apache-2.0"
 repository = "https://github.com/einarfd/wiremirage"
 authors = ["Einar Fløystad Dørum <einarfd@mailthief.com>"]
