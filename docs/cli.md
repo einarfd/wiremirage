@@ -5,13 +5,33 @@ dependencies, so it compiles quickly compared to the host.
 
 ## Install
 
+Pre-built binaries are attached to each [release][releases] for macOS and
+Linux (x86_64 and aarch64). The Linux builds are statically linked against
+musl, so they carry no glibc version floor.
+
+```sh
+# aarch64-apple-darwin | x86_64-apple-darwin
+# aarch64-unknown-linux-musl | x86_64-unknown-linux-musl
+TARGET=aarch64-apple-darwin
+
+curl -fsSL "https://github.com/einarfd/wiremirage/releases/latest/download/wm-$TARGET.tar.gz" \
+  | tar xz
+sudo install "wm-$TARGET/wm" /usr/local/bin/wm
+```
+
+Each archive also carries `LICENSE`, `NOTICE`, and the README;
+`checksums.txt` on the release page covers every archive.
+
+From source instead:
+
 ```sh
 cargo install --path crates/wm-cli          # from a clone
 cargo install --git https://github.com/einarfd/wiremirage wm-cli
 ```
 
-That puts `wm` in `~/.cargo/bin/`. `wm --version` confirms. Pre-built binaries
-are not published yet.
+That puts `wm` in `~/.cargo/bin/`. `wm --version` confirms.
+
+[releases]: https://github.com/einarfd/wiremirage/releases
 
 Shell completions:
 

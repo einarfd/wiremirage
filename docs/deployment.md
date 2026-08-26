@@ -107,9 +107,22 @@ retry, that's this.
 ## Running the container
 
 CI builds the release image from the repo-root `Dockerfile` and publishes a
-multi-arch manifest to `ghcr.io/einarfd/wiremirage` (`latest` plus a `sha-`
-tag) on every push to `main`. `docker-compose.yml`'s `wm-host` service (the
-`full` profile) pulls that image, so a deployment never builds on the host:
+multi-arch manifest to `ghcr.io/einarfd/wiremirage`. The tags:
+
+| Tag | Means | Published by |
+|---|---|---|
+| `:latest` | newest stable release | tagging `vX.Y.Z` |
+| `:0.1` | newest `0.1.x` release | tagging `vX.Y.Z` |
+| `:0.1.0` | that exact release, immutable | tagging `vX.Y.Z` |
+| `:main` | tip of `main`, unreleased | every push to `main` |
+| `:sha-abc1234` | one exact commit, immutable | every push to `main` |
+
+Pre-releases (`v0.2.0-rc1`) get only their exact version tag — they never
+move `:latest` or the floating minor tag.
+
+Deployments should pin `:0.1.0` or `:sha-`; `:latest` is for people trying
+WireMirage out. `docker-compose.yml`'s `wm-host` service (the `full` profile)
+pulls the image, so a deployment never builds on the host:
 
 ```sh
 WM_BOOTSTRAP_TOKEN=wmt_... WM_BOOTSTRAP_EMAIL=you@example.com \

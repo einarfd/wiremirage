@@ -12,9 +12,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # Container image published to GHCR on pushes to main (the `image-build`
-  # + `image-publish` jobs below). docker-compose.yml references it as
-  # ghcr.io/einarfd/wiremirage:latest. github.repository is already
-  # lowercase (`einarfd/wiremirage`), so it's a valid image path as-is.
+  # + `image-publish` jobs below), tagged `:main` and `:sha-<short>`.
+  # `:latest` deliberately does NOT come from here — release.yml moves it to
+  # the newest stable tag, so `:latest` means "newest release" and `:main`
+  # means "tip of main". github.repository is already lowercase
+  # (`einarfd/wiremirage`), so it's a valid image path as-is.
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
@@ -217,7 +219,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=main,enable={{is_default_branch}}
             type=sha
 
       - name: Create and push manifest list

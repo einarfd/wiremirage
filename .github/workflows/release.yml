@@ -176,10 +176,12 @@ jobs:
           echo "Promoting ${image}@${digest}"
 
           tags=(-t "${image}:${VERSION}")
-          # Floating minor tag (0.1 -> newest 0.1.x) only for real releases;
-          # a pre-release must never become what `:0.1` resolves to.
+          # Floating tags only for real releases; a pre-release must never
+          # become what `:0.1` or `:latest` resolves to. `:latest` means
+          # "newest stable release" — main tip is `:main`, published by ci.yml.
           if [ "$PRERELEASE" = "false" ]; then
             tags+=(-t "${image}:${VERSION%.*}")
+            tags+=(-t "${image}:latest")
           fi
 
           docker buildx imagetools create "${tags[@]}" "${image}@${digest}"

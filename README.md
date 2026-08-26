@@ -53,19 +53,47 @@ loop.
 
 ## Quickstart
 
-Requires Docker and a stable Rust toolchain — see [building](#building).
+Two things to install: the server (a container) and the `wm` CLI (one binary).
+Nothing to compile.
 
 ```sh
-docker compose up -d          # Valkey
+docker run -d --name wiremirage -p 8080:8080 \
+  -e WM_STORAGE=memory \
+  -e WM_BOOTSTRAP_TOKEN=wmt_dev_local \
+  -e WM_BOOTSTRAP_EMAIL=you@example.com \
+  -e WM_LOCAL_AUTH='you@example.com:devpassword:admin' \
+  -e SESSION_SECRET='dev-only-session-secret-do-not-use-in-prod' \
+  ghcr.io/einarfd/wiremirage:latest
+```
 
-WM_STORAGE=redis://localhost:6379 \
-WM_BOOTSTRAP_TOKEN=wmt_dev_local \
-WM_BOOTSTRAP_EMAIL=you@example.com \
-  cargo run -p wm-host
+`WM_STORAGE=memory` keeps everything in the process — perfect for a trial, and
+it means state dies with the container. For anything you want to keep across a
+restart, point `WM_STORAGE` at Valkey; `docker-compose.yml` in this repo runs
+both together (`docker compose --profile full up -d`).
 
-# In another shell:
+The last two lines are what make the **web UI** reachable — they create a
+browser login (`you@example.com` / `devpassword`). They are dev credentials in
+plain environment variables: fine on your laptop, not for anything exposed.
+Real deployments use OIDC or GitHub OAuth — see
+[docs/configuration.md](docs/configuration.md). Drop both lines if you only
+want the CLI and MCP, which authenticate with the bearer token above.
+
+Then the CLI:
+
+```sh
+# aarch64-apple-darwin | x86_64-apple-darwin
+# aarch64-unknown-linux-musl | x86_64-unknown-linux-musl
+TARGET=aarch64-apple-darwin
+
+curl -fsSL "https://github.com/einarfd/wiremirage/releases/latest/download/wm-$TARGET.tar.gz" \
+  | tar xz
+sudo install "wm-$TARGET/wm" /usr/local/bin/wm
+```
+
+Now make a mock:
+
+```sh
 export WM_HOST=http://localhost:8080 WM_TOKEN=wmt_dev_local
-cargo install --path crates/wm-cli
 
 wm groups create demo
 cat > /tmp/hello.ts <<'EOF'
@@ -91,8 +119,12 @@ curl -X POST -H 'Host: demo.localhost' http://localhost:8080/v1/charges -d '{}'
 wm journal list demo          # the request you just made
 ```
 
-Then open `http://localhost:8080/ui/` for the web UI (`just run-web` boots the
-host with dev credentials), or point an agent at the MCP endpoint.
+Then open `http://localhost:8080/ui/` and sign in with the credentials above,
+or point an agent at the MCP endpoint at `/api/mcp`.
+
+Working from a clone instead? See [building](#building) — but note the source
+build needs Docker *and* a Rust toolchain, and takes appreciably longer than
+pulling the image.
 
 ## The surfaces
 
