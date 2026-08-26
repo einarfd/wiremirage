@@ -35,6 +35,9 @@ upstream lives on wiremirage#50, not here.
 Don't spend time re-deriving these:
 
 - **Not a 0.22 regression.** 0.20.0 behaves identically.
+- **Not a wasmtime bug.** The results are byte-identical on wasmtime 47.0.4 and
+  48.0.1, so the defect is in the componentize-js/jco generated glue, not in
+  the runtime executing it.
 - **Not WireMirage-specific.** The repro here is a handful of one-line guest
   functions with no host framework, no wasmtime configuration of ours, and no
   engine shim.
