@@ -58,6 +58,39 @@ runs:
         components: rustfmt, clippy
         targets: wasm32-unknown-unknown
 
+    # Installing a pinned toolchain is not enough to *use* it:
+    # rust-toolchain.toml pins `channel = "stable"`, and a toolchain file
+    # outranks the `rustup default` the action above sets. RUSTUP_TOOLCHAIN
+    # outranks the file in turn. Exported here, before the cache step, so
+    # the rust-cache key is computed against the pinned compiler too —
+    # keying it under stable would risk restoring artifacts built by a
+    # different rustc.
+    - name: Make the pinned toolchain win over rust-toolchain.toml
+      if: inputs.toolchain != 'stable'
+      shell: bash
+      env:
+        WANT: ${{ inputs.toolchain }}
+      run: echo "RUSTUP_TOOLCHAIN=$WANT" >> "$GITHUB_ENV"
+
+    # Assert rather than trust. The first version of the MSRV job did
+    # exactly what the step above prevents — installed a pinned toolchain,
+    # then compiled on stable — and would have reported a green check that
+    # proved nothing. Silent false assurance is worse than no check.
+    - name: Confirm the pinned toolchain is active
+      if: inputs.toolchain != 'stable'
+      shell: bash
+      env:
+        WANT: ${{ inputs.toolchain }}
+      run: |
+        set -euo pipefail
+        got="$(rustc --version)"
+        echo "$got"
+        case "$got" in
+          "rustc $WANT "*) ;;
+          *) echo "::error::expected rustc $WANT, got: $got"
+             exit 1 ;;
+        esac
+
     # Per-job cache (rust-cache keys by job, so each job keeps a stable
     # cache and they don't thrash each other — the test job compiles the
     # valkey-tests feature the others don't, so a shared key would

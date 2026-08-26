@@ -14,6 +14,7 @@ and pull requests are welcome, with a couple of honest caveats up front:
 You need a stable Rust toolchain plus:
 
 ```sh
+rustup update stable                        # see the note below
 rustup target add wasm32-unknown-unknown
 cargo install just wasm-tools
 ```
@@ -25,6 +26,22 @@ component elsewhere and point at it with
 `WM_JS_ENGINE_WASM_OVERRIDE=/abs/path/to/js-engine.wasm`.
 
 The first build is slow — wasmtime and swc dominate the dependency tree.
+
+`rust-toolchain.toml` selects `stable`, which resolves to whatever stable
+you have installed — rustup never moves it for you. CI always gets the
+newest stable, so an old local toolchain means `just check` runs a
+*weaker* clippy than the gate will, and a lint you never saw fails the PR.
+`rustup update stable` is the fix.
+
+Two versions in CI are deliberately not stable:
+
+- **Lints are pinned** (currently 1.98.0). clippy gains lints every
+  release, so a floating toolchain would redden CI on a commit that
+  changed nothing. Building and testing still run on stable, so a real
+  future-compiler breakage is still caught.
+- **`rust-version` (currently 1.95) is the supported floor**, checked by
+  the `msrv` job. Don't raise it to match your compiler — it's a
+  compatibility promise, and it moves only when a dependency forces it.
 
 ```sh
 just check      # fmt check + clippy -D warnings + tests. The gate.

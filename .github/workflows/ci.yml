@@ -28,11 +28,24 @@ env:
 # cached dependency tree; that's inherent (rust-cache only caches deps),
 # not duplicated work the split introduced.
 jobs:
+  # Pinned, unlike `build` and `test`, which run on stable. clippy gains
+  # lints and rustfmt occasionally shifts formatting on every release, so
+  # a floating toolchain here means CI can go red on a commit that changed
+  # nothing relevant — churn arriving on the Rust release schedule rather
+  # than when we choose to take it. Building and testing still happen on
+  # stable, so a genuine future-compiler breakage is still caught; this
+  # only decouples *lint* churn from that.
+  #
+  # Bump deliberately, as its own commit. Nothing updates this
+  # automatically: Dependabot doesn't read workflow inputs, so it drifts
+  # silently if ignored. Worth revisiting when the toolchain moves.
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/ci-setup
+        with:
+          toolchain: "1.98.0"
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -105,37 +118,17 @@ jobs:
   # `--all-targets` so dev-dependencies count too, `--locked` so the
   # committed Cargo.lock is what gets checked rather than a fresh resolve
   # that might pick different versions.
+  # Keep this version *behind* stable on purpose. If it tracked stable the
+  # job would compile the same code with the same compiler as every other
+  # leg and prove nothing; the gap is what it checks. Raise it only when a
+  # dependency forces it, and raise `rust-version` in Cargo.toml with it.
   msrv:
     runs-on: ubuntu-latest
-    env:
-      # Installing 1.95.0 is not enough on its own: rust-toolchain.toml
-      # pins `channel = "stable"`, and a toolchain file outranks the
-      # `rustup default` that the toolchain action sets — so cargo went
-      # on using stable while the job looked correctly configured.
-      # RUSTUP_TOOLCHAIN outranks the file in turn, and is set at job
-      # level so the cache key is computed against this compiler too;
-      # keying it under stable would risk restoring artifacts built by a
-      # different rustc.
-      RUSTUP_TOOLCHAIN: "1.95.0"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/ci-setup
         with:
           toolchain: "1.95.0"
-
-      # Keep this. It is not paranoia: the first version of this job did
-      # exactly what it guards against — installed 1.95.0, then ran on
-      # stable because rust-toolchain.toml outranked it, and would have
-      # reported a green MSRV check that proved nothing.
-      - name: Confirm cargo is actually using the pinned toolchain
-        run: |
-          set -euo pipefail
-          rustc --version
-          case "$(rustc --version)" in
-            "rustc 1.95."*) ;;
-            *) echo "::error::MSRV job is not running on 1.95 — rust-toolchain.toml won"
-               exit 1 ;;
-          esac
 
       - name: Check
         run: cargo check --workspace --all-targets --locked
