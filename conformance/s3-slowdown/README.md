@@ -72,6 +72,6 @@ doubles as a live check of the new API.
 - `spec.json` — the group spec (group `s3-slowdown` + the `/{bucket}/{key}` route), imported by the shared runner
 - `rules.json` — the rule set, seeded into group state by `setup.sh`
 - `main.go`, `go.mod`, `go.sum` — the Go SDK client + pinned deps
-- `Dockerfile` — `golang:1.24`, builds + runs the client
+- `Dockerfile` — `golang:1.27`, builds + runs the client
 
 Run: `just conformance s3-slowdown` (or `./conformance/run.sh s3-slowdown`).
