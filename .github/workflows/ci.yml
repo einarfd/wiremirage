@@ -87,6 +87,50 @@ jobs:
           docker run --rm -v "$PWD/types":/types -w /app wm-js-engine-builder:dev \
             npx tsc --noEmit -p /types/tsconfig.json
 
+  # Enforces the `rust-version` floor in Cargo.toml. Without this the
+  # field is a claim nothing checks: every other job installs `stable`,
+  # which by definition accepts whatever the current compiler accepts, so
+  # a contributor on the declared minimum would be the one to discover a
+  # too-new language feature — as a confusing error deep in a dependency
+  # build rather than a clear "this needs a newer rustc".
+  #
+  # Deliberately `check`, not `clippy` or `test`:
+  #   - clippy's lint set shifts between releases, so a pinned toolchain
+  #     would fail on warnings the stable `lint` job never sees. Linting
+  #     is that job's business.
+  #   - MSRV is a question about what compiles. Re-running the suite here
+  #     would double the longest job to re-prove what `test` already
+  #     proved about behaviour.
+  #
+  # `--all-targets` so dev-dependencies count too, `--locked` so the
+  # committed Cargo.lock is what gets checked rather than a fresh resolve
+  # that might pick different versions.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/ci-setup
+        with:
+          toolchain: "1.95.0"
+
+      # rust-toolchain.toml pins `channel = "stable"`, which would quietly
+      # win over the toolchain installed above and leave this job
+      # re-testing stable while reporting success. dtolnay's action sets
+      # RUSTUP_TOOLCHAIN, which takes precedence — assert that rather than
+      # trust it, because the failure mode is silent false assurance.
+      - name: Confirm cargo is actually using the pinned toolchain
+        run: |
+          set -euo pipefail
+          rustc --version
+          case "$(rustc --version)" in
+            "rustc 1.95."*) ;;
+            *) echo "::error::MSRV job is not running on 1.95 — rust-toolchain.toml won"
+               exit 1 ;;
+          esac
+
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+
   # Dependency audit: security advisories, license policy, banned crates,
   # and source registries. Reads Cargo.lock — no compile — so it skips
   # ci-setup entirely and finishes in well under a minute, which makes it

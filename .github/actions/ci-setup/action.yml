@@ -5,6 +5,14 @@ description: >-
   componentization), restore the cargo cache, and install wasm-tools.
 
 inputs:
+  toolchain:
+    description: >-
+      Rust toolchain to install. Defaults to `stable` for the gating
+      jobs; the MSRV job passes an explicit version so the
+      `rust-version` in Cargo.toml is checked by something rather than
+      being a claim nothing verifies.
+    required: false
+    default: stable
   cache-on-failure:
     description: >-
       Save the cargo cache even when the job fails. Off for the gating CI
@@ -39,9 +47,14 @@ runs:
         large-packages: false
         swap-storage: false
 
+    # The `@stable` ref is the action version, not the toolchain: the
+    # `toolchain` input below is what selects the compiler, so the ref
+    # stays pinned (see the free-disk-space note above) while callers
+    # can still ask for a specific version.
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
+        toolchain: ${{ inputs.toolchain }}
         components: rustfmt, clippy
         targets: wasm32-unknown-unknown
 
