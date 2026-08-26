@@ -54,5 +54,8 @@ These are documented behaviours, not vulnerabilities:
 
 ## Supported versions
 
-Pre-1.0: only `main` is supported. Fixes land there and in the next published
-container image.
+Pre-1.0: only `main` is supported. Fixes land there first and reach the
+`:main` container image on the next push. The `:latest` / `:0.1` tags track
+the newest *release*, so they don't carry a fix until it is tagged — for a
+security fix that is same-day. If you need a fix before then, run `:main` or
+the `:sha-` tag naming the fixing commit.
