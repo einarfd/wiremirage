@@ -170,7 +170,14 @@ jobs:
   # and leans on the GHA layer cache (`cache-from`/`cache-to`).
   image-build:
     name: Image (${{ matrix.platform }})
-    needs: [lint, test]
+    # `audit` gates too, and it's free to add: it reads Cargo.lock without
+    # compiling, so it finishes long before the image build would have
+    # started. SECURITY.md points people at `:main` when they need a fix
+    # ahead of a release, which makes it the tag least able to afford being
+    # published out of a run that went red. A new advisory with no fixed
+    # version yet blocks publishing until deny.toml carries a documented
+    # ignore — that's the intended escape hatch, not a reason to skip it.
+    needs: [lint, test, audit]
     if: github.event_name == 'push'
     runs-on: ${{ matrix.runner }}
     permissions:
