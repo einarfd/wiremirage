@@ -107,17 +107,26 @@ jobs:
   # that might pick different versions.
   msrv:
     runs-on: ubuntu-latest
+    env:
+      # Installing 1.95.0 is not enough on its own: rust-toolchain.toml
+      # pins `channel = "stable"`, and a toolchain file outranks the
+      # `rustup default` that the toolchain action sets — so cargo went
+      # on using stable while the job looked correctly configured.
+      # RUSTUP_TOOLCHAIN outranks the file in turn, and is set at job
+      # level so the cache key is computed against this compiler too;
+      # keying it under stable would risk restoring artifacts built by a
+      # different rustc.
+      RUSTUP_TOOLCHAIN: "1.95.0"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/ci-setup
         with:
           toolchain: "1.95.0"
 
-      # rust-toolchain.toml pins `channel = "stable"`, which would quietly
-      # win over the toolchain installed above and leave this job
-      # re-testing stable while reporting success. dtolnay's action sets
-      # RUSTUP_TOOLCHAIN, which takes precedence — assert that rather than
-      # trust it, because the failure mode is silent false assurance.
+      # Keep this. It is not paranoia: the first version of this job did
+      # exactly what it guards against — installed 1.95.0, then ran on
+      # stable because rust-toolchain.toml outranked it, and would have
+      # reported a green MSRV check that proved nothing.
       - name: Confirm cargo is actually using the pinned toolchain
         run: |
           set -euo pipefail
