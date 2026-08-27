@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-header">
+  <h1>Settings</h1>
+  <p class="text-muted">
+    User administration and the identity providers this host is configured with.
+    Everything here mirrors <code>wm users</code>; MCP deliberately does not expose
+    user management.
+  </p>
+</section>
+
+{% if data.error %}
+<section class="card card--error">
+  <p>{{ data.error }}</p>
+</section>
+{% endif %}
+
+{% if data.notice %}
+<section class="card card--success">
+  <p>{{ data.notice }}</p>
+</section>
+{% endif %}
+
+<section class="card">
+  <header class="card__header">
+    <h2>Users <span class="text-muted">({{ data.users | length }})</span></h2>
+  </header>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">Email</th>
+        <th scope="col">Role</th>
+        <th scope="col">Created</th>
+        <th scope="col" class="text-muted">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for u in data.users %}
+      <tr>
+        <td><code>{{ u.email }}</code>{% if u.is_self %} <span class="text-muted">(you)</span>{% endif %}</td>
+        <td>{% if u.is_admin %}<span class="badge badge--admin">admin</span>{% else %}<span class="text-muted">user</span>{% endif %}</td>
+        <td class="text-muted">{{ u.created_at }}</td>
+        <td class="token-actions">
+          <form method="post" action="/ui/settings/users/{{ u.email }}/admin" class="inline-form">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="is_admin" value="{% if u.is_admin %}false{% else %}true{% endif %}">
+            <button type="submit" class="btn btn--ghost">{% if u.is_admin %}Demote{% else %}Promote{% endif %}</button>
+          </form>
+          <form method="post" action="/ui/settings/users/{{ u.email }}/delete" class="inline-form"
+                onsubmit="return confirm('Delete {{ u.email }}? This also deletes their API tokens. This can\'t be undone.');">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn--ghost">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+  <p class="text-muted">
+    The last admin can't be demoted or deleted, and a user who still owns routes
+    can't be deleted — delete their groups first.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Add user</h2>
+  </header>
+  <form method="post" action="/ui/settings/users" class="filter-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <label class="filter-field">
+      <span class="filter-field__label">Email</span>
+      <input type="email" name="email" required placeholder="person@example.com">
+    </label>
+    <label class="filter-field">
+      <span class="filter-field__label">Admin</span>
+      <input type="checkbox" name="is_admin" value="on">
+    </label>
+    <button type="submit" class="btn btn--primary">Create user</button>
+  </form>
+  <p class="text-muted">
+    Users who sign in with OAuth or OIDC are provisioned on first login.
+    Pre-creating an email links that login to this account.
+  </p>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Identity providers</h2>
+  </header>
+  <p class="text-muted">Set in deploy config; this view is read-only.</p>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th scope="col">Provider</th>
+        <th scope="col">Issuer</th>
+        <th scope="col">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+    {%- for p in data.providers %}
+      <tr>
+        <td><strong>{{ p.name }}</strong></td>
+        <td>{% if p.issuer %}<code>{{ p.issuer }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+        <td>{% if p.enabled %}configured{% else %}<span class="text-muted">not configured</span>{% endif %}</td>
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Session</h2>
+  </header>
+  <p class="text-muted">
+    Sign out of every device this account is signed in on, including this one.
+    API tokens are unaffected — revoke those from
+    <a href="/ui/me/tokens">Tokens</a>.
+  </p>
+  <form method="post" action="/ui/settings/sessions/revoke-all"
+        onsubmit="return confirm('Sign out everywhere? You will be logged out of this browser too.');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn--ghost">Sign out everywhere</button>
+  </form>
+</section>
+{% endblock %}

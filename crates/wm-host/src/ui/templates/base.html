@@ -19,6 +19,9 @@
       <a href="/ui/journal/live">Live</a>
       <a href="/ui/unmatched">Unmatched</a>
       <a href="/ui/me/tokens">Tokens</a>
+      {%- if user and user.is_admin %}
+      <a href="/ui/settings">Settings</a>
+      {%- endif %}
     </nav>
     {% if user %}
     <div class="app-user">

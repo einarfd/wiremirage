@@ -304,45 +304,6 @@ async fn ace_editor_assets_served_with_js_mime() {
 }
 
 #[tokio::test]
-async fn placeholder_pages_render_with_api_hint() {
-    let h = start_with_users("admin@test.example:devpassword:admin").await;
-    let client = no_redirect_client();
-    let cookie = login_and_get_cookie(&h, &client).await;
-
-    // minijinja auto-escapes `/` to `&#x2f;` in element bodies. The
-    // browser un-escapes it for display; we match on substrings that
-    // survive the escape (alphanumerics + underscores).
-    //
-    // Each successive UI slice converts more of these stubs to real
-    // pages and removes them from this list. After slice 28's unmatched
-    // page landed, only `/ui/settings` (and the not-yet-implemented
-    // `/ui/admin/health` and `/ui/routes/new`) remain placeholders.
-    // If a future slice adds back a placeholder route, add a check
-    // here for it.
-    let placeholders: &[(&str, &[&str])] = &[("/ui/settings", &["GET", "api", "users"])];
-    for &(path, expected_substrings) in placeholders.iter() {
-        let resp = client
-            .get(url(&h, path))
-            .header("cookie", &cookie)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status().as_u16(), 200, "GET {path}");
-        let body = resp.text().await.unwrap();
-        assert!(
-            body.contains("coming"),
-            "expected placeholder copy on {path}"
-        );
-        for sub in expected_substrings {
-            assert!(
-                body.contains(sub),
-                "expected substring {sub:?} on {path}; body was: {body}"
-            );
-        }
-    }
-}
-
-#[tokio::test]
 async fn admin_only_pages_are_forbidden_for_non_admin() {
     let h = start_with_users("admin@test.example:devpassword:admin,user@test.example:devpassword")
         .await;

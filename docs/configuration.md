@@ -243,7 +243,8 @@ Then set:
   always requests.
 - `WM_GITHUB_ADMIN_USERS` — optional subset of allowed users promoted to admin
   on first login. When empty, every GitHub user lands as a non-admin and
-  existing admins promote via `wm users update <email> --admin`.
+  existing admins promote via `wm users update <email> --admin`, or from the
+  Settings page at `/ui/settings`.
 - `SESSION_SECRET` — HMAC key for the `wm_session` and `wm_csrf` cookies. At
   least 32 bytes; `openssl rand -base64 48` works. Rotating it invalidates
   every existing session, so keep it stable unless you mean to log everyone

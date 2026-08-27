@@ -11,12 +11,20 @@ they make the design better, and are called out here.
 
 ### Added
 
-- **`POST /api/users/me/sessions/revoke-all`** — sign out everywhere. Backed by
-  a per-user session epoch rather than a session index: each session is stamped
-  at creation and validation rejects anything behind the user's counter, so
-  revoking is one increment and no session is enumerated. Returns 204 with no
-  count for that reason. API tokens are a separate credential and are
-  untouched. No CLI counterpart by design — sessions are a browser credential.
+- **Settings page at `/ui/settings`** (admins only, linked from the nav). Full
+  user management in the browser — list, create, promote, demote, delete —
+  mirroring the `wm users` verbs and re-checking the same host guards, so the
+  last admin can't be demoted or deleted and a user who still owns routes
+  can't be removed. Closes the CLI+UI parity gap that left user
+  administration CLI-only; MCP still deliberately excludes user management.
+  The page also shows which identity providers are configured (read-only).
+- **`POST /api/users/me/sessions/revoke-all`** — sign out everywhere, exposed
+  as a button on the Settings page. Backed by a per-user session epoch rather
+  than a session index: each session is stamped at creation and validation
+  rejects anything behind the user's counter, so revoking is one increment and
+  no session is enumerated. Returns 204 with no count for that reason. API
+  tokens are a separate credential and are untouched. No CLI counterpart by
+  design — sessions are a browser credential.
 
 ### Removed
 

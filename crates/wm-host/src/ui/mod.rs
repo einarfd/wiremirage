@@ -73,6 +73,7 @@ impl UiTemplates {
         tmpl!("live_journal.html", "templates/live_journal.html");
         tmpl!("journal_entry.html", "templates/journal_entry.html");
         tmpl!("tokens.html", "templates/tokens.html");
+        tmpl!("settings.html", "templates/settings.html");
         tmpl!("group_state.html", "templates/group_state.html");
         tmpl!("group_callbacks.html", "templates/group_callbacks.html");
         tmpl!("route_state.html", "templates/route_state.html");
@@ -182,7 +183,22 @@ pub fn router(state: AppState) -> Router {
             "/ui/me/tokens/oauth/{client_id}/revoke",
             axum::routing::post(revoke_oauth_grant_form),
         )
-        .route("/ui/settings", get(stub_settings))
+        .route(
+            "/ui/settings",
+            get(settings_page).post(settings_create_user),
+        )
+        .route(
+            "/ui/settings/users/{email}/admin",
+            axum::routing::post(settings_set_admin),
+        )
+        .route(
+            "/ui/settings/users/{email}/delete",
+            axum::routing::post(settings_delete_user),
+        )
+        .route(
+            "/ui/settings/sessions/revoke-all",
+            axum::routing::post(settings_revoke_all_sessions),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             csrf::csrf_middleware,
@@ -3830,23 +3846,287 @@ async fn group_export_download(
 // or curl until the real page lands. Stubs share a single template
 // to keep the code DRY.
 
-async fn stub_settings(State(state): State<AppState>, auth: AuthContext) -> Response {
+// -- Settings (slice: admin user management) --------------------------------
+//
+// The UI half of the CLI+UI user-management pairing; MCP deliberately
+// excludes user management, since it's a setup operation done before
+// agents connect. Every mutation here mirrors a `wm users` verb and
+// re-checks the same host guards the REST layer checks, so both
+// surfaces refuse the same things for the same reasons. Guard
+// failures render inline on the page rather than as a generic error —
+// "you can't demote the last admin" is the useful part of the answer.
+
+#[derive(Debug, Serialize)]
+struct SettingsUserRow {
+    email: String,
+    is_admin: bool,
+    created_at: String,
+    /// Marks the caller's own row so the template can label it. Delete
+    /// is still refused for self by the guard below.
+    is_self: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderRow {
+    name: String,
+    issuer: Option<String>,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SettingsPageData {
+    users: Vec<SettingsUserRow>,
+    providers: Vec<ProviderRow>,
+    error: Option<String>,
+    notice: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsQuery {
+    /// Set by the post-create redirect so the new row is confirmed in
+    /// words, not just by the table growing.
+    created: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsCreateUserForm {
+    email: String,
+    /// Unchecked boxes aren't submitted at all, so presence is the value.
+    is_admin: Option<String>,
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsSetAdminForm {
+    is_admin: String,
+    #[serde(rename = "_csrf")]
+    _csrf: String,
+}
+
+async fn settings_page(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<SettingsQuery>,
+) -> Response {
     if !auth.is_admin {
         return forbidden_page(&state, &auth);
     }
-    stub(&state, &auth, "Settings", "GET /api/users + /api/tokens")
+    let notice = q.created.map(|e| format!("Created {e}."));
+    render_settings(&state, &auth, None, notice, StatusCode::OK)
 }
 
-fn stub(state: &AppState, auth: &AuthContext, title: &str, api_hint: &str) -> Response {
-    render(
-        state,
-        "placeholder.html",
-        context! {
-            page_title => title,
-            api_hint => api_hint,
-            user => UserBadge::from(auth),
+fn provider_rows(state: &AppState) -> Vec<ProviderRow> {
+    let oidc = state.oidc();
+    vec![
+        ProviderRow {
+            name: oidc
+                .map(|p| p.config.display_name.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "OIDC".to_string()),
+            issuer: oidc.map(|p| p.config.issuer.clone()),
+            enabled: oidc.is_some(),
         },
-    )
+        ProviderRow {
+            name: "GitHub".to_string(),
+            issuer: state.github_oauth().map(|_| "github.com".to_string()),
+            enabled: state.github_oauth().is_some(),
+        },
+        ProviderRow {
+            name: "Local auth".to_string(),
+            issuer: None,
+            enabled: !state.local_auth().is_empty(),
+        },
+    ]
+}
+
+fn render_settings(
+    state: &AppState,
+    auth: &AuthContext,
+    error: Option<String>,
+    notice: Option<String>,
+    status: StatusCode,
+) -> Response {
+    let mut users = match state.auth().list_users() {
+        Ok(us) => us,
+        Err(e) => return ui_error_500(state, auth, format!("list users: {e}")),
+    };
+    users.sort_by(|a, b| a.email.cmp(&b.email));
+    let rows: Vec<SettingsUserRow> = users
+        .iter()
+        .map(|u| SettingsUserRow {
+            email: u.email.clone(),
+            is_admin: u.is_admin,
+            created_at: u.created_at.to_rfc3339(),
+            is_self: u.id == auth.user_id,
+        })
+        .collect();
+    let data = SettingsPageData {
+        users: rows,
+        providers: provider_rows(state),
+        error,
+        notice,
+    };
+    let mut resp = render(
+        state,
+        "settings.html",
+        context! {
+            page_title => "Settings",
+            user => UserBadge::from(auth),
+            data => data,
+        },
+    );
+    *resp.status_mut() = status;
+    resp
+}
+
+fn settings_error(state: &AppState, auth: &AuthContext, msg: impl Into<String>) -> Response {
+    render_settings(state, auth, Some(msg.into()), None, StatusCode::BAD_REQUEST)
+}
+
+/// Mirrors `POST /api/users` + `wm users create`.
+async fn settings_create_user(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::Form(form): axum::Form<SettingsCreateUserForm>,
+) -> Response {
+    if !auth.is_admin {
+        return forbidden_page(&state, &auth);
+    }
+    let email = form.email.trim();
+    // Same shape check the REST handler applies; the deeper "is this a
+    // real mailbox" question is the IdP's, not ours.
+    if email.is_empty() || !email.contains('@') {
+        return settings_error(&state, &auth, "Enter an email address.");
+    }
+    match state.auth().create_user(email, form.is_admin.is_some()) {
+        Ok(user) => axum::response::Redirect::to(&format!(
+            "/ui/settings?created={}",
+            urlencoding::encode(&user.email)
+        ))
+        .into_response(),
+        Err(crate::auth::AuthError::EmailTaken(e)) => settings_error(
+            &state,
+            &auth,
+            format!("A user with email {e} already exists."),
+        ),
+        Err(e) => ui_error_500(&state, &auth, format!("create user: {e}")),
+    }
+}
+
+/// Mirrors `PATCH /api/users/{email}` + `wm users update --admin|--no-admin`.
+async fn settings_set_admin(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(email): Path<String>,
+    axum::Form(form): axum::Form<SettingsSetAdminForm>,
+) -> Response {
+    if !auth.is_admin {
+        return forbidden_page(&state, &auth);
+    }
+    let target = match state.auth().get_user_by_email(&email) {
+        Ok(Some(u)) => u,
+        Ok(None) => return settings_error(&state, &auth, format!("No user with email {email}.")),
+        Err(e) => return ui_error_500(&state, &auth, format!("look up user: {e}")),
+    };
+    let want_admin = form.is_admin == "true";
+    if !want_admin && target.is_admin {
+        match state.auth().count_admins() {
+            Ok(n) if n <= 1 => {
+                return settings_error(
+                    &state,
+                    &auth,
+                    "Cannot demote the last admin — promote another user first.",
+                );
+            }
+            Ok(_) => {}
+            Err(e) => return ui_error_500(&state, &auth, format!("count admins: {e}")),
+        }
+    }
+    if let Err(e) = state.auth().set_user_admin(&target.id, want_admin) {
+        return ui_error_500(&state, &auth, format!("update user: {e}"));
+    }
+    axum::response::Redirect::to("/ui/settings").into_response()
+}
+
+/// Mirrors `DELETE /api/users/{email}` + `wm users delete`, including
+/// all three of that handler's refusals.
+async fn settings_delete_user(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(email): Path<String>,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    if !auth.is_admin {
+        return forbidden_page(&state, &auth);
+    }
+    let target = match state.auth().get_user_by_email(&email) {
+        Ok(Some(u)) => u,
+        Ok(None) => return settings_error(&state, &auth, format!("No user with email {email}.")),
+        Err(e) => return ui_error_500(&state, &auth, format!("look up user: {e}")),
+    };
+    if target.id == auth.user_id {
+        return settings_error(
+            &state,
+            &auth,
+            "An admin cannot delete themselves — ask another admin.",
+        );
+    }
+    if target.is_admin {
+        match state.auth().count_admins() {
+            Ok(n) if n <= 1 => {
+                return settings_error(
+                    &state,
+                    &auth,
+                    "Cannot delete the last admin — promote another user first.",
+                );
+            }
+            Ok(_) => {}
+            Err(e) => return ui_error_500(&state, &auth, format!("count admins: {e}")),
+        }
+    }
+    match state.routes().registry().list_routes_by_owner(&target.id) {
+        Ok(owned) if !owned.is_empty() => {
+            return settings_error(
+                &state,
+                &auth,
+                format!(
+                    "{} still owns {} route(s). Delete their groups first — they were expiring anyway.",
+                    target.email,
+                    owned.len()
+                ),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => return ui_error_500(&state, &auth, format!("list owned routes: {e}")),
+    }
+    if let Err(e) = state.auth().delete_user(&target.id) {
+        return ui_error_500(&state, &auth, format!("delete user: {e}"));
+    }
+    axum::response::Redirect::to("/ui/settings").into_response()
+}
+
+/// Sign out everywhere. Deliberately *not* admin-gated: it can only
+/// ever affect the caller's own sessions, and gating it would be a lie
+/// about its blast radius. Bumps the caller's session epoch, which
+/// invalidates every session they hold — including this one — so the
+/// response also clears the cookie and lands on the login page.
+async fn settings_revoke_all_sessions(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    if let Err(e) = state.auth().bump_session_epoch(&auth.user_id) {
+        return ui_error_500(&state, &auth, format!("revoke sessions: {e}"));
+    }
+    let mut resp: Response =
+        axum::response::Redirect::to("/auth/login?signed_out=1").into_response();
+    let clear = crate::auth_api::format_clear_cookie(state.secure_cookies());
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&clear).expect("ascii cookie header"),
+    );
+    resp
 }
 
 fn forbidden_page(state: &AppState, auth: &AuthContext) -> Response {

@@ -134,7 +134,7 @@ Everything below talks to the same host and the same authorization rules.
 |---|---|---|
 | **`wm` CLI** | humans, scripts, CI | [docs/cli.md](docs/cli.md) |
 | **MCP server** at `/api/mcp` | AI coding agents | [docs/mcp.md](docs/mcp.md) |
-| **Web UI** at `/ui/` | inspection, debugging, editing handlers | browse it |
+| **Web UI** at `/ui/` | inspection, debugging, editing handlers, user admin | browse it |
 | **REST API** at `/api/*` | anything else | the CLI wraps it 1:1 |
 | **Skill** at [`skill/wiremirage/`](skill/wiremirage/) | teaching an agent the workflow | `SKILL.md` + 5 runnable scripts |
 
