@@ -15,15 +15,16 @@
 //! different hosts converge harmlessly. Worst case is wasted CPU and
 //! a few duplicate Valkey round-trips; correctness is preserved.
 //!
-//! Multi-host caveat: `refresh_after_group_cascade` only invalidates
-//! *this* host's route-table cache. Other hosts in a multi-host
-//! deployment still serve stale routes from their own caches until
-//! their next sweep pass touches the same group, or until they
-//! restart. The proper fix is Valkey keyspace notifications — see
-//! [[../storage-model.md]] "Cache coherence and route readiness".
+//! Cross-replica note: `refresh_after_group_cascade` updates this
+//! host's route-table cache *and* publishes an invalidation, so
+//! siblings drop the reaped routes too (ADR-0037). Keyspace
+//! notifications were considered for this and rejected — they need
+//! server configuration that is off by default and may not be settable
+//! on a managed Valkey, and they couple invalidation to physical key
+//! names rather than to an application event we control and can
+//! version.
 //!
-//! Slice 8 scope: sweeper only, no keyspace notifications. The
-//! interval, plus the per-sweep success/failure logs, are good enough
+//! The interval, plus the per-sweep success/failure logs, are good enough
 //! for "long-running tests don't accumulate orphans" — the original
 //! lifecycle correctness goal.
 

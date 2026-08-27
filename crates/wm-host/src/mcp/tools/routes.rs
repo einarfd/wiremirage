@@ -426,7 +426,9 @@ impl WmMcpServer {
                 }
                 other => map_registry_error(other),
             })?;
-        self.state.routes().refresh_after_delete(&route.id);
+        self.state
+            .routes()
+            .refresh_after_delete(&route.group_id, &route.id);
         Ok(Json(DeleteRouteResult { deleted: true }))
     }
 }

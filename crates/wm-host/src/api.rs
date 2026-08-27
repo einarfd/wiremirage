@@ -1042,7 +1042,9 @@ async fn delete_route(
         ));
     }
     state.routes().registry().delete_route(&group, number)?;
-    state.routes().refresh_after_delete(&route.id);
+    state
+        .routes()
+        .refresh_after_delete(&route.group_id, &route.id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2245,10 +2247,8 @@ async fn delete_group(
     let group = ensure_group_owner_or_admin(&state, &auth, &group_ref)?;
     let deleted_routes = state.routes().registry().cascade_delete_group(&group.id)?;
     // Invalidate the local route table for each cascaded route so the
-    // in-memory cache doesn't keep serving them. Multi-host
-    // deployments still need keyspace notifications to invalidate
-    // peers — see storage-model.md "Cache coherence and route
-    // readiness" / Implementation status.
+    // in-memory cache doesn't keep serving them. This also publishes a
+    // cross-replica invalidation so siblings drop them too (ADR-0037).
     state.routes().refresh_after_group_cascade(&group.id);
     tracing::info!(
         group_id = %group.id,

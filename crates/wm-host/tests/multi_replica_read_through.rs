@@ -223,7 +223,7 @@ async fn a_deleted_route_still_serves_until_invalidation_lands() {
     // A serves the delete; B's table keeps the route.
     let route = registry.get_route_by_slug("doomed", 1).expect("route");
     registry.delete_route("doomed", 1).expect("delete");
-    a.routes.refresh_after_delete(&route.id);
+    a.routes.refresh_after_delete(&route.group_id, &route.id);
 
     assert_eq!(
         mock_get(&a, "doomed", "/gone").await.status().as_u16(),

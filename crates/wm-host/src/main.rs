@@ -168,6 +168,17 @@ async fn main() -> anyhow::Result<()> {
     // it up on process shutdown along with the runtime.
     let _sweeper = Sweeper::new(state.routes().clone()).spawn();
 
+    // Spawn the route-invalidation subscriber (ADR-0037). Deletes and
+    // source updates are the cases the read-through floor can't cover —
+    // a stale route still matches, so the request never reaches the
+    // miss path — so siblings are told directly. Returns None on
+    // in-memory storage, where there are no siblings. Handle dropped
+    // like the others; the task owns its own reconnect loop.
+    let _invalidation_subscriber = wm_host::bus::spawn_route_invalidation_subscriber(
+        state.runtime().storage().clone(),
+        state.routes().clone(),
+    );
+
     // Spawn the wasmtime epoch ticker (slice 46 / F-1). Required by
     // the `epoch_interruption(true)` flag on the engine — without a
     // ticker advancing the epoch, the per-call deadline configured

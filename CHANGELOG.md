@@ -19,8 +19,19 @@ they make the design better, and are called out here.
   one reload per group per 5s, because unmatched traffic is precisely the
   traffic that misses and an unbounded read-through would let junk traffic
   amplify into a storage read per request. This makes `storage-model.md`'s
-  cache-coherence guarantee true for the first time; it does not yet cover
-  deletes or source updates, where a stale route still matches.
+  cache-coherence guarantee true for the first time.
+- **Cross-replica route-cache invalidation** (ADR-0037). Route creates,
+  updates, deletes, group cascades and renames publish on a Valkey pub/sub
+  channel; every replica subscribes and drops the affected records and compiled
+  artifacts. This covers what the read-through cannot — a deleted or updated
+  route still *matches*, so those requests never reach the miss path. Delivery
+  is at-most-once by design: the records are already committed to storage
+  before anything is published, so a lost message degrades to the
+  read-through's staleness window instead of lasting until a restart. The
+  subscriber reconnects with backoff, which includes the case of Valkey
+  dropping a subscriber that hits the pubsub output-buffer limit.
+  This adds the host's first *async* Valkey connection (`redis`'s
+  `tokio-comp` feature); every request-path operation stays synchronous.
 
 ### Changed
 

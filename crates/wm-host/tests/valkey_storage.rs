@@ -185,3 +185,110 @@ fn counter_increments_via_direct_call() {
         assert_eq!(resp.body, format!("count={expected}").into_bytes());
     }
 }
+
+// -- Cross-replica cache invalidation (ADR-0037 item 1) ---------------------
+//
+// This is storage semantics, so it belongs at tier 3: the pub/sub bus is a
+// no-op on the in-memory backend by construction, so the tier-2 suite can
+// only cover the receiving half in-process. What needs proving against a
+// real server is the part the read-through floor deliberately cannot do —
+// making a *delete* on one replica stop the route serving on another. A
+// stale route still matches, so those requests never reach the miss path.
+
+/// Boot one replica over `url`, with its invalidation subscriber running
+/// and confirmed subscribed. Awaiting readiness is not politeness: pub/sub
+/// is at-most-once with no replay, so a message published before the
+/// subscription exists is lost, and the test would flake rather than fail.
+async fn boot_replica(url: &str) -> (String, Arc<RouteTable>, tokio::task::JoinHandle<()>) {
+    let storage = Storage::valkey(url).expect("connect");
+    let auth = Auth::new(storage.clone());
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    let mut subscriber =
+        wm_host::bus::spawn_route_invalidation_subscriber(storage.clone(), routes.clone())
+            .expect("valkey storage spawns a subscriber");
+    subscriber.wait_ready().await;
+    let journal = Journal::new(storage);
+    let app = router(AppState::new(runtime, routes.clone(), auth, journal));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (addr, routes, server)
+}
+
+async fn mock_status(addr: &str, group: &str, path: &str) -> u16 {
+    reqwest::Client::new()
+        .get(format!("http://{addr}{path}"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .expect("send")
+        .status()
+        .as_u16()
+}
+
+/// Poll until `f` holds or the deadline passes. Invalidation is
+/// asynchronous by nature, so the assertion is "converges promptly",
+/// not "is already true on the next line".
+async fn eventually(mut f: impl AsyncFnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if f().await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_delete_on_one_replica_stops_the_route_serving_on_another() {
+    let url = tokio::task::spawn_blocking(|| shared().url.clone())
+        .await
+        .expect("init valkey container");
+
+    // A route created before either replica warms, so both have it cached.
+    let storage = Storage::valkey(&url).expect("connect");
+    let registry = Registry::new(storage.clone());
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/bump".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: counter_bytes(),
+            source: None,
+            owner_id: "test-owner".into(),
+        })
+        .expect("create route");
+    let group = route.group_name.clone();
+
+    let (addr_a, routes_a, _srv_a) = boot_replica(&url).await;
+    let (addr_b, _routes_b, _srv_b) = boot_replica(&url).await;
+
+    assert_eq!(mock_status(&addr_a, &group, "/bump").await, 200);
+    assert_eq!(mock_status(&addr_b, &group, "/bump").await, 200);
+
+    // Replica A serves the delete. Its own table updates synchronously;
+    // B learns only because A published an invalidation.
+    registry
+        .delete_route(&group, route.number)
+        .expect("delete route");
+    routes_a.refresh_after_delete(&route.group_id, &route.id);
+
+    assert_eq!(
+        mock_status(&addr_a, &group, "/bump").await,
+        404,
+        "the deleting replica is correct immediately"
+    );
+    assert!(
+        eventually(async || mock_status(&addr_b, &group, "/bump").await == 404).await,
+        "replica B stopped serving the deleted route"
+    );
+}

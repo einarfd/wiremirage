@@ -71,6 +71,31 @@ impl Storage {
         Ok(Self::Valkey(Arc::new(client)))
     }
 
+    /// Open an async pub/sub connection, or `None` on the in-memory
+    /// backend where there are no siblings to hear from.
+    ///
+    /// This is the host's first *async* Valkey connection — everything
+    /// else is synchronous with a connection per operation, which
+    /// cannot work for a subscriber that must sit and wait for pushes.
+    pub async fn pubsub(&self) -> Option<Result<redis::aio::PubSub, StoreError>> {
+        match self {
+            Storage::InMemory(_) => None,
+            Storage::Valkey(client) => Some(
+                client
+                    .get_async_pubsub()
+                    .await
+                    .map_err(|e| StoreError::Backend(format!("pubsub connect: {e}"))),
+            ),
+        }
+    }
+
+    /// Whether this storage has sibling replicas to coordinate with.
+    /// In-memory is single-process by construction, so every
+    /// cross-replica mechanism short-circuits on it.
+    pub fn is_distributed(&self) -> bool {
+        matches!(self, Storage::Valkey(_))
+    }
+
     /// Open the route-private bucket scoped to `(group, route)`.
     pub fn route_bucket(&self, group_ulid: &str, route_ulid: &str) -> Result<Bucket, StoreError> {
         self.route_bucket_under("", group_ulid, route_ulid)
@@ -264,6 +289,35 @@ impl Bucket {
                     .query(conn)
                     .map_err(|e| StoreError::Backend(format!("EXPIRE: {e}")))?;
                 Ok(())
+            }
+        }
+    }
+
+    /// Publish `payload` to `channel` on this bucket's own connection.
+    ///
+    /// Channels are **not** prefixed: a bucket's key prefix scopes its
+    /// keys, but pub/sub channels are a host-wide namespace shared by
+    /// every replica, so callers pass the full channel name.
+    ///
+    /// Riding the bucket's existing connection is the point. The
+    /// journal write path already holds one and writes inline before
+    /// responding, so the publish goes out on that same connection
+    /// rather than paying a second round trip on the hot path.
+    ///
+    /// A no-op on the in-memory backend: there are no sibling replicas
+    /// to tell, and local delivery is the caller's own broadcast
+    /// channel. Returns the number of subscribers that received it on
+    /// Valkey (0 is normal and not an error — nobody may be listening).
+    pub fn publish(&mut self, channel: &str, payload: Vec<u8>) -> Result<u64, StoreError> {
+        match self {
+            Bucket::InMemory { .. } => Ok(0),
+            Bucket::Valkey { conn, .. } => {
+                let n: i64 = redis::cmd("PUBLISH")
+                    .arg(channel)
+                    .arg(payload)
+                    .query(conn)
+                    .map_err(|e| StoreError::Backend(format!("PUBLISH {channel}: {e}")))?;
+                Ok(n.max(0) as u64)
             }
         }
     }

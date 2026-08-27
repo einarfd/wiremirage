@@ -1,0 +1,220 @@
+//! Cross-replica message bus over Valkey pub/sub (ADR-0037).
+//!
+//! The host's caches are per-process. A replica that serves an API call
+//! updates its own route table through the `refresh_*` hooks, but its
+//! siblings learn nothing. [`RouteTable::revalidate_and_rematch`] gives
+//! creates a floor that needs no messaging — a miss reloads the group —
+//! but a *deleted* or *updated* route still matches, so those requests
+//! never reach the miss path. This module is what makes them timely.
+//!
+//! Two properties are deliberate:
+//!
+//! **At-most-once is the right semantic.** The bus carries liveness, not
+//! durability — the route records themselves are already committed to
+//! storage before anything is published, and the read-through floor
+//! bounds what a lost message costs. A dropped invalidation degrades to
+//! the pre-existing staleness window, now capped by the revalidation
+//! interval rather than by process lifetime.
+//!
+//! **Reconnection is the actual work.** Nothing else in the codebase has
+//! to survive a dropped connection: the sync store opens a connection
+//! per operation, so a failure surfaces as one failed request. A
+//! subscriber holds its connection open for the process lifetime, so it
+//! must expect to lose it — including Valkey disconnecting a subscriber
+//! that falls far enough behind to hit the pubsub output-buffer limit.
+//! That is expected, not exceptional, and the loop below treats it so.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+use crate::Storage;
+use crate::route_table::RouteTable;
+
+/// Channel carrying route-cache invalidations. One host-wide channel:
+/// the volume is control-plane mutations, which are rare next to mock
+/// traffic, and every replica needs every event.
+pub const ROUTE_INVALIDATION_CHANNEL: &str = "wm:invalidate:routes";
+
+/// Backoff bounds for the subscriber's reconnect loop.
+const RECONNECT_BACKOFF_START: Duration = Duration::from_millis(250);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// A route-cache invalidation. Carries the group whose route set
+/// changed plus the specific routes whose compiled artifacts must be
+/// dropped.
+///
+/// The group id alone would be enough to reload records, but not to
+/// evict the compiled-component and transpiled-JS caches — those are
+/// keyed by route id, and an update that changes a handler's source
+/// without changing its path would otherwise keep serving stale bytes
+/// from a cache the reload never touches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteInvalidation {
+    pub group_id: String,
+    /// Routes whose compiled artifacts are now stale. Empty is valid —
+    /// a pure create adds a record without invalidating any artifact.
+    #[serde(default)]
+    pub route_ids: Vec<String>,
+}
+
+impl RouteInvalidation {
+    pub fn for_group(group_id: impl Into<String>) -> Self {
+        Self {
+            group_id: group_id.into(),
+            route_ids: Vec::new(),
+        }
+    }
+
+    pub fn with_routes(mut self, route_ids: Vec<String>) -> Self {
+        self.route_ids = route_ids;
+        self
+    }
+}
+
+/// Publish an invalidation, best-effort.
+///
+/// Failures are logged and swallowed on purpose. The mutation that
+/// triggered this has already been committed to storage and applied
+/// locally; refusing the API call because siblings could not be told
+/// would turn a degraded-timeliness problem into a failed write, and
+/// the read-through floor already bounds the cost of a missed message.
+pub fn publish_route_invalidation(storage: &Storage, event: &RouteInvalidation) {
+    if !storage.is_distributed() {
+        return;
+    }
+    let payload = match serde_json::to_vec(event) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "encoding route invalidation");
+            return;
+        }
+    };
+    let mut bucket = match storage.admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "opening bucket to publish route invalidation");
+            return;
+        }
+    };
+    match bucket.publish(ROUTE_INVALIDATION_CHANNEL, payload) {
+        Ok(n) => tracing::debug!(
+            group_id = %event.group_id,
+            routes = event.route_ids.len(),
+            receivers = n,
+            "published route invalidation"
+        ),
+        Err(e) => tracing::warn!(error = %e, "publishing route invalidation"),
+    }
+}
+
+/// A running route-invalidation subscriber.
+///
+/// Dropping this aborts nothing — the task is detached and dies with the
+/// process, like the sweeper and the epoch ticker.
+pub struct InvalidationSubscriber {
+    pub handle: tokio::task::JoinHandle<()>,
+    ready: tokio::sync::watch::Receiver<bool>,
+}
+
+impl InvalidationSubscriber {
+    /// Resolve once the subscription has been established at least
+    /// once. Pub/sub is at-most-once with no replay, so anything
+    /// published before the first successful subscribe is simply not
+    /// heard — tests that publish and then assert must await this
+    /// rather than sleeping and hoping.
+    pub async fn wait_ready(&mut self) {
+        if *self.ready.borrow() {
+            return;
+        }
+        let _ = self.ready.changed().await;
+    }
+}
+
+/// Spawn the route-invalidation subscriber.
+///
+/// Returns `None` on the in-memory backend, where there are no siblings
+/// and the local `refresh_*` hooks are already authoritative.
+pub fn spawn_route_invalidation_subscriber(
+    storage: Storage,
+    routes: Arc<RouteTable>,
+) -> Option<InvalidationSubscriber> {
+    if !storage.is_distributed() {
+        tracing::debug!("in-memory storage: no route-invalidation subscriber needed");
+        return None;
+    }
+    let (ready_tx, ready) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move {
+        let mut backoff = RECONNECT_BACKOFF_START;
+        loop {
+            match run_route_invalidation_session(&storage, &routes, &ready_tx).await {
+                Ok(()) => {
+                    // The stream ended without an error — the server
+                    // closed it or the connection went away quietly.
+                    // Same handling as an error: reconnect.
+                    tracing::info!("route-invalidation subscription ended; reconnecting");
+                    // A clean session means the connection worked, so
+                    // don't carry a punitive backoff into the retry.
+                    backoff = RECONNECT_BACKOFF_START;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "route-invalidation subscription failed");
+                    backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                }
+            }
+            tokio::time::sleep(backoff).await;
+        }
+    });
+    Some(InvalidationSubscriber { handle, ready })
+}
+
+/// One connect-subscribe-consume cycle. Returns when the stream ends;
+/// the caller reconnects.
+async fn run_route_invalidation_session(
+    storage: &Storage,
+    routes: &Arc<RouteTable>,
+    ready: &tokio::sync::watch::Sender<bool>,
+) -> Result<(), String> {
+    use futures::StreamExt as _;
+
+    let mut pubsub = storage
+        .pubsub()
+        .await
+        .ok_or_else(|| "storage is not distributed".to_string())?
+        .map_err(|e| format!("{e}"))?;
+    pubsub
+        .subscribe(ROUTE_INVALIDATION_CHANNEL)
+        .await
+        .map_err(|e| format!("subscribe: {e}"))?;
+    tracing::info!(
+        channel = ROUTE_INVALIDATION_CHANNEL,
+        "route-invalidation subscriber connected"
+    );
+    let _ = ready.send(true);
+
+    let mut stream = pubsub.on_message();
+    while let Some(msg) = stream.next().await {
+        let payload: Vec<u8> = match msg.get_payload() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "unreadable invalidation payload");
+                continue;
+            }
+        };
+        let event: RouteInvalidation = match serde_json::from_slice(&payload) {
+            Ok(e) => e,
+            Err(e) => {
+                // A malformed message is one bad message, not a reason
+                // to tear down a healthy subscription.
+                tracing::warn!(error = %e, "undecodable invalidation payload");
+                continue;
+            }
+        };
+        // The originating replica hears its own message back and
+        // re-applies it. That is harmless — applying an invalidation is
+        // idempotent — and keeps one delivery path rather than two.
+        routes.apply_invalidation(&event.group_id, &event.route_ids);
+    }
+    Ok(())
+}

@@ -197,6 +197,13 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// Borrow the backing storage. The route table uses this to publish
+    /// cache invalidations to sibling replicas (ADR-0037) without
+    /// threading a second `Storage` handle through every construction.
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }

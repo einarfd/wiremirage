@@ -28,6 +28,7 @@ use anyhow::Result;
 use wasmtime::Engine;
 use wasmtime::component::Component;
 
+use crate::bus::RouteInvalidation;
 use crate::pattern::{Methods, Pattern, Segment};
 use crate::registry::{Registry, Route};
 
@@ -266,6 +267,13 @@ impl RouteTable {
             }
             seen.insert(group_id.to_string(), now);
         }
+        self.reload_group(group_id, group_name)
+    }
+
+    /// Reload one group's routes from storage, replacing whatever was
+    /// cached for it. No rate limit — callers that need one apply it
+    /// first. Returns whether the reload succeeded.
+    fn reload_group(&self, group_id: &str, group_name: &str) -> bool {
         let fresh = match self.registry.routes_in_group(group_id) {
             Ok(routes) => routes,
             Err(e) => {
@@ -273,7 +281,7 @@ impl RouteTable {
                     error = %e,
                     group_id,
                     group_name,
-                    "read-through revalidation failed; serving the cached route set"
+                    "group reload failed; serving the cached route set"
                 );
                 return false;
             }
@@ -284,6 +292,47 @@ impl RouteTable {
         routes.retain(|r| r.group_id != group_id);
         routes.extend(fresh);
         true
+    }
+
+    /// Apply a route invalidation published by another replica
+    /// (ADR-0037 item 1). Evicts the named routes' compiled artifacts,
+    /// then reloads the group's records from storage.
+    ///
+    /// Eviction has to be explicit rather than implied by the reload:
+    /// the component and transpiled-JS caches are keyed by route id, so
+    /// an update that changes a handler's source without changing its
+    /// path would otherwise keep serving stale compiled bytes behind a
+    /// freshly-read record.
+    ///
+    /// Idempotent by construction — the originating replica receives
+    /// its own message back and re-applies it, which costs one reload
+    /// and buys a single uniform delivery path.
+    pub fn apply_invalidation(&self, group_id: &str, route_ids: &[String]) {
+        {
+            let mut components = self.components.lock().expect("poisoned");
+            let mut engine_js = self.engine_js.lock().expect("poisoned");
+            for id in route_ids {
+                components.remove(id);
+                engine_js.remove(id);
+            }
+        }
+        // Group name is only used for log context here; the reload keys
+        // on the id.
+        let reloaded = self.reload_group(group_id, "");
+        if reloaded {
+            // We just read storage, so the read-through has nothing to
+            // add for a while — record it against the rate limit.
+            self.revalidated_at
+                .lock()
+                .expect("poisoned")
+                .insert(group_id.to_string(), Instant::now());
+        }
+        tracing::debug!(
+            group_id,
+            evicted = route_ids.len(),
+            reloaded,
+            "applied route invalidation"
+        );
     }
 
     /// Run the match probe across **all** groups: the actual match if any,
@@ -426,16 +475,26 @@ impl RouteTable {
     }
 
     pub fn refresh_after_create(&self, route: Route) {
+        let group_id = route.group_id.clone();
         self.routes.write().expect("poisoned").push(route);
+        // No artifact to evict — the record is new, so siblings have
+        // nothing cached for it. They only need to re-read the group.
+        self.publish_invalidation(RouteInvalidation::for_group(group_id));
     }
 
-    pub fn refresh_after_delete(&self, route_id: &str) {
+    /// Takes the group id alongside the route id so the invalidation
+    /// can name the group siblings must re-read; every caller has the
+    /// route record in hand anyway.
+    pub fn refresh_after_delete(&self, group_id: &str, route_id: &str) {
         self.routes
             .write()
             .expect("poisoned")
             .retain(|r| r.id != route_id);
         self.components.lock().expect("poisoned").remove(route_id);
         self.engine_js.lock().expect("poisoned").remove(route_id);
+        self.publish_invalidation(
+            RouteInvalidation::for_group(group_id).with_routes(vec![route_id.to_string()]),
+        );
     }
 
     /// Replace the in-memory record for an updated route and drop its
@@ -482,12 +541,15 @@ impl RouteTable {
         let mut routes = self.routes.write().expect("poisoned");
         routes.retain(|r| r.group_id != group_id);
         drop(routes);
-        let mut cache = self.components.lock().expect("poisoned");
-        let mut js_cache = self.engine_js.lock().expect("poisoned");
-        for id in &to_drop {
-            cache.remove(id);
-            js_cache.remove(id);
+        {
+            let mut cache = self.components.lock().expect("poisoned");
+            let mut js_cache = self.engine_js.lock().expect("poisoned");
+            for id in &to_drop {
+                cache.remove(id);
+                js_cache.remove(id);
+            }
         }
+        self.publish_invalidation(RouteInvalidation::for_group(group_id).with_routes(to_drop));
     }
 
     /// Update the denormalized `group_name` on every in-memory route in a
@@ -495,12 +557,31 @@ impl RouteTable {
     /// match key (subdomain → group) and the slugs the table reports track
     /// the new name without a full re-warm.
     pub fn refresh_after_group_rename(&self, group_id: &str, new_name: &str) {
-        let mut routes = self.routes.write().expect("poisoned");
-        for r in routes.iter_mut() {
-            if r.group_id == group_id {
-                r.group_name = new_name.to_string();
+        {
+            let mut routes = self.routes.write().expect("poisoned");
+            for r in routes.iter_mut() {
+                if r.group_id == group_id {
+                    r.group_name = new_name.to_string();
+                }
             }
         }
+        // The records carry a denormalized group_name, so siblings need
+        // to re-read them; the compiled artifacts are unaffected.
+        self.publish_invalidation(RouteInvalidation::for_group(group_id));
+    }
+
+    /// Tell sibling replicas that a group's route set changed.
+    ///
+    /// Sits here rather than at the API layer so every existing
+    /// `refresh_*` call site — REST, MCP, UI, and the lifecycle sweeper
+    /// alike — gets invalidation without being edited, and so there is
+    /// exactly one place where the local update and the remote
+    /// notification are kept in step.
+    ///
+    /// Never called on the receiving path: [`apply_invalidation`] does
+    /// not publish, so an event cannot loop between replicas.
+    fn publish_invalidation(&self, event: RouteInvalidation) {
+        crate::bus::publish_route_invalidation(self.registry.storage(), &event);
     }
 
     pub fn registry(&self) -> &Registry {
@@ -590,6 +671,83 @@ mod tests {
         let registry = Arc::new(Registry::new(Storage::in_memory()));
         let engine = Engine::default();
         RouteTable::warm(registry, engine).unwrap()
+    }
+
+    /// The receiving half of cross-replica invalidation, exercised
+    /// in-process. The transport itself is a no-op on the in-memory
+    /// backend by construction, so the wire path is covered at tier 3
+    /// against a real server (`valkey_storage.rs`); what is worth
+    /// pinning here is that applying an event does the two things it
+    /// must, and is safe to apply twice.
+    #[test]
+    fn apply_invalidation_reloads_records_and_evicts_artifacts() {
+        let table = route_table();
+        let route = add(&table, &["GET"], "/v1/charges");
+
+        // Warm the artifact cache the way a dispatch would. The bytes
+        // are not a real component, so compilation fails — but the
+        // transpile cache is reachable without wasmtime, so use that as
+        // the observable artifact instead.
+        table
+            .engine_js
+            .lock()
+            .unwrap()
+            .insert(route.id.clone(), Arc::from("stale js"));
+        assert!(table.engine_js.lock().unwrap().contains_key(&route.id));
+
+        // Another replica deleted it: the record is gone from storage,
+        // but this table still has both the record and the artifact.
+        table
+            .registry()
+            .delete_route(&route.group_name, route.number)
+            .unwrap();
+        assert!(
+            table.find_match("GET", "/v1/charges").is_some(),
+            "still matching from cache before the invalidation"
+        );
+
+        table.apply_invalidation(&route.group_id, std::slice::from_ref(&route.id));
+
+        assert!(
+            table.find_match("GET", "/v1/charges").is_none(),
+            "record dropped by the reload"
+        );
+        assert!(
+            !table.engine_js.lock().unwrap().contains_key(&route.id),
+            "artifact evicted — a reload alone would have left it behind"
+        );
+    }
+
+    #[test]
+    fn apply_invalidation_is_idempotent() {
+        // The publishing replica hears its own message back, so applying
+        // twice has to be a no-op rather than a double-drop.
+        let table = route_table();
+        let route = add(&table, &["GET"], "/v1/charges");
+
+        table.apply_invalidation(&route.group_id, &[]);
+        table.apply_invalidation(&route.group_id, &[]);
+
+        assert!(
+            table.find_match("GET", "/v1/charges").is_some(),
+            "the route still exists in storage, so reloading twice keeps it"
+        );
+        assert_eq!(table.snapshot().len(), 1, "no duplicate records");
+    }
+
+    #[test]
+    fn applying_an_invalidation_satisfies_the_read_through_rate_limit() {
+        // An invalidation has just read storage, so the read-through has
+        // nothing to add for a while; it should not immediately re-read
+        // on the next miss.
+        let table = route_table();
+        let route = add(&table, &["GET"], "/v1/charges");
+        table.apply_invalidation(&route.group_id, &[]);
+
+        assert!(
+            !table.revalidate_group(&route.group_id, &route.group_name),
+            "the slot was consumed by the invalidation"
+        );
     }
 
     fn add(table: &RouteTable, methods: &[&str], path: &str) -> Route {
@@ -718,7 +876,7 @@ mod tests {
         let table = route_table();
         let route = add(&table, &["GET"], "/v1/charges");
         assert!(table.find_match("GET", "/v1/charges").is_some());
-        table.refresh_after_delete(&route.id);
+        table.refresh_after_delete(&route.group_id, &route.id);
         assert!(table.find_match("GET", "/v1/charges").is_none());
     }
 

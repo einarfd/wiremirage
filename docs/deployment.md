@@ -210,12 +210,16 @@ two of its items have landed:
   reachable from another without waiting for a restart: a match miss for a
   group that exists reloads that group from Valkey and retries once, at most
   once per group per 5s.
+- **Route deletes and updates invalidate across replicas.** Mutations publish
+  on a Valkey pub/sub channel; every replica subscribes and drops the affected
+  records and compiled artifacts. This is what the read-through can't do on its
+  own — a stale route still matches, so it never reaches the miss path. A lost
+  message degrades to the read-through's staleness window rather than lasting
+  until a restart.
 
 What still assumes a single host: the journal live-tail broadcast bus (a tail
-would see only the traffic its own replica dispatched), route-table
-invalidation for *deletes and source updates* (a stale route keeps matching, so
-it never reaches the miss path the read-through lives on), the login throttle
-(N replicas would allow N times the failed-login budget), and the group sweeper
+would see only the traffic its own replica dispatched), the login throttle (N
+replicas would allow N times the failed-login budget), and the group sweeper
 (every replica sweeps; harmless but duplicated).
 
 Until those land, run one instance and scale Valkey instead.

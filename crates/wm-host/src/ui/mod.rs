@@ -2721,7 +2721,9 @@ async fn route_delete_form(
     if let Err(e) = state.routes().registry().delete_route(&group_ref, number) {
         return ui_error_500(&state, &auth, format!("delete: {e}"));
     }
-    state.routes().refresh_after_delete(&route.id);
+    state
+        .routes()
+        .refresh_after_delete(&route.group_id, &route.id);
     // Redirect back to the group's detail page if the group still
     // exists (implicit single-route groups vanish along with their
     // sole route), otherwise the listing.

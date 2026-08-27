@@ -41,7 +41,11 @@ axum = "0.8"
 http = "1"
 hyper = { version = "1", features = ["http1", "server"] }
 reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls", "stream"] }
-redis = "1"
+# `tokio-comp` pulls in the async connection types (`redis::aio`). The
+# sync API covers every request-path operation — a connection per op on
+# a blocking thread — but a pub/sub subscriber has to sit and wait for
+# server pushes, which the sync API cannot do. See ADR-0037.
+redis = { version = "1", features = ["tokio-comp"] }
 testcontainers = { version = "0.28", features = ["blocking"] }
 ulid = "3"
 base64 = "0.23"
