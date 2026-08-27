@@ -9,6 +9,18 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Removed
+
+- The `/ui/admin/health` placeholder page. The admin health screen and
+  `GET /api/admin/health` are **not planned**: the OTLP spans and metric
+  catalog cover the diagnostic case, and the shipped `/health` and `/ready`
+  probes cover the operational one.
+- Owner transfer (`PATCH /api/groups/{group}` with `owner_id`) and the
+  `/api/admin/sessions` endpoints are likewise dropped from the design. Both
+  were specified but never implemented; groups TTL out on their own and admins
+  already have write access to any group, and session enumeration is more
+  machinery than "sign out everywhere" needs.
+
 ## [0.1.0] — 2026-08-26
 
 First public release.

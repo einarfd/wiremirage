@@ -183,7 +183,6 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(revoke_oauth_grant_form),
         )
         .route("/ui/settings", get(stub_settings))
-        .route("/ui/admin/health", get(stub_admin_health))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             csrf::csrf_middleware,
@@ -3836,13 +3835,6 @@ async fn stub_settings(State(state): State<AppState>, auth: AuthContext) -> Resp
         return forbidden_page(&state, &auth);
     }
     stub(&state, &auth, "Settings", "GET /api/users + /api/tokens")
-}
-
-async fn stub_admin_health(State(state): State<AppState>, auth: AuthContext) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
-    stub(&state, &auth, "Admin health", "GET /health and /ready")
 }
 
 fn stub(state: &AppState, auth: &AuthContext, title: &str, api_hint: &str) -> Response {

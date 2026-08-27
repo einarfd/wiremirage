@@ -343,7 +343,7 @@ async fn placeholder_pages_render_with_api_hint() {
 }
 
 #[tokio::test]
-async fn admin_only_stubs_are_forbidden_for_non_admin() {
+async fn admin_only_pages_are_forbidden_for_non_admin() {
     let h = start_with_users("admin@test.example:devpassword:admin,user@test.example:devpassword")
         .await;
     let client = no_redirect_client();
@@ -367,19 +367,32 @@ async fn admin_only_stubs_are_forbidden_for_non_admin() {
     let session_cookie = pick_set_cookie(&resp, "wm_session").expect("session");
     let cookie = format!("wm_csrf={csrf_cookie}; wm_session={session_cookie}");
 
-    // Admin-only stubs should return 403 (rendered through the same
-    // placeholder template but with `Forbidden` title). `/ui/unmatched`
-    // is no longer here: ADR-0030 made it owner-scoped (a non-admin gets a
-    // 200 with only their own groups' entries) — see ui_unmatched_pages.rs.
-    for path in ["/ui/settings", "/ui/admin/health"] {
-        let resp = client
-            .get(url(&h, path))
-            .header("cookie", &cookie)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status().as_u16(), 403, "non-admin GET {path}");
-    }
+    // Admin-only pages return 403 (rendered through the placeholder
+    // template with a `Forbidden` title). `/ui/unmatched` is no longer
+    // here: ADR-0030 made it owner-scoped (a non-admin gets a 200 with
+    // only their own groups' entries) — see ui_unmatched_pages.rs.
+    // `/ui/admin/health` is gone entirely: the admin health screen is
+    // not planned, so the route was deleted rather than left as a
+    // placeholder. It 404s like any other unknown path now.
+    let resp = client
+        .get(url(&h, "/ui/settings"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 403, "non-admin GET /ui/settings");
+
+    let resp = client
+        .get(url(&h, "/ui/admin/health"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "the admin health placeholder was removed, not left standing"
+    );
 }
 
 #[tokio::test]
