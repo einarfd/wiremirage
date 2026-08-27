@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
 
 use crate::AppState;
@@ -41,7 +41,7 @@ pub fn router(state: AppState) -> Router {
     let factory_state = state.clone();
     let service = StreamableHttpService::new(
         move || Ok(WmMcpServer::new(factory_state.clone())),
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(NeverSessionManager::default()),
         config,
     );
 
@@ -68,7 +68,28 @@ pub fn router(state: AppState) -> Router {
 /// `WM_TRUSTED_PROXY` value) are added on top of the localhost defaults,
 /// which remain so the dev path keeps working.
 fn mcp_server_config(extra_hosts: &[String]) -> StreamableHttpServerConfig {
-    let cfg = StreamableHttpServerConfig::default();
+    // The struct is `#[non_exhaustive]`, so fields are set on the
+    // default rather than through a struct expression.
+    let mut cfg = StreamableHttpServerConfig::default();
+    // ADR-0037 item 3: the transport is stateless, so a client's
+    // follow-up request can land on any replica. This is viable because
+    // the MCP server has *no* server-initiated messages — every tool,
+    // the two long-running streaming ones included, is a plain request
+    // that blocks and returns a result. Nothing needs a channel the
+    // server can push down between requests.
+    //
+    // The protocol is going the same way on its own: SEP-2567 removes
+    // sessions as of version 2026-07-28, and rmcp already serves
+    // clients negotiating that version statelessly whatever this says.
+    // Legacy clients lose only SSE reconnection priming, which a
+    // request-response tool set never uses; with legacy session mode
+    // off their requests take the stateless path rather than being
+    // rejected.
+    cfg.legacy_session_mode = false;
+    // The natural companion: plain JSON for simple request-response
+    // tools. rmcp still falls back to text/event-stream if a handler
+    // emits anything before its final response.
+    cfg.json_response = true;
     if extra_hosts.is_empty() {
         return cfg;
     }

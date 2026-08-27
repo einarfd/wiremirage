@@ -9,6 +9,18 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The MCP transport is stateless** (ADR-0037, first slice). No `Mcp-Session-Id`
+  is issued, `GET` and `DELETE` on `/api/mcp` return 405, and simple tools answer
+  with plain JSON instead of an SSE frame. This is what lets consecutive MCP
+  requests be served by different replicas. It is safe because the server sends
+  no server-initiated messages — every tool, the two long-running streaming ones
+  included, is a request that blocks and returns — and the protocol is removing
+  sessions anyway in version 2026-07-28 (SEP-2567). Clients need no change: a
+  server may decline to issue a session id, and the client's obligation to echo
+  one is conditional on having been given one.
+
 ### Added
 
 - **Settings page at `/ui/settings`** (admins only, linked from the nav). Full
