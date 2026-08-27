@@ -200,8 +200,22 @@ Then the first-deploy checklist:
 
 ## Scaling
 
-One replica. Several pieces of per-process state — the route-table cache, the
-journal live-tail broadcast bus, the MCP transport's session map, the login
-throttle, and the group sweeper — assume a single host today.
-[ADR-0037](adr/0037-multi-replica-readiness.md) is the plan for lifting that;
-until it lands, run one instance and scale Valkey instead.
+One replica, still — but the gap is closing.
+[ADR-0037](adr/0037-multi-replica-readiness.md) is being worked through, and
+two of its items have landed:
+
+- **The MCP transport is stateless**, so consecutive MCP requests may be served
+  by different replicas.
+- **The route table revalidates on a miss.** A route created on one replica is
+  reachable from another without waiting for a restart: a match miss for a
+  group that exists reloads that group from Valkey and retries once, at most
+  once per group per 5s.
+
+What still assumes a single host: the journal live-tail broadcast bus (a tail
+would see only the traffic its own replica dispatched), route-table
+invalidation for *deletes and source updates* (a stale route keeps matching, so
+it never reaches the miss path the read-through lives on), the login throttle
+(N replicas would allow N times the failed-login budget), and the group sweeper
+(every replica sweeps; harmless but duplicated).
+
+Until those land, run one instance and scale Valkey instead.

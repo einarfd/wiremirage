@@ -807,6 +807,15 @@ impl Registry {
         Ok(out)
     }
 
+    /// Routes belonging to one group, read fresh from storage. The
+    /// public face of `list_routes_in_group`, used by the route table's
+    /// read-through revalidation (ADR-0037 item 1) to re-sync a single
+    /// group without reloading the whole table.
+    pub fn routes_in_group(&self, group_id: &str) -> Result<Vec<Route>, RegistryError> {
+        let mut bucket = self.bucket()?;
+        self.list_routes_in_group(&mut bucket, group_id)
+    }
+
     /// Routes belonging to one group, via the `route:in-group:{group_id}`
     /// set. Conflict detection scopes to this (ADR-0030: each group is its
     /// own path namespace / subdomain).

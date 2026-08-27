@@ -748,44 +748,66 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                 }
             };
 
-            span.record("outcome", "unmatched_404");
-            // Near-misses scoped to this group (ADR-0030) so "did you
-            // mean…?" suggestions stay within the tenant's own routes.
-            let near_misses: Vec<UnmatchedNearMiss> = state
-                .routes()
-                .compute_near_misses_in_group(&group_name, method.as_str(), uri.path())
-                .into_iter()
-                .map(project_near_miss)
-                .collect();
-            // Journal the unmatched request, attributed to the group it was
-            // addressed to (ADR-0030) so the group's owner can see it — not
-            // just admins. Best-effort: a journal failure is logged but
-            // doesn't change what the SUT sees.
-            let envelope = build_request_envelope(
-                &method,
-                &uri,
-                &header_map,
-                body_bytes,
-                UNMATCHED_BODY_LIMIT,
-            );
-            if let Err(e) = state.journal().record_unmatched(NewUnmatchedEntry {
-                trace_id: trace_id.clone(),
-                group_id: group.id.clone(),
-                group_name: group.name.clone(),
-                request: envelope,
-                near_misses,
-            }) {
-                tracing::warn!(error = %e, "failed to record unmatched journal entry");
+            // ADR-0037 item 1: the local route table is a cache, and
+            // under more than one replica a route created elsewhere may
+            // simply not be in it yet — the common agent workflow is
+            // "create a route, immediately send traffic to it". Reload
+            // this group from storage and try once more before calling
+            // it unmatched. Rate-limited per group inside the table, so
+            // junk traffic can't amplify into a storage flood.
+            match state
+                .routes
+                .revalidate_and_rematch(&group.id, &group.name, method.as_str(), path)
+            {
+                Some(m) => {
+                    tracing::debug!(
+                        group = %group.name,
+                        route = %m.route.number,
+                        "route resolved by read-through revalidation"
+                    );
+                    m
+                }
+                None => {
+                    span.record("outcome", "unmatched_404");
+                    // Near-misses scoped to this group (ADR-0030) so "did you
+                    // mean…?" suggestions stay within the tenant's own routes.
+                    let near_misses: Vec<UnmatchedNearMiss> = state
+                        .routes()
+                        .compute_near_misses_in_group(&group_name, method.as_str(), uri.path())
+                        .into_iter()
+                        .map(project_near_miss)
+                        .collect();
+                    // Journal the unmatched request, attributed to the group it was
+                    // addressed to (ADR-0030) so the group's owner can see it — not
+                    // just admins. Best-effort: a journal failure is logged but
+                    // doesn't change what the SUT sees.
+                    let envelope = build_request_envelope(
+                        &method,
+                        &uri,
+                        &header_map,
+                        body_bytes,
+                        UNMATCHED_BODY_LIMIT,
+                    );
+                    if let Err(e) = state.journal().record_unmatched(NewUnmatchedEntry {
+                        trace_id: trace_id.clone(),
+                        group_id: group.id.clone(),
+                        group_name: group.name.clone(),
+                        request: envelope,
+                        near_misses,
+                    }) {
+                        tracing::warn!(error = %e, "failed to record unmatched journal entry");
+                    }
+                    crate::metrics::record_dispatch(
+                        method.as_str(),
+                        404,
+                        "unmatched_404",
+                        started.elapsed().as_millis() as u64,
+                    );
+                    let mut resp = not_found_response("no route matched");
+                    inject_response_trace_id(&trace_id, resp.headers_mut());
+                    return Ok(resp);
+                }
             }
-            crate::metrics::record_dispatch(
-                method.as_str(),
-                404,
-                "unmatched_404",
-                started.elapsed().as_millis() as u64,
-            );
-            let mut resp = not_found_response("no route matched");
-            inject_response_trace_id(&trace_id, resp.headers_mut());
-            return Ok(resp);
         }
     };
 

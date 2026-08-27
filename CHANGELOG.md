@@ -9,6 +9,19 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Added
+
+- **The route table revalidates on a match miss** (ADR-0037). When a request
+  for a group that exists matches nothing, the dispatcher reloads that group's
+  routes from storage and retries once — so a route created on one replica is
+  reachable from another without a restart, which is the common agent workflow
+  of creating a route and immediately sending traffic to it. Rate-limited to
+  one reload per group per 5s, because unmatched traffic is precisely the
+  traffic that misses and an unbounded read-through would let junk traffic
+  amplify into a storage read per request. This makes `storage-model.md`'s
+  cache-coherence guarantee true for the first time; it does not yet cover
+  deletes or source updates, where a stale route still matches.
+
 ### Changed
 
 - **The MCP transport is stateless** (ADR-0037, first slice). No `Mcp-Session-Id`

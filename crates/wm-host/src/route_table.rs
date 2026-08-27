@@ -2,13 +2,27 @@
 //! their compiled wasmtime `Component`s. The dispatch handler queries this
 //! on every incoming request rather than hitting the registry directly.
 //!
-//! Slice 3 is single-host: writes go through `POST /api/routes` and
-//! `DELETE /api/routes/...`, which call `refresh_*` on the table to keep
-//! it in sync with the registry. Multi-host coherence (Valkey keyspace
-//! notifications per `storage-model.md`) is a slice 4 concern.
+//! Writes go through `POST /api/routes` and `DELETE /api/routes/...`,
+//! which call `refresh_*` on the table to keep it in sync with the
+//! registry — but only on the replica that served the API call.
+//!
+//! Under more than one replica that is not enough, so ADR-0037 adds a
+//! **read-through floor**: on a match miss for a group that exists, the
+//! dispatcher asks [`RouteTable::revalidate_and_rematch`] to reload that
+//! group's routes from storage and try once more. That makes the
+//! readiness guarantee in `storage-model.md` true — a committed route
+//! creation is reachable from any replica — without depending on
+//! message delivery.
+//!
+//! The floor covers creates, which are the common agent workflow
+//! (create a route, immediately send traffic). It cannot cover deletes
+//! or source updates: a stale route still matches, so those requests
+//! never reach the miss path. Making those timely is the job of the
+//! pub/sub invalidation that lands on top of this.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use wasmtime::Engine;
@@ -23,6 +37,14 @@ pub struct MatchedRoute {
     pub matched_pattern: String,
     pub path_params: Vec<(String, String)>,
 }
+
+/// Floor on how often one group may be revalidated from storage by the
+/// read-through path (ADR-0037 item 1). This rate limit is load-bearing,
+/// not a nicety: unmatched traffic is precisely the traffic that misses,
+/// so an unbounded read-through would turn junk traffic into a storage
+/// amplifier. Bounded this way the cost is one group reload per group
+/// per interval however hard a broken client or an attacker pushes.
+const DEFAULT_REVALIDATE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Cap on how many near-misses we surface for one match probe. The
 /// near-miss list is for human/agent debugging; if there are dozens
@@ -80,6 +102,13 @@ pub struct RouteTable {
     /// shared engine actually runs is derived once and cached here, keyed by
     /// route id and evicted on update/delete exactly like `components`.
     engine_js: Mutex<HashMap<String, Arc<str>>>,
+    /// Last read-through revalidation per group **id** (ADR-0037 item
+    /// 1). Keyed by id rather than by the requested host label so the
+    /// map is bounded by the number of real groups — the dispatcher
+    /// only revalidates after resolving the group, so an unknown
+    /// subdomain can never add an entry.
+    revalidated_at: Mutex<HashMap<String, Instant>>,
+    revalidate_interval: Duration,
 }
 
 impl RouteTable {
@@ -93,6 +122,32 @@ impl RouteTable {
             routes: RwLock::new(routes),
             components: Mutex::new(HashMap::new()),
             engine_js: Mutex::new(HashMap::new()),
+            revalidated_at: Mutex::new(HashMap::new()),
+            revalidate_interval: DEFAULT_REVALIDATE_INTERVAL,
+        }))
+    }
+
+    /// Same as [`warm`], with the read-through rate limit overridden.
+    /// Tests use a zero interval to exercise the reload deterministically
+    /// instead of sleeping through the default.
+    pub fn warm_with_revalidate_interval(
+        registry: Arc<Registry>,
+        engine: Engine,
+        revalidate_interval: Duration,
+    ) -> Result<Arc<Self>> {
+        let table = Self::warm(registry, engine)?;
+        // `warm` returns an Arc and the field is not shared yet, so this
+        // is the one point where mutating it is sound without interior
+        // mutability. Rebuild instead of unwrapping the Arc.
+        let routes = table.routes.read().expect("poisoned").clone();
+        Ok(Arc::new(Self {
+            registry: table.registry.clone(),
+            engine: table.engine.clone(),
+            routes: RwLock::new(routes),
+            components: Mutex::new(HashMap::new()),
+            engine_js: Mutex::new(HashMap::new()),
+            revalidated_at: Mutex::new(HashMap::new()),
+            revalidate_interval,
         }))
     }
 
@@ -165,6 +220,70 @@ impl RouteTable {
             }
         }
         best_tail.map(|(_, m)| m)
+    }
+
+    /// ADR-0037 item 1 — the read-through floor. Called by the
+    /// dispatcher after a match miss, once it has resolved the request's
+    /// host to a real group: reload that group's routes from storage and
+    /// retry the match exactly once.
+    ///
+    /// This is what makes a route created on another replica reachable
+    /// here without waiting for a message or a restart. It deliberately
+    /// takes a resolved `(group_id, group_name)` rather than the raw
+    /// host label — an unknown subdomain must never reach this path, or
+    /// junk traffic could both amplify storage reads and grow the rate-
+    /// limit map without bound.
+    ///
+    /// Returns `None` when the rate limit declined the reload, when the
+    /// reload failed, or when the group genuinely has no matching route.
+    /// A storage error is logged and swallowed: the caller's next step
+    /// either way is the unmatched path, and a revalidation failure
+    /// should not turn a 404 into a 500.
+    pub fn revalidate_and_rematch(
+        &self,
+        group_id: &str,
+        group_name: &str,
+        method: &str,
+        path: &str,
+    ) -> Option<MatchedRoute> {
+        if !self.revalidate_group(group_id, group_name) {
+            return None;
+        }
+        self.find_match_filtered(Some(group_name), method, path)
+    }
+
+    /// Reload one group's routes from storage into the table, replacing
+    /// whatever was cached for it. Returns whether a reload actually
+    /// happened.
+    fn revalidate_group(&self, group_id: &str, group_name: &str) -> bool {
+        {
+            let mut seen = self.revalidated_at.lock().expect("poisoned");
+            let now = Instant::now();
+            if let Some(last) = seen.get(group_id)
+                && now.duration_since(*last) < self.revalidate_interval
+            {
+                return false;
+            }
+            seen.insert(group_id.to_string(), now);
+        }
+        let fresh = match self.registry.routes_in_group(group_id) {
+            Ok(routes) => routes,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    group_id,
+                    group_name,
+                    "read-through revalidation failed; serving the cached route set"
+                );
+                return false;
+            }
+        };
+        let mut routes = self.routes.write().expect("poisoned");
+        // Replace rather than merge: the freshly-read set is the truth
+        // for this group, so this also drops routes deleted elsewhere.
+        routes.retain(|r| r.group_id != group_id);
+        routes.extend(fresh);
+        true
     }
 
     /// Run the match probe across **all** groups: the actual match if any,
