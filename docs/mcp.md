@@ -82,8 +82,9 @@ management is deliberately absent** — admins do that from the CLI or UI
 and return accumulated entries when their stop condition fires (count plus
 timeout; max-entries plus idle timeout). They see traffic that arrives *while
 they're waiting* — for a request that already completed, use `list_journal`.
-The bus is per-process today; fanning it out across replicas is part of
-[ADR-0037](adr/0037-multi-replica-readiness.md).
+Under multiple replicas the bus fans out over Valkey pub/sub
+([ADR-0037](adr/0037-multi-replica-readiness.md)), so a tool sees traffic
+dispatched by any replica rather than only the one serving it.
 
 ## Values on the wire
 

@@ -292,3 +292,146 @@ async fn a_delete_on_one_replica_stops_the_route_serving_on_another() {
         "replica B stopped serving the deleted route"
     );
 }
+
+// -- Cross-replica journal fan-out (ADR-0037 item 2) ------------------------
+
+/// Boot a replica and return its address plus a *live tail* on its journal.
+/// The tail is opened before the subscriber is awaited so that demand
+/// exists when the subscriber looks for it — that is the lazy-subscribe
+/// contract, and opening them the other way round would hang.
+async fn boot_replica_with_tail(
+    url: &str,
+) -> (
+    String,
+    tokio::sync::broadcast::Receiver<wm_host::journal::JournalEvent>,
+    tokio::task::JoinHandle<()>,
+) {
+    let storage = Storage::valkey(url).expect("connect");
+    let auth = Auth::new(storage.clone());
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    let journal = Journal::new(storage.clone());
+    // Attach the tail first: the subscriber idles until a local tail
+    // exists, so demand has to be there before we wait on readiness.
+    let rx = journal.subscribe();
+    let mut subscriber = wm_host::bus::spawn_journal_subscriber(journal.clone())
+        .expect("valkey spawns a subscriber");
+    subscriber.wait_ready().await;
+    let app = router(AppState::new(runtime, routes, auth, journal));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (addr, rx, server)
+}
+
+#[tokio::test]
+async fn a_tail_on_one_replica_sees_traffic_dispatched_by_another() {
+    let url = tokio::task::spawn_blocking(|| shared().url.clone())
+        .await
+        .expect("init valkey container");
+
+    let storage = Storage::valkey(&url).expect("connect");
+    let registry = Registry::new(storage.clone());
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/bump".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: counter_bytes(),
+            source: None,
+            owner_id: "test-owner".into(),
+        })
+        .expect("create route");
+    let group = route.group_name.clone();
+
+    // A is where the traffic lands; B is where somebody is watching.
+    let (addr_a, _rx_a, _srv_a) = boot_replica_with_tail(&url).await;
+    let (_addr_b, mut rx_b, _srv_b) = boot_replica_with_tail(&url).await;
+
+    assert_eq!(mock_status(&addr_a, &group, "/bump").await, 200);
+
+    // Before the fan-out, B's tail would simply never fire: the event
+    // went to A's in-process broadcast and stopped there.
+    //
+    // Scan for *this* group's event rather than asserting on the first
+    // one to arrive. The subscription is a pattern over every group and
+    // the tier-3 tests share one Valkey in parallel, so a sibling
+    // test's traffic can legitimately reach this tail first.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut seen = false;
+    while !seen && std::time::Instant::now() < deadline {
+        let remaining = deadline - std::time::Instant::now();
+        match tokio::time::timeout(remaining, rx_b.recv()).await {
+            Ok(Ok(wm_host::journal::JournalEvent::Handled(r))) if r.group_name == group => {
+                assert_eq!(r.request.path, "/bump");
+                seen = true;
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => panic!("B's tail closed or lagged: {e:?}"),
+            Err(_) => break,
+        }
+    }
+    assert!(seen, "B's tail saw the request dispatched by A");
+}
+
+#[tokio::test]
+async fn the_dispatching_replica_delivers_each_event_exactly_once() {
+    // The origin hears its own event back through Valkey rather than
+    // being fed locally as well — publishing both ways would deliver
+    // twice on the replica that served the request.
+    let url = tokio::task::spawn_blocking(|| shared().url.clone())
+        .await
+        .expect("init valkey container");
+
+    let storage = Storage::valkey(&url).expect("connect");
+    let registry = Registry::new(storage.clone());
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/bump".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: counter_bytes(),
+            source: None,
+            owner_id: "test-owner".into(),
+        })
+        .expect("create route");
+    let group = route.group_name.clone();
+
+    let (addr, mut rx, _srv) = boot_replica_with_tail(&url).await;
+    assert_eq!(mock_status(&addr, &group, "/bump").await, 200);
+
+    // Count deliveries *of this group's* event. The subscription is a
+    // pattern over every group, and the tier-3 tests share one Valkey
+    // and run in parallel, so a sibling test's traffic legitimately
+    // arrives on this tail too — filtering is what makes the assertion
+    // about delivery-exactly-once rather than about who else is busy.
+    let mut mine = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline - std::time::Instant::now();
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(wm_host::journal::JournalEvent::Handled(r))) if r.group_name == group => {
+                mine += 1;
+            }
+            // Someone else's traffic, or an unmatched event: not ours.
+            Ok(Ok(_)) => continue,
+            // Lagged or closed: stop counting rather than spin.
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        mine, 1,
+        "the origin hears its own event back through Valkey exactly once — \
+         publishing locally *and* remotely would deliver it twice"
+    );
+}

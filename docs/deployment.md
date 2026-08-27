@@ -217,9 +217,13 @@ two of its items have landed:
   message degrades to the read-through's staleness window rather than lasting
   until a restart.
 
-What still assumes a single host: the journal live-tail broadcast bus (a tail
-would see only the traffic its own replica dispatched), the login throttle (N
-replicas would allow N times the failed-login budget), and the group sweeper
-(every replica sweeps; harmless but duplicated).
+- **Live journal tails span replicas.** A tail sees traffic dispatched by any
+  replica, not just the one holding the connection. Replicas subscribe only
+  while something is actually tailing them, so this costs nothing when nobody
+  is watching.
+
+What still assumes a single host: the login throttle (N replicas would allow N
+times the failed-login budget) and the group sweeper (every replica sweeps;
+harmless but duplicated). Both degrade rather than break.
 
 Until those land, run one instance and scale Valkey instead.

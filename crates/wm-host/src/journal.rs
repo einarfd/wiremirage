@@ -37,6 +37,8 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
+use std::sync::Arc;
+
 use crate::store::{Bucket, Storage, StoreError};
 
 const HANDLED_TTL_SECONDS: u64 = 3600;
@@ -352,29 +354,93 @@ pub fn truncate_body(body: Vec<u8>, limit: usize) -> (Vec<u8>, usize, bool) {
 /// because consumers (the SSE endpoint, the MCP streaming tools) are
 /// interested in the same events the journal already stores.
 ///
-/// Single-host fan-out only: the bus is in-process, so sibling hosts
-/// in a multi-host deployment won't observe each other's events. A
-/// follow-up slice can put Valkey pub/sub behind the same shape if
-/// multi-host becomes real.
+/// Fan-out is two-stage under Valkey (ADR-0037 item 2): the dispatching
+/// replica publishes to a per-group channel, one subscriber task per
+/// replica pulls events off it and re-sends them into *this* local
+/// broadcast, and every existing subscriber is untouched — only the
+/// feed changes. On the in-memory backend there are no siblings, so the
+/// local broadcast is fed directly.
 ///
 /// Variants are boxed so cloning around the broadcast bus is cheap —
 /// a `JournalRecord` is ~500 bytes, and the channel capacity is 256.
-#[derive(Debug, Clone)]
+/// The serialized form is what crosses the wire; bodies are already
+/// capped at 16 KiB by the record types, which is why the payload is
+/// the record itself rather than an id to re-fetch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum JournalEvent {
     Handled(Box<JournalRecord>),
     Unmatched(Box<UnmatchedRecord>),
+}
+
+impl JournalEvent {
+    /// The group this event belongs to — the channel it publishes on.
+    pub fn group_id(&self) -> &str {
+        match self {
+            JournalEvent::Handled(r) => &r.group_id,
+            JournalEvent::Unmatched(r) => &r.group_id,
+        }
+    }
+}
+
+/// Channel prefix for journal fan-out. One channel per group, so a
+/// future group-scoped subscription can avoid deserializing other
+/// tenants' traffic without a wire-format change.
+pub const JOURNAL_CHANNEL_PREFIX: &str = "wm:journal:";
+
+/// Pattern covering every group's journal channel.
+pub const JOURNAL_CHANNEL_PATTERN: &str = "wm:journal:*";
+
+/// The channel a group's journal events are published on.
+pub fn journal_channel(group_id: &str) -> String {
+    format!("{JOURNAL_CHANNEL_PREFIX}{group_id}")
 }
 
 #[derive(Clone)]
 pub struct Journal {
     storage: Storage,
     bus: broadcast::Sender<JournalEvent>,
+    /// Woken whenever a local tail subscribes, so the cross-replica
+    /// subscriber can connect on demand instead of polling for it.
+    demand: Arc<tokio::sync::Notify>,
 }
 
 impl Journal {
     pub fn new(storage: Storage) -> Self {
         let (bus, _) = broadcast::channel(JOURNAL_BUS_CAPACITY);
-        Self { storage, bus }
+        Self {
+            storage,
+            bus,
+            demand: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// Borrow the backing storage, for the fan-out subscriber.
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
+    /// How many local tails are currently attached. Drives lazy
+    /// subscription: with nobody tailing, a replica should not be
+    /// deserializing every other replica's traffic.
+    pub fn local_subscriber_count(&self) -> usize {
+        self.bus.receiver_count()
+    }
+
+    /// Wait until a local tail attaches. Returns immediately if one
+    /// already has.
+    pub async fn await_demand(&self) {
+        if self.bus.receiver_count() > 0 {
+            return;
+        }
+        self.demand.notified().await;
+    }
+
+    /// Feed an event into the local broadcast. Used only by the
+    /// cross-replica subscriber — the publish path must not also
+    /// deliver locally, or the originating replica would see every
+    /// event twice.
+    pub fn deliver_local(&self, event: JournalEvent) {
+        let _ = self.bus.send(event);
     }
 
     fn bucket(&self) -> Result<Bucket, JournalError> {
@@ -385,14 +451,44 @@ impl Journal {
     /// for handling `Lagged` errors — a slow consumer can fall behind
     /// the bus capacity.
     pub fn subscribe(&self) -> broadcast::Receiver<JournalEvent> {
-        self.bus.subscribe()
+        let rx = self.bus.subscribe();
+        // Signal *after* the receiver exists, so a subscriber task
+        // waking on this immediately sees a non-zero count.
+        self.demand.notify_waiters();
+        rx
     }
 
-    /// Publish helper. `broadcast::Sender::send` returns `Err` only
-    /// when there are zero active receivers, which is normal — the
-    /// bus is best-effort and we drop events silently in that case.
-    fn publish(&self, event: JournalEvent) {
-        let _ = self.bus.send(event);
+    /// Publish helper, taking the caller's bucket so the Valkey
+    /// PUBLISH rides the connection the journal write just used rather
+    /// than paying a second round trip on the dispatch hot path.
+    ///
+    /// In-memory: straight into the local broadcast, as before.
+    ///
+    /// Valkey: published to the group's channel and *not* delivered
+    /// locally. The originating replica receives its own event back
+    /// through the subscriber, which keeps one uniform delivery path —
+    /// publishing both ways would double-deliver on the origin.
+    ///
+    /// `broadcast::Sender::send` returns `Err` only when there are zero
+    /// receivers, which is normal; the bus is best-effort either way.
+    fn publish(&self, bucket: &mut Bucket, event: JournalEvent) {
+        if !self.storage.is_distributed() {
+            let _ = self.bus.send(event);
+            return;
+        }
+        // Nobody anywhere is tailing if this replica has no local
+        // subscribers *and* no sibling subscribed — but we cannot know
+        // the latter, so publish unconditionally. It is one pipelined
+        // command against an operation that already wrote several keys.
+        let channel = journal_channel(event.group_id());
+        match serde_json::to_vec(&event) {
+            Ok(payload) => {
+                if let Err(e) = bucket.publish(&channel, payload) {
+                    tracing::warn!(error = %e, channel, "publishing journal event");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "encoding journal event"),
+        }
     }
 
     // -- Handled requests ---------------------------------------------------
@@ -434,7 +530,7 @@ impl Journal {
             &format!("journal:by-number:{}:{}", record.group_id, record.number),
             record.id.as_bytes().to_vec(),
         )?;
-        self.publish(JournalEvent::Handled(Box::new(record.clone())));
+        self.publish(&mut bucket, JournalEvent::Handled(Box::new(record.clone())));
         Ok(record)
     }
 
@@ -541,7 +637,10 @@ impl Journal {
             &format!("unmatched:by-number:{}", record.number),
             record.id.as_bytes().to_vec(),
         )?;
-        self.publish(JournalEvent::Unmatched(Box::new(record.clone())));
+        self.publish(
+            &mut bucket,
+            JournalEvent::Unmatched(Box::new(record.clone())),
+        );
         Ok(record)
     }
 

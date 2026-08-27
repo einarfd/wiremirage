@@ -218,3 +218,143 @@ async fn run_route_invalidation_session(
     }
     Ok(())
 }
+
+// -- Journal fan-out (ADR-0037 item 2) --------------------------------------
+//
+// The journal's live tail — the SSE endpoint, the two MCP streaming tools,
+// the live journal page and the group-detail live pane — reads a local
+// broadcast channel. Under more than one replica that means a tail sees only
+// the traffic its own replica happened to dispatch: roughly 1/N of matching
+// requests, with the rest never arriving. The failure is silent and partial,
+// which is worse than a loud one — an agent waiting on a request just keeps
+// waiting.
+//
+// So the dispatching replica publishes to its group's channel and every
+// replica holding a tail pulls events back into its own local broadcast.
+// Existing subscribers are untouched; only the feed changes.
+
+/// How often an active subscription re-checks whether anyone is still
+/// tailing. Dropping the subscription late costs a little deserialization;
+/// it is a cost optimization, not a correctness property, so a coarse
+/// check is fine.
+const JOURNAL_IDLE_CHECK: Duration = Duration::from_secs(5);
+
+/// A running journal fan-out subscriber.
+pub struct JournalSubscriber {
+    pub handle: tokio::task::JoinHandle<()>,
+    ready: tokio::sync::watch::Receiver<bool>,
+}
+
+impl JournalSubscriber {
+    /// Resolve once the subscription is established. Pub/sub has no
+    /// replay, so a test that publishes before this resolves would be
+    /// asserting on events that were never delivered.
+    pub async fn wait_ready(&mut self) {
+        if *self.ready.borrow() {
+            return;
+        }
+        let _ = self.ready.changed().await;
+    }
+}
+
+/// Spawn the journal fan-out subscriber.
+///
+/// **Subscribes lazily.** A replica connects only while it holds at least
+/// one local tail, and drops the subscription when the last one leaves.
+/// Without this, every replica would deserialize every event for every
+/// group whether or not anyone was watching — the one part of this design
+/// that scales with traffic times replicas. With it, the fan-out costs
+/// nothing in the common case (nobody tailing) and is paid only for the
+/// duration of an actual tail.
+///
+/// Returns `None` on the in-memory backend, where the journal feeds its
+/// local broadcast directly.
+pub fn spawn_journal_subscriber(journal: crate::journal::Journal) -> Option<JournalSubscriber> {
+    if !journal.storage().is_distributed() {
+        tracing::debug!("in-memory storage: journal fan-out is local");
+        return None;
+    }
+    let (ready_tx, ready) = tokio::sync::watch::channel(false);
+    let handle = tokio::spawn(async move {
+        let mut backoff = RECONNECT_BACKOFF_START;
+        loop {
+            // Idle until something is actually tailing here.
+            journal.await_demand().await;
+            match run_journal_session(&journal, &ready_tx).await {
+                Ok(()) => {
+                    let _ = ready_tx.send(false);
+                    backoff = RECONNECT_BACKOFF_START;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "journal fan-out subscription failed");
+                    let _ = ready_tx.send(false);
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+        }
+    });
+    Some(JournalSubscriber { handle, ready })
+}
+
+/// One subscribe-and-pump cycle. Returns `Ok` when the last local tail
+/// went away (drop the subscription and idle), `Err` on a connection
+/// fault (reconnect with backoff).
+async fn run_journal_session(
+    journal: &crate::journal::Journal,
+    ready: &tokio::sync::watch::Sender<bool>,
+) -> Result<(), String> {
+    use futures::StreamExt as _;
+
+    let mut pubsub = journal
+        .storage()
+        .pubsub()
+        .await
+        .ok_or_else(|| "storage is not distributed".to_string())?
+        .map_err(|e| format!("{e}"))?;
+    // A pattern subscription covers every group. Per-group channels are
+    // still what publishers use, so narrowing this to only the groups a
+    // replica is actually tailing stays a purely subscriber-side change
+    // — no wire-format break — if the deserialization cost ever shows up.
+    pubsub
+        .psubscribe(crate::journal::JOURNAL_CHANNEL_PATTERN)
+        .await
+        .map_err(|e| format!("psubscribe: {e}"))?;
+    tracing::info!(
+        pattern = crate::journal::JOURNAL_CHANNEL_PATTERN,
+        "journal fan-out subscriber connected"
+    );
+    let _ = ready.send(true);
+
+    let mut stream = pubsub.on_message();
+    loop {
+        let next = tokio::time::timeout(JOURNAL_IDLE_CHECK, stream.next()).await;
+        match next {
+            // Timed out waiting for an event: check whether anyone is
+            // still listening, and let go of the subscription if not.
+            Err(_) => {
+                if journal.local_subscriber_count() == 0 {
+                    tracing::debug!("last journal tail left; dropping the subscription");
+                    return Ok(());
+                }
+            }
+            Ok(None) => return Ok(()),
+            Ok(Some(msg)) => {
+                let payload: Vec<u8> = match msg.get_payload() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "unreadable journal event payload");
+                        continue;
+                    }
+                };
+                match serde_json::from_slice(&payload) {
+                    Ok(event) => journal.deliver_local(event),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "undecodable journal event payload");
+                    }
+                }
+            }
+        }
+    }
+}

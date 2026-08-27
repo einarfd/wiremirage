@@ -179,6 +179,13 @@ async fn main() -> anyhow::Result<()> {
         state.routes().clone(),
     );
 
+    // Spawn the journal fan-out subscriber (ADR-0037). Without it a
+    // live tail sees only the traffic its own replica dispatched —
+    // roughly 1/N of matching requests, failing silently. Subscribes
+    // lazily: it idles until something is actually tailing here, so a
+    // replica with no tails deserializes nothing.
+    let _journal_subscriber = wm_host::bus::spawn_journal_subscriber(state.journal().clone());
+
     // Spawn the wasmtime epoch ticker (slice 46 / F-1). Required by
     // the `epoch_interruption(true)` flag on the engine — without a
     // ticker advancing the epoch, the per-call deadline configured

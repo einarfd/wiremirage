@@ -32,6 +32,16 @@ they make the design better, and are called out here.
   dropping a subscriber that hits the pubsub output-buffer limit.
   This adds the host's first *async* Valkey connection (`redis`'s
   `tokio-comp` feature); every request-path operation stays synchronous.
+- **Cross-replica journal fan-out** (ADR-0037). Live tails — the SSE endpoint,
+  the MCP `tail_journal` / `wait_for_request` tools, the live journal page and
+  the group-detail pane — now see traffic dispatched by any replica instead of
+  only the one holding the connection, which previously failed silently and
+  partially: a tail saw roughly 1/N of matching requests and otherwise just
+  kept waiting. Events publish to a per-group channel on the same connection
+  the journal write already used, so the dispatch hot path gains no round trip.
+  Replicas subscribe **lazily** — only while at least one local tail is
+  attached — so a replica nobody is watching deserializes nothing. Existing
+  subscribers are untouched; only the feed changed.
 
 ### Changed
 
