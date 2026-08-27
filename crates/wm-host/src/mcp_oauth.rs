@@ -1045,6 +1045,12 @@ fn resolve_session_user(state: &AppState, headers: &HeaderMap) -> Option<String>
     let sessions = state.sessions()?;
     let cookie = pick_session_cookie(headers)?;
     let session = sessions.touch(&cookie).ok()?;
+    // This gate grants an OAuth authorization, so it honours "sign out
+    // everywhere" rather than deferring to the next API call.
+    let user = state.auth().get_user_by_id(&session.user_id).ok()?;
+    if session.epoch != user.session_epoch {
+        return None;
+    }
     Some(session.user_id)
 }
 

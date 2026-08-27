@@ -9,6 +9,12 @@
 //! Sliding TTL: every authenticated request bumps `last_seen_at` and
 //! resets `expires_at = last_seen_at + ttl`. Logout deletes the
 //! record; next presentation of the cookie 401s.
+//!
+//! "Sign out everywhere" is not implemented here, because it needs no
+//! session enumeration: each record carries the user's `epoch` at
+//! creation, and the auth path rejects a session whose stamp is behind
+//! the user's current counter. This module only has to carry the
+//! stamp; `Auth::bump_session_epoch` does the revoking.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -71,6 +77,12 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
     pub ip_first_seen: String,
     pub user_agent: String,
+    /// The owning user's `session_epoch` when this session was minted.
+    /// Compared against the live user record on every authenticated
+    /// request; behind means revoked. Defaults to 0 so records written
+    /// before the field existed decode cleanly and stay valid.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 #[derive(Clone)]
@@ -132,6 +144,7 @@ impl SessionStore {
         provider: &str,
         ip_first_seen: &str,
         user_agent: &str,
+        epoch: u64,
     ) -> Result<(Session, String), SessionError> {
         let token = mint_token();
         let now = Utc::now();
@@ -144,6 +157,7 @@ impl SessionStore {
             expires_at: now + Duration::seconds(self.ttl_seconds as i64),
             ip_first_seen: ip_first_seen.to_string(),
             user_agent: user_agent.to_string(),
+            epoch,
         };
         self.write(&token, &session)?;
         Ok((session, self.sign_cookie(&token)))
@@ -275,7 +289,7 @@ mod tests {
     fn create_then_validate_round_trip() {
         let store = fresh_store();
         let (created, cookie) = store
-            .create("user-1", "local", "127.0.0.1", "test-agent")
+            .create("user-1", "local", "127.0.0.1", "test-agent", 0)
             .unwrap();
         let loaded = store.validate(&cookie).unwrap();
         assert_eq!(created, loaded);
@@ -285,7 +299,7 @@ mod tests {
     fn tampered_signature_fails_validation() {
         let store = fresh_store();
         let (_session, cookie) = store
-            .create("user-1", "local", "127.0.0.1", "test-agent")
+            .create("user-1", "local", "127.0.0.1", "test-agent", 0)
             .unwrap();
         // Flip one character in the signature half.
         let mut tampered = cookie.clone();
@@ -309,7 +323,7 @@ mod tests {
     fn touch_updates_last_seen_and_expires() {
         let store = fresh_store();
         let (created, cookie) = store
-            .create("user-1", "local", "127.0.0.1", "test-agent")
+            .create("user-1", "local", "127.0.0.1", "test-agent", 0)
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
         let touched = store.touch(&cookie).unwrap();
@@ -321,7 +335,7 @@ mod tests {
     fn delete_then_validate_returns_not_found() {
         let store = fresh_store();
         let (_session, cookie) = store
-            .create("user-1", "local", "127.0.0.1", "test-agent")
+            .create("user-1", "local", "127.0.0.1", "test-agent", 0)
             .unwrap();
         store.delete_by_cookie(&cookie).unwrap();
         assert!(matches!(
@@ -337,7 +351,7 @@ mod tests {
             .unwrap()
             .with_ttl_seconds(1);
         let (_session, cookie) = store
-            .create("user-1", "local", "127.0.0.1", "test-agent")
+            .create("user-1", "local", "127.0.0.1", "test-agent", 0)
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(matches!(
@@ -355,7 +369,7 @@ mod tests {
         // refactor that swaps in `==` doesn't slip through unnoticed.
         let store = fresh_store();
         let (_session, cookie) = store
-            .create("user-1", "local", "127.0.0.1", "test-agent")
+            .create("user-1", "local", "127.0.0.1", "test-agent", 0)
             .unwrap();
         let mut tampered_early = cookie.clone();
         let dot_idx = tampered_early.find('.').unwrap();

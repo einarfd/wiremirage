@@ -9,6 +9,15 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Added
+
+- **`POST /api/users/me/sessions/revoke-all`** — sign out everywhere. Backed by
+  a per-user session epoch rather than a session index: each session is stamped
+  at creation and validation rejects anything behind the user's counter, so
+  revoking is one increment and no session is enumerated. Returns 204 with no
+  count for that reason. API tokens are a separate credential and are
+  untouched. No CLI counterpart by design — sessions are a browser credential.
+
 ### Removed
 
 - The `/ui/admin/health` placeholder page. The admin health screen and

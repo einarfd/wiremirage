@@ -191,13 +191,14 @@ async fn password_login(
     };
 
     let ip_str = ip.to_string();
-    let (_session, cookie_value) = match sessions.create(&user.id, "local", &ip_str, &user_agent) {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::error!(error = %e, "session create");
-            return login_failure(StatusCode::INTERNAL_SERVER_ERROR, "login failed");
-        }
-    };
+    let (_session, cookie_value) =
+        match sessions.create(&user.id, "local", &ip_str, &user_agent, user.session_epoch) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::error!(error = %e, "session create");
+                return login_failure(StatusCode::INTERNAL_SERVER_ERROR, "login failed");
+            }
+        };
 
     let next = form
         .next
@@ -292,7 +293,7 @@ fn format_set_cookie(value: &str, max_age: u64, secure: bool) -> String {
     format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{suffix}")
 }
 
-fn format_clear_cookie(secure: bool) -> String {
+pub(crate) fn format_clear_cookie(secure: bool) -> String {
     let suffix = if secure { "; Secure" } else { "" };
     format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{suffix}")
 }
@@ -506,17 +507,18 @@ async fn github_callback(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let (_session, cookie_value) = match sessions.create(&user.id, "github", &ip_str, &user_agent) {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::error!(error = %e, "session create");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error (session mint)",
-            )
-                .into_response();
-        }
-    };
+    let (_session, cookie_value) =
+        match sessions.create(&user.id, "github", &ip_str, &user_agent, user.session_epoch) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::error!(error = %e, "session create");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error (session mint)",
+                )
+                    .into_response();
+            }
+        };
 
     let mut redirect: Response = Redirect::to(&next).into_response();
     redirect.headers_mut().append(
@@ -744,17 +746,18 @@ async fn oidc_callback(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let (_session, cookie_value) = match sessions.create(&user.id, "oidc", &ip_str, &user_agent) {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::error!(error = %e, "session create");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error (session mint)",
-            )
-                .into_response();
-        }
-    };
+    let (_session, cookie_value) =
+        match sessions.create(&user.id, "oidc", &ip_str, &user_agent, user.session_epoch) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::error!(error = %e, "session create");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error (session mint)",
+                )
+                    .into_response();
+            }
+        };
 
     let mut redirect: Response = Redirect::to(&record.next).into_response();
     redirect.headers_mut().append(

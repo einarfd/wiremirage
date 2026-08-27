@@ -72,6 +72,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/users", post(create_user).get(list_users))
         .route("/api/users/me", get(get_me))
         .route(
+            "/api/users/me/sessions/revoke-all",
+            post(revoke_all_my_sessions),
+        )
+        .route(
             "/api/users/{selector}",
             get(get_user).patch(patch_user).delete(delete_user),
         )
@@ -438,6 +442,12 @@ impl FromRequestParts<AppState> for AuthContext {
                 .auth()
                 .get_user_by_id(&session.user_id)
                 .map_err(|_| ApiError::unauthorized("session refers to a deleted user"))?;
+            // "Sign out everywhere" bumps the user's epoch; every
+            // session minted before that carries an older stamp and
+            // dies here. Free — the user record is already loaded.
+            if session.epoch != user.session_epoch {
+                return Err(ApiError::unauthorized("session revoked"));
+            }
             return Ok(AuthContext {
                 user_id: user.id,
                 user_email: user.email,
@@ -1436,6 +1446,26 @@ async fn get_me(
 ) -> Result<Json<UserRecord>, ApiError> {
     let user = state.auth().get_user_by_id(&auth.user_id)?;
     Ok(Json(UserRecord::from(&user)))
+}
+
+/// Sign out everywhere: bump the caller's session epoch, which
+/// invalidates every session they hold including the one making this
+/// request. Self-service only — there is no admin variant, and no
+/// session is enumerated, so there is no count to report (204).
+///
+/// API tokens are a separate credential and are untouched; they revoke
+/// individually via `DELETE /api/tokens/{name}`.
+async fn revoke_all_my_sessions(
+    State(state): State<AppState>,
+    auth: AuthContext,
+) -> Result<StatusCode, ApiError> {
+    let epoch = state.auth().bump_session_epoch(&auth.user_id)?;
+    tracing::info!(
+        user_id = %auth.user_id,
+        session_epoch = epoch,
+        "revoked all sessions for user"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_user(

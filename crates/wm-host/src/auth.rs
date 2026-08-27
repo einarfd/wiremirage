@@ -63,6 +63,14 @@ pub struct User {
     pub email: String,
     pub is_admin: bool,
     pub created_at: DateTime<Utc>,
+    /// Monotonic counter backing "sign out everywhere". Every session
+    /// is stamped with the value current at its creation; validation
+    /// rejects a session whose stamp is behind this. Bumping it
+    /// invalidates every session at once without enumerating any of
+    /// them — see `auth-and-authz.md` "Sign out everywhere". Records
+    /// written before the field existed decode as 0, which matches a
+    /// freshly created user, so existing sessions stay valid.
+    pub session_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +425,23 @@ impl Auth {
         Ok(user)
     }
 
+    /// Invalidate every session belonging to this user by bumping
+    /// their session epoch. Returns the new value. Nothing is
+    /// enumerated: live sessions carry the old stamp and fail the
+    /// comparison in the auth path on their next request.
+    ///
+    /// Tokens are unaffected — they are a separate credential with
+    /// their own revocation (`revoke_token_by_name`).
+    pub fn bump_session_epoch(&self, id: &str) -> Result<u64, AuthError> {
+        let mut bucket = self.bucket()?;
+        // Read first so a missing user is a NotFound rather than a
+        // hash_incr silently creating one.
+        self.read_user_by_id(&mut bucket, id)?
+            .ok_or(AuthError::NotFound)?;
+        let next = bucket.hash_incr(&format!("user:{id}"), "session_epoch", 1)?;
+        Ok(next as u64)
+    }
+
     /// Delete a user and cascade-delete every token they own. Routes
     /// they own are left untouched — the API layer is expected to refuse
     /// the delete upstream when `list_routes_by_owner` is non-empty.
@@ -474,6 +499,7 @@ impl Auth {
             email: email.to_string(),
             is_admin,
             created_at: Utc::now(),
+            session_epoch: 0,
         };
         let key = format!("user:{}", user.id);
         bucket.hash_set(&key, "id", user.id.as_bytes().to_vec())?;
@@ -490,6 +516,7 @@ impl Auth {
             "created_at",
             user.created_at.to_rfc3339().into_bytes(),
         )?;
+        bucket.hash_set(&key, "session_epoch", b"0".to_vec())?;
         bucket.set(
             &format!("user:by-email:{}", user.email),
             user.id.as_bytes().to_vec(),
@@ -833,11 +860,22 @@ fn decode_user(fields: &std::collections::HashMap<String, Vec<u8>>) -> Result<Us
             .map_err(|_| AuthError::Malformed("user.primary_email not utf-8".into()))?,
         None => utf8(fields, "name")?,
     };
+    // Absent on records written before "sign out everywhere" existed.
+    // 0 is the same value a new user starts at, so their live sessions
+    // (also stamped 0 by the same default) keep working.
+    let session_epoch = match fields.get("session_epoch") {
+        Some(b) => std::str::from_utf8(b)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| AuthError::Malformed("user.session_epoch not a u64".into()))?,
+        None => 0,
+    };
     Ok(User {
         id: utf8(fields, "id")?,
         email,
         is_admin: utf8(fields, "is_admin")? == "1",
         created_at: parse_ts(&utf8(fields, "created_at")?)?,
+        session_epoch,
     })
 }
 
