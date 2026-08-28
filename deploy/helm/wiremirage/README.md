@@ -58,6 +58,15 @@ a private, divergent view of the world.
 If the URL carries a password, put the whole URL in your Secret and set
 `valkey.urlSecretKey` to its key instead of `valkey.url`.
 
+Configure it with **`maxmemory` and `maxmemory-policy noeviction`**. The
+dataset is RAM-resident and sized by journal volume — every unmatched request
+is recorded — so an eviction policy would eventually drop live data. Losing a
+`group:` record while its routes survived would 404 a working subdomain and
+orphan the routes behind it, since route records carry no TTL of their own.
+`noeviction` turns that into a rejected write instead, which journal writes
+already tolerate. Managed cache offerings often default to an LRU policy, so
+this is worth checking rather than assuming.
+
 ## Secrets
 
 `existingSecret` names a Secret you create out of band. The chart never

@@ -161,6 +161,21 @@ There is nothing here to back up; users and tokens are the only durable
 records, and they are cheap to recreate. Plan for the Valkey instance to be
 disposable and you have the operational model right.
 
+**Set `maxmemory` and `maxmemory-policy noeviction`**
+([ADR-0005](adr/0005-valkey-storage.md)). The whole dataset lives in RAM, and
+the sizing risk is journal volume rather than configuration: every request
+that reaches a group's subdomain and matches nothing is recorded, with no rate
+limit beyond a 4 KiB body cap and the 1 h TTL. A broken system under test — or
+anyone who guesses a group name on a public host — can therefore push a lot of
+short-lived data through.
+
+`noeviction` is what keeps that a capacity problem instead of a correctness
+one. Journal writes are best-effort and a rejected one is logged and skipped,
+so the mock keeps answering; a store that evicted instead could drop a
+`group:` record while its routes survived, and those routes have no TTL of
+their own — the subdomain would start 404ing with the routes orphaned behind
+it. Size for peak journal volume, not for the routes you expect to define.
+
 ## Production hardening
 
 The defaults are tuned for plain-HTTP dev workflows. Before exposing the host
