@@ -179,17 +179,24 @@ RUN apt-get update && \
         ca-certificates \
         libgcc-s1 \
     && rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 10001 wm && \
     useradd \
         --system \
         --uid 10001 \
-        --user-group \
+        --gid 10001 \
         --no-create-home \
         --shell /usr/sbin/nologin \
         wm
 
 COPY --from=rust-builder /usr/local/bin/wm-host /usr/local/bin/wm-host
 
-USER wm
+# Numeric, not `USER wm`. Kubernetes cannot resolve a user *name* to a
+# uid — it does not read the image's /etc/passwd — so under
+# `runAsNonRoot: true` a named USER fails the check outright with
+# "image has non-numeric user (wm), cannot verify user is non-root" and
+# the container never starts. Same identity either way; only this form
+# is verifiable from outside the image.
+USER 10001:10001
 EXPOSE 8080
 
 # Bind all interfaces by default so `docker run -p 8080:8080` is

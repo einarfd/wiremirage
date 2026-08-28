@@ -87,6 +87,16 @@ they make the design better, and are called out here.
   tokens are a separate credential and are untouched. No CLI counterpart by
   design — sessions are a browser credential.
 
+### Fixed
+
+- **The container image declares a numeric user.** It was `USER wm`, a
+  name — and Kubernetes does not read an image's `/etc/passwd`, so under
+  `runAsNonRoot: true` the kubelet cannot verify the user is non-root and
+  refuses to start the container. The Helm chart sets `runAsNonRoot`, so
+  every pod would have failed with `CreateContainerConfigError`. Now
+  `USER 10001:10001`, the same identity in a form that can be checked from
+  outside the image, with the uid stated in the chart as well.
+
 ### Changed
 
 - **The MCP transport is stateless** (ADR-0037). No `Mcp-Session-Id`

@@ -173,6 +173,13 @@ topologySpreadConstraints: []
 
 podSecurityContext:
   runAsNonRoot: true
+  # Set explicitly as well as in the image. Kubernetes cannot resolve a
+  # user *name* to a uid — it does not read the image's /etc/passwd — so
+  # under runAsNonRoot an image whose USER is a name fails the check and
+  # never starts. The image declares `USER 10001:10001`, and stating it
+  # here keeps the chart working against an older tag that does not.
+  runAsUser: 10001
+  runAsGroup: 10001
   seccompProfile:
     type: RuntimeDefault
 

@@ -134,6 +134,42 @@ sends. Direct-IP access falls through to the control plane, so only a
 recognised `{group}.{apex}` subdomain is treated as mock traffic and
 `/health` cannot be shadowed by a tenant's route.
 
+## Portability
+
+The manifests use only current, stable APIs — `apps/v1`,
+`networking.k8s.io/v1` (Ingress, stable since 1.19), `policy/v1` (PDB,
+stable since 1.21) and core `v1`. Nothing beta, nothing deprecated. It
+should install on any conformant cluster from 1.21 onward.
+
+Pods satisfy the **restricted** Pod Security Standard: non-root with an
+explicit uid, no privilege escalation, all capabilities dropped, a
+read-only root filesystem, and the default seccomp profile. That matters
+on clusters that enforce PSS by namespace label, which managed offerings
+increasingly do by default.
+
+Two things to check for *your* cluster, because they are the parts a
+chart cannot settle:
+
+- **Your ingress controller must handle a wildcard host rule.** The
+  chart emits a `*.{apexHost}` rule because groups get subdomains at
+  runtime. `ingress.className` is unset by default, which means your
+  cluster's default IngressClass — and on some managed clusters that
+  default is a cloud load-balancer controller with its own certificate
+  model rather than one that reads a TLS Secret. If yours is like that,
+  either set `ingress.className` to an nginx-style controller or adapt
+  the ingress template to whatever your controller expects. This is the
+  most likely thing to need adjusting.
+- **Your Valkey/Redis must allow pub/sub.** `PUBLISH` *and* `SUBSCRIBE`,
+  not just the former — cross-replica route invalidation and live
+  journal tailing both depend on it. Managed cache offerings sometimes
+  restrict pub/sub or behave differently in cluster mode. A single
+  replica works either way; a tail silently misses sibling traffic if
+  SUBSCRIBE is unavailable.
+
+For a multi-zone cluster, set `topologySpreadConstraints` — the chart
+leaves them empty, so nothing stops a scheduler putting every replica in
+one zone.
+
 ## What this chart does not do
 
 - **Issue certificates.** See prerequisite 2.
