@@ -504,16 +504,19 @@ impl Journal {
         rx
     }
 
-    /// Publish helper, taking the caller's bucket so the Valkey
-    /// PUBLISH rides the connection the journal write just used rather
-    /// than paying a second round trip on the dispatch hot path.
+    /// Publish helper, taking the caller's bucket so the Valkey PUBLISH
+    /// goes out on the connection the journal write already holds. That
+    /// saves connection *setup*, not a round trip — the sync store
+    /// waits for each reply, so this is one additional round trip on
+    /// every journaled request.
     ///
-    /// In-memory: straight into the local broadcast, as before.
+    /// In-memory: straight into the local broadcast.
     ///
-    /// Valkey: published to the group's channel and *not* delivered
-    /// locally. The originating replica receives its own event back
-    /// through the subscriber, which keeps one uniform delivery path —
-    /// publishing both ways would double-deliver on the origin.
+    /// Valkey: delivered to the local broadcast *and* published to the
+    /// group's channel. The local delivery is what arms a tail the
+    /// instant it opens, with no dependence on the subscription being
+    /// established; the origin id on the published copy is what stops
+    /// the subscriber then delivering it a second time.
     ///
     /// `broadcast::Sender::send` returns `Err` only when there are zero
     /// receivers, which is normal; the bus is best-effort either way.
