@@ -42,10 +42,16 @@ impl LoginThrottle {
         Self { storage }
     }
 
-    /// Keys are namespaced per IP. The failure counter has no TTL on the
-    /// in-memory backend, but the window lease resets its *value* every
-    /// minute, so what accumulates is one small key per distinct IP —
-    /// the same growth the previous in-process map had.
+    /// Keys are namespaced per IP, and all three expire.
+    ///
+    /// The counter carries a TTL of its own rather than relying on being
+    /// deleted: it is only cleared on lockout or a successful login, so
+    /// an address that fails once or twice and never comes back would
+    /// otherwise leave a key behind forever — one per source IP, on a
+    /// publicly reachable endpoint, in a system whose whole premise is
+    /// that state expires. (`set_ttl` is a no-op in memory, which is
+    /// fine: that backend dies with the process, and the window lease
+    /// already governs correctness there.)
     fn fails_key(ip: IpAddr) -> String {
         format!("throttle:fails:{ip}")
     }
@@ -121,6 +127,9 @@ impl LoginThrottle {
                 }
             }
         };
+        // Both branches, because `incr` creates the key when it is
+        // absent — which is the case a lost window lease produces.
+        let _ = bucket.set_ttl(&Self::fails_key(ip), WINDOW_SECONDS);
         if fails < MAX_FAILS {
             return false;
         }
