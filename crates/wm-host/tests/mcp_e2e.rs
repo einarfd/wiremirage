@@ -1780,6 +1780,50 @@ async fn summarize_workspace_surfaces_base_url() {
 }
 
 #[tokio::test]
+async fn summarize_workspace_counts_recent_unmatched() {
+    // The field shipped hardcoded to 0 with a note saying a follow-up
+    // would wire it. This is that follow-up, so the test is what stops
+    // it silently reverting to a placeholder.
+    let h = start().await;
+    for path in ["/v1/nope", "/v1/also-nope", "/v1/still-nope"] {
+        h.state
+            .journal()
+            .record_unmatched(NewUnmatchedEntry {
+                trace_id: None,
+                group_id: "mock".into(),
+                group_name: "mock".into(),
+                request: RequestEnvelope {
+                    method: "GET".into(),
+                    path: path.into(),
+                    headers: vec![],
+                    body: vec![],
+                    original_body_size: 0,
+                    body_truncated: false,
+                },
+                near_misses: vec![],
+            })
+            .expect("record unmatched");
+    }
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+    let result = client
+        .call_tool(CallToolRequestParams::new("summarize_workspace"))
+        .await
+        .expect("summarize_workspace");
+    let structured = result.structured_content.expect("structured");
+    let count = structured
+        .get("recent_unmatched_count_5m")
+        .and_then(|v| v.as_u64())
+        .expect("recent_unmatched_count_5m present");
+    assert_eq!(count, 3, "all three landed inside the 5m window");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
 async fn set_then_show_group_state_round_trip() {
     // First-user friction #2: clear_group_state existed but there was
     // no read-back. set_group_state → show_group_state now round-trips.

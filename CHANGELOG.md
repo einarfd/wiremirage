@@ -9,6 +9,15 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`summarize_workspace` reports a real `recent_unmatched_count_5m`.** The
+  field shipped hardcoded to `0` with a note that a follow-up would wire it;
+  this is that follow-up. Scoped like the group list beside it — an admin
+  counts every group's unmatched, a tenant only their own. The walk is capped,
+  so a junk-traffic flood cannot put an unbounded read behind a workspace
+  summary; past the cap the number is a floor rather than a wrong answer.
+
 ## [0.1.1] — 2026-08-28
 
 ### Added

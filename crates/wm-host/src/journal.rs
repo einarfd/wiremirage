@@ -333,6 +333,10 @@ impl Default for UnmatchedCursor {
     }
 }
 
+/// Ceiling on the `count_unmatched_since` walk. Generous next to real
+/// traffic, small next to an hour of junk.
+const UNMATCHED_WINDOW_SCAN_CAP: usize = 2000;
+
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 100;
 
@@ -425,6 +429,14 @@ pub const JOURNAL_CHANNEL_PATTERN: &str = "wm:journal:*";
 /// The channel a group's journal events are published on.
 pub fn journal_channel(group_id: &str) -> String {
     format!("{JOURNAL_CHANNEL_PREFIX}{group_id}")
+}
+
+/// Result of a windowed unmatched count. `saturated` means the scan cap
+/// stopped the walk before the window did, so `count` is a floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnmatchedWindowCount {
+    pub count: u64,
+    pub saturated: bool,
 }
 
 #[derive(Clone)]
@@ -762,6 +774,66 @@ impl Journal {
         Ok(out)
     }
 
+    /// How many unmatched requests were recorded in the last `window`,
+    /// restricted to `visible_groups` when the caller is not an admin.
+    ///
+    /// Walks `unmatched:by-number` down from the counter and stops at
+    /// the first record older than the window — the same walk
+    /// `list_unmatched` does, with a time bound instead of a page size.
+    ///
+    /// The walk is capped. Unmatched entries live for an hour, so a
+    /// junk-traffic flood could otherwise put tens of thousands of reads
+    /// behind a workspace summary — the same amplification the route
+    /// table's read-through rate limit exists to prevent. Past the cap
+    /// the count saturates, and `saturated` says so rather than quietly
+    /// under-reporting.
+    pub fn count_unmatched_since(
+        &self,
+        window: chrono::Duration,
+        visible_groups: Option<&std::collections::HashSet<String>>,
+    ) -> Result<UnmatchedWindowCount, JournalError> {
+        let mut bucket = self.bucket()?;
+        let highest = bucket
+            .get("unmatched:counter")?
+            .and_then(|bytes| {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .unwrap_or(0);
+        let cutoff = Utc::now() - window;
+        let mut count = 0u64;
+        let mut scanned = 0usize;
+        let mut n = highest;
+        while n > 0 && scanned < UNMATCHED_WINDOW_SCAN_CAP {
+            scanned += 1;
+            // A gap means the record's TTL fired while its index entry
+            // survived, or it was reaped — keep walking rather than
+            // treating it as the end.
+            if let Ok(record) = self.get_unmatched_via_bucket(&mut bucket, n) {
+                if record.created_at < cutoff {
+                    return Ok(UnmatchedWindowCount {
+                        count,
+                        saturated: false,
+                    });
+                }
+                let visible = match visible_groups {
+                    None => true,
+                    Some(set) => set.contains(&record.group_id),
+                };
+                if visible {
+                    count += 1;
+                }
+            }
+            n = n.saturating_sub(1);
+        }
+        Ok(UnmatchedWindowCount {
+            count,
+            // Only saturated if the cap stopped us, not if we ran out.
+            saturated: n > 0,
+        })
+    }
+
     fn get_unmatched_via_bucket(
         &self,
         bucket: &mut Bucket,
@@ -899,6 +971,79 @@ mod tests {
 
     fn fresh() -> Journal {
         Journal::new(Storage::in_memory())
+    }
+
+    fn record_unmatched_in(j: &Journal, group: &str) {
+        j.record_unmatched(NewUnmatchedEntry {
+            trace_id: None,
+            group_id: group.into(),
+            group_name: group.into(),
+            request: sample_envelope(b""),
+            near_misses: vec![],
+        })
+        .expect("record unmatched");
+    }
+
+    #[test]
+    fn count_unmatched_since_respects_the_window() {
+        let j = fresh();
+        for _ in 0..3 {
+            record_unmatched_in(&j, "g1");
+        }
+        // A window that has already closed counts nothing, which is the
+        // stop condition doing its job rather than the walk running out.
+        let none = j
+            .count_unmatched_since(chrono::Duration::seconds(-1), None)
+            .unwrap();
+        assert_eq!(none.count, 0);
+        assert!(!none.saturated);
+
+        let all = j
+            .count_unmatched_since(chrono::Duration::minutes(5), None)
+            .unwrap();
+        assert_eq!(all.count, 3);
+        assert!(!all.saturated);
+    }
+
+    #[test]
+    fn count_unmatched_since_is_scoped_to_visible_groups() {
+        // A tenant counts their own groups' unmatched, not the host's
+        // (ADR-0030 SemFLIP), and the walk still crosses the other
+        // group's entries rather than stopping at them.
+        let j = fresh();
+        record_unmatched_in(&j, "mine");
+        record_unmatched_in(&j, "theirs");
+        record_unmatched_in(&j, "mine");
+
+        let visible: std::collections::HashSet<String> = ["mine".to_string()].into_iter().collect();
+        let scoped = j
+            .count_unmatched_since(chrono::Duration::minutes(5), Some(&visible))
+            .unwrap();
+        assert_eq!(scoped.count, 2);
+
+        let admin = j
+            .count_unmatched_since(chrono::Duration::minutes(5), None)
+            .unwrap();
+        assert_eq!(admin.count, 3);
+    }
+
+    #[test]
+    fn count_unmatched_since_saturates_rather_than_walking_forever() {
+        // Unmatched entries live an hour, so junk traffic could put a
+        // very long read behind a workspace summary. Past the cap the
+        // count is a floor and says so.
+        let j = fresh();
+        for _ in 0..(UNMATCHED_WINDOW_SCAN_CAP + 10) {
+            record_unmatched_in(&j, "g1");
+        }
+        let counted = j
+            .count_unmatched_since(chrono::Duration::minutes(5), None)
+            .unwrap();
+        assert_eq!(counted.count as usize, UNMATCHED_WINDOW_SCAN_CAP);
+        assert!(
+            counted.saturated,
+            "the cap stopped the walk, not the window"
+        );
     }
 
     fn sample_envelope(body: &[u8]) -> RequestEnvelope {

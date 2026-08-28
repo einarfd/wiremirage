@@ -261,6 +261,18 @@ impl WmMcpServer {
             .list_routes()
             .map_err(map_registry_error)?;
         let trust = self.state.trust_forwarded_headers();
+        // Same scoping as the group list: admin counts everything, a
+        // tenant counts only groups they own (ADR-0030 SemFLIP).
+        let visible: Option<std::collections::HashSet<String>> = if auth.is_admin {
+            None
+        } else {
+            Some(groups.iter().map(|g| g.id.clone()).collect())
+        };
+        let unmatched_5m = self
+            .state
+            .journal()
+            .count_unmatched_since(chrono::Duration::minutes(5), visible.as_ref())
+            .map_err(map_journal_error)?;
         let summaries = groups
             .into_iter()
             .map(|g| {
@@ -285,15 +297,17 @@ impl WmMcpServer {
                 base_url,
             },
             user: UserInfo {
-                email: auth.user_email,
+                email: auth.user_email.clone(),
                 is_admin: auth.is_admin,
             },
             groups: summaries,
-            // The journal records unmatched but doesn't index by time
-            // window in this slice. Reporting 0 keeps the field
-            // schema-stable; a follow-up wires the real count once
-            // the journal exposes a since-cursor.
-            recent_unmatched_count_5m: 0,
+            // Scoped the same way the group list above is (ADR-0030
+            // SemFLIP): an admin counts every group's unmatched, a
+            // tenant only their own. Saturation is folded into the
+            // number rather than surfaced separately — the field is a
+            // "is anything going wrong" hint, and its schema is
+            // published, so a floor reads better than a new field.
+            recent_unmatched_count_5m: unmatched_5m.count,
         }))
     }
 
