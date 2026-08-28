@@ -2232,3 +2232,146 @@ async fn show_callback_forbidden_for_non_owner_non_admin() {
 
     alice_client.cancel().await.expect("alice cancel");
 }
+
+/// The journal bus is host-wide and filtering happens after receive, so
+/// a timeout rebuilt per received event is restarted by traffic the
+/// caller filtered out. `timeout_seconds` is published to agents as a
+/// "hard timeout"; a caller asking for 2s must not block for as long as
+/// an unrelated group stays busy.
+#[tokio::test]
+async fn wait_for_request_timeout_is_not_extended_by_other_groups_traffic() {
+    let h = start().await;
+    for name in ["stripe-mock", "noisy-mock"] {
+        h.state
+            .routes()
+            .registry()
+            .create_group(NewGroup {
+                name: name.into(),
+                owner_id: "admin-id".into(),
+                ttl_seconds: None,
+                sliding_ttl: None,
+            })
+            .expect("create group");
+    }
+    let noisy = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("noisy-mock")
+        .unwrap();
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    // Steady traffic on a group the caller did not ask about, outlasting
+    // the timeout under test.
+    let writer_state = h.state.clone();
+    let writer = tokio::spawn(async move {
+        for _ in 0..40 {
+            writer_state
+                .journal()
+                .record_handled(sample_handled(&noisy.id, "noisy-mock", 200))
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+
+    let started = std::time::Instant::now();
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("wait_for_request").with_arguments(
+                json!({"group": "stripe-mock", "timeout_seconds": 2})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("wait_for_request");
+    let elapsed = started.elapsed();
+    writer.abort();
+
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("timed_out").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a 2s wait returned after {elapsed:?}; unrelated traffic must not \
+         extend the caller's bound"
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+/// Same for the tail's idle window, which is documented as time since
+/// the last *match* — not since the last packet on a shared bus.
+#[tokio::test]
+async fn tail_journal_idle_window_is_not_reset_by_non_matching_traffic() {
+    let h = start().await;
+    for name in ["twilio-mock", "noisy-mock"] {
+        h.state
+            .routes()
+            .registry()
+            .create_group(NewGroup {
+                name: name.into(),
+                owner_id: "admin-id".into(),
+                ttl_seconds: None,
+                sliding_ttl: None,
+            })
+            .expect("create group");
+    }
+    let noisy = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("noisy-mock")
+        .unwrap();
+
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let writer_state = h.state.clone();
+    let writer = tokio::spawn(async move {
+        for _ in 0..40 {
+            writer_state
+                .journal()
+                .record_handled(sample_handled(&noisy.id, "noisy-mock", 200))
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+
+    let started = std::time::Instant::now();
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("tail_journal").with_arguments(
+                json!({"group": "twilio-mock", "idle_timeout_seconds": 2})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("tail_journal");
+    let elapsed = started.elapsed();
+    writer.abort();
+
+    let structured = result.structured_content.expect("structured");
+    assert_eq!(
+        structured.get("stopped_reason").and_then(|v| v.as_str()),
+        Some("idle_timeout")
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a 2s idle window closed after {elapsed:?}; traffic the filter \
+         rejected must not hold the tail open"
+    );
+
+    client.cancel().await.expect("cancel");
+}

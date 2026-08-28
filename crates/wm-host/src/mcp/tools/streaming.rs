@@ -283,11 +283,17 @@ impl WmMcpServer {
             .beat(format!("waiting for {count} matching request(s)"))
             .await;
 
+        // One deadline for the whole call, not one per received event.
+        // The bus is host-wide and filtering happens after `recv`, so a
+        // per-event timeout would be restarted by traffic belonging to
+        // groups this caller never asked about — making the bound depend
+        // on unrelated load rather than on what the caller requested.
+        let deadline = tokio::time::Instant::now() + timeout;
         let timed_out = loop {
             if entries.len() as u32 >= count {
                 break false;
             }
-            let recv = tokio::time::timeout(timeout, rx.recv());
+            let recv = tokio::time::timeout_at(deadline, rx.recv());
             tokio::pin!(recv);
             // Only the heartbeat sleep restarts on a beat; `recv` is
             // pinned across the inner loop so the caller's timeout keeps
@@ -378,12 +384,16 @@ impl WmMcpServer {
             .beat(format!("tailing, up to {max_entries} entries"))
             .await;
 
+        // The idle window is measured from the last *match*, which is
+        // what the caller was promised. Restarting it on any event would
+        // tie the caller's window to host-wide traffic they filtered out.
+        let mut idle_deadline = tokio::time::Instant::now() + idle;
         let stopped_reason = loop {
             let total = entries.len() as u32 + unmatched.len() as u32;
             if total >= max_entries {
                 break TailStopped::MaxEntries;
             }
-            let recv = tokio::time::timeout(idle, rx.recv());
+            let recv = tokio::time::timeout_at(idle_deadline, rx.recv());
             tokio::pin!(recv);
             // As in `wait_for_request`: beating must not extend the
             // caller's idle window, so the receive future outlives the
@@ -410,6 +420,7 @@ impl WmMcpServer {
                         JournalEvent::Handled(r) => entries.push(*r),
                         JournalEvent::Unmatched(u) => unmatched.push(*u),
                     }
+                    idle_deadline = tokio::time::Instant::now() + idle;
                 }
                 Ok(Err(RecvError::Lagged(n))) => {
                     dropped_events = dropped_events.saturating_add(n as u32);
