@@ -90,6 +90,67 @@ CI installs all four. Locally, install once.
 5. **If the code conflicts with the spec, surface it.** Either propose a
    spec update (via `/new-adr` if it's a real decision) or revise the code.
    Don't silently diverge.
+6. **If the change built something a doc lists as deferred, clear the
+   entry.** See below — this is the step that gets skipped, and it is
+   why the deferral lists rot.
+
+## Keeping the deferral lists honest
+
+Each design doc carries its own list of what is not built:
+`cli-design.md`, `mcp-surface.md` and `skill-design.md` have **"Deferred
+(design intact, not yet implemented)"** blocks; `mcp-surface.md` and
+`skill-design.md` also have **"Behaviors that drift from this doc"**;
+`rest-api.md` has per-section **"Implementation status"** blocks;
+`web-ui-design.md` carries a per-screen **`**Status:**`** note; ADRs
+carry `**Status:**` and dated amendment bullets.
+
+Nothing forces those to be re-read when the thing they describe gets
+built, so they rot in one direction: claiming work is outstanding when
+it shipped months ago. An audit in August 2026 found **ten** such
+entries — `wm groups export`, group rename, CLI list filtering, the
+route-table engine cache and others were all listed as deferred and had
+all shipped. Two more went stale *during* the session that fixed them.
+
+That matters more than tidiness: planning reads these lists. Time gets
+spent scoping work that already exists, and real gaps hide among dead
+entries.
+
+**The audit pass.** Twenty minutes, mechanical, worth running at each
+release:
+
+```sh
+# 1. Collect every claim.
+arkiv grep "Deferred"            # the explicit blocks
+arkiv grep "not yet implemented"
+arkiv grep "Not yet built"
+arkiv grep "drift from this doc"
+arkiv grep "Status:" --path-prefix adrs/   # Proposed = unimplemented?
+```
+
+```sh
+# 2. Check each against the code, not against another doc.
+#    A CLI claim -> crates/wm-cli/src/cli.rs
+#    A REST claim -> the router in crates/wm-host/src/api.rs
+#    An MCP claim -> crates/wm-host/src/mcp/tools/
+#    A UI claim -> the routes in crates/wm-host/src/ui/mod.rs
+#    A storage claim -> crates/wm-host/src/{registry,journal,store}
+```
+
+3. **Correct in Arkiv, not in `docs/adr/`** — that is an export
+   snapshot, and editing it is silently reverted by the next
+   `just export-adrs`. An ADR fix means: edit the Arkiv original, run
+   `just export-adrs`, commit the regenerated snapshot.
+
+4. **Distinguish three outcomes** rather than only two. *Shipped* —
+   strike the entry and say when. *Still deferred, with a reason* —
+   leave it, the reason is the point. *Still deferred, no reason
+   recorded* — that is a crack, not a decision; either build it or write
+   down why not. A list that mixes live deferrals with abandoned ones is
+   not trustworthy even when every line is individually true.
+
+5. **Read the result, not just the lines.** Six commits each correctly
+   appending to `## [Unreleased]` left it with two separate `### Added`
+   blocks — every commit fine, the accumulation not.
 
 ## Storage backend selection
 
