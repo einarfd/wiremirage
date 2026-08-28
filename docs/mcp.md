@@ -86,6 +86,25 @@ Under multiple replicas the bus fans out over Valkey pub/sub
 ([ADR-0037](adr/0037-multi-replica-readiness.md)), so a tool sees traffic
 dispatched by any replica rather than only the one serving it.
 
+Both can block for up to 300 seconds. A call that sends nothing for that long
+is indistinguishable from a hung server, and MCP clients and reverse proxies
+alike cut it short on a read timeout — so when the caller supplies a
+`progressToken`, both tools emit a `notifications/progress` heartbeat: one
+immediately, before blocking, then every 15 seconds while they wait. The first
+one is the response's first byte, which is what a client's first-byte timer is
+waiting for.
+
+The heartbeat carries a status message only — never journal entries. Entries
+still arrive in a single terminal result, so the tools behave exactly as
+described above; the heartbeat only keeps the connection credibly alive.
+Callers that send no `progressToken` get no notifications and a plain JSON
+response, unchanged.
+
+This does not reintroduce transport state. Progress notifications are
+*request-scoped*: they travel on the response stream of the request that asked
+for them, not on a server-initiated channel between requests, so the stateless
+transport ADR-0037 chose is untouched and any replica can serve the call.
+
 ## Values on the wire
 
 Bytes — request/response bodies, state values — cross the JSON boundary as a

@@ -14,6 +14,11 @@
 //!     explicitly permits for a server offering no server-to-client
 //!     stream and no client-terminated sessions
 //!   * simple tools answer with plain JSON, not `text/event-stream`
+//!   * the two long-blocking streaming tools emit a request-scoped
+//!     progress heartbeat when — and only when — the caller supplies a
+//!     `progressToken`. Request-scoped notifications ride the response
+//!     stream of the request that asked for them, so they need no
+//!     session and hold under this transport.
 //!
 //! The spec makes all three server-optional: a server "**MAY** assign a
 //! session ID", and the client's obligation to echo one is conditional
@@ -222,5 +227,166 @@ async fn a_stale_session_id_is_ignored_rather_than_rejected() {
         resp.status().as_u16(),
         200,
         "an unknown session id is not an error when sessions don't exist"
+    );
+}
+
+/// No `progressToken`, no progress: the response stays on the
+/// `json_response` fast path, byte-for-byte as before the heartbeat
+/// existed. This is the half that guarantees the change costs nothing
+/// to a client that did not ask for it.
+#[tokio::test]
+async fn a_blocking_tool_without_a_progress_token_stays_plain_json() {
+    let h = start().await;
+    let client = Client::new();
+
+    // Host-wide wait, which the bootstrapped admin is allowed, so the
+    // test needs no group fixture.
+    let resp = rpc(
+        &h,
+        &client,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "wait_for_request",
+                "arguments": {"timeout_seconds": 1}
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        ct.starts_with("application/json"),
+        "no progress was asked for, so nothing precedes the result and \
+         the response stays plain JSON, got {ct:?}"
+    );
+    let body: Value = resp.json().await.expect("json body");
+    assert_eq!(body["result"]["structuredContent"]["timed_out"], true);
+}
+
+/// With a `progressToken` the tool announces itself *before* blocking.
+/// That first notification is the response's first byte, which is the
+/// whole point: a client's first-byte timer and any proxy read timeout
+/// see an alive connection instead of a silent one.
+#[tokio::test]
+async fn a_blocking_tool_beats_before_it_blocks() {
+    let h = start().await;
+    let client = Client::new();
+
+    let started = std::time::Instant::now();
+    let resp = rpc(
+        &h,
+        &client,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "wait_for_request",
+                "arguments": {"timeout_seconds": 2},
+                "_meta": {"progressToken": "tok-1"}
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "progress can only be delivered on a stream, so rmcp switches \
+         this one response over, got {ct:?}"
+    );
+
+    let body = resp.text().await.expect("body");
+    let frames: Vec<Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(|d| serde_json::from_str(d).expect("frame is json"))
+        .collect();
+
+    assert!(
+        frames.len() >= 2,
+        "expected a heartbeat and then the result, got {frames:?}"
+    );
+    assert_eq!(
+        frames[0]["method"], "notifications/progress",
+        "the heartbeat comes first: {frames:?}"
+    );
+    assert_eq!(frames[0]["params"]["progressToken"], "tok-1");
+    assert!(
+        frames[0]["params"]["message"].is_string(),
+        "the beat carries a human-readable status: {frames:?}"
+    );
+
+    let result = frames.last().expect("result frame");
+    assert_eq!(result["id"], 1, "the tool result terminates the stream");
+    assert_eq!(result["result"]["structuredContent"]["timed_out"], true);
+
+    // The result itself must still take the full wait — beating is a
+    // keep-alive, not an early return.
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(2),
+        "the tool still waited its full timeout"
+    );
+}
+
+/// A heartbeat carries status, never journal data. The entries stay in
+/// the single terminal result, so an agent's view of the tool is
+/// unchanged — this is a transport-level fix, not a new surface.
+#[tokio::test]
+async fn a_heartbeat_carries_no_journal_entries() {
+    let h = start().await;
+    let client = Client::new();
+
+    let resp = rpc(
+        &h,
+        &client,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "tail_journal",
+                "arguments": {"idle_timeout_seconds": 1},
+                "_meta": {"progressToken": "tok-2"}
+            }
+        }),
+    )
+    .await;
+
+    let body = resp.text().await.expect("body");
+    let frames: Vec<Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(|d| serde_json::from_str(d).expect("frame is json"))
+        .collect();
+
+    for frame in frames
+        .iter()
+        .filter(|f| f["method"] == "notifications/progress")
+    {
+        assert!(
+            frame["params"].get("entries").is_none(),
+            "progress is status only: {frame}"
+        );
+    }
+    let result = frames.last().expect("result frame");
+    assert!(
+        result["result"]["structuredContent"]["entries"].is_array(),
+        "the entries still arrive in the terminal result: {result}"
     );
 }

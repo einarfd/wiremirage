@@ -7,14 +7,19 @@
 //! of journal entries — request/response shape, not progressive
 //! notifications. This matches the design in `mcp-surface.md` where
 //! the agent perceives "wait, then receive the matches" as a single
-//! tool call.
+//! tool call. The entries still arrive in one piece at the end; the
+//! only thing that travels early is the [`Heartbeat`] below, which
+//! carries no journal data.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rmcp::ErrorData;
 use rmcp::Json;
+use rmcp::RoleServer;
 use rmcp::handler::server::common::Extension;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{ProgressNotificationParam, ProgressToken};
+use rmcp::service::{Peer, RequestContext};
 use rmcp::tool;
 use rmcp::tool_router;
 use schemars::JsonSchema;
@@ -33,6 +38,10 @@ const DEFAULT_TAIL_IDLE_S: u64 = 30;
 const MAX_TAIL_IDLE_S: u64 = 300;
 const DEFAULT_TAIL_MAX_ENTRIES: u32 = 100;
 const MAX_TAIL_MAX_ENTRIES: u32 = 1000;
+/// How often a blocked tool emits a progress heartbeat. Comfortably
+/// inside the idle windows MCP clients apply to a silent HTTP call
+/// (five minutes for Claude Code) without being chatty.
+const HEARTBEAT_INTERVAL_S: u64 = 15;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct WaitForRequestArgs {
@@ -165,6 +174,74 @@ fn ensure_streaming_authorized(
     }
 }
 
+/// Emits `notifications/progress` while one of the two streaming tools
+/// is blocked, so the wait is visibly alive rather than indistinguishable
+/// from a hung server.
+///
+/// Both tools can block for up to 300s (`MAX_WAIT_TIMEOUT_S` /
+/// `MAX_TAIL_IDLE_S`) while sending nothing at all. Anything between the
+/// client and the host that applies a read timeout — the MCP client's own
+/// first-byte and idle timers, a reverse proxy — cannot tell that from a
+/// server that has died, and cuts the call well short of the timeout the
+/// caller actually asked for. The first beat is sent before blocking
+/// precisely because it becomes the response's first byte.
+///
+/// This does not weaken the stateless transport of ADR-0037. These are
+/// *request-scoped* notifications: they travel on the response stream of
+/// the very request being served, not on a server-initiated channel
+/// between requests, so nothing needs a session and any replica can serve
+/// the call. rmcp switches that one response to `text/event-stream`;
+/// every other tool keeps the `json_response` fast path.
+///
+/// Silent unless the caller supplied a `progressToken` — the spec allows
+/// progress only for a request that asked for it, and without one the
+/// response stays plain JSON exactly as before.
+struct Heartbeat {
+    /// `None` when the caller sent no progress token.
+    target: Option<(Peer<RoleServer>, ProgressToken)>,
+    /// Monotonically increasing, as the `progress` field requires.
+    beats: f64,
+    started: Instant,
+}
+
+impl Heartbeat {
+    fn new(ctx: &RequestContext<RoleServer>) -> Self {
+        Self {
+            target: ctx
+                .meta
+                .get_progress_token()
+                .map(|token| (ctx.peer.clone(), token)),
+            beats: 0.0,
+            started: Instant::now(),
+        }
+    }
+
+    /// Whether the caller asked for progress. Gates the heartbeat arm of
+    /// the select loops, so a caller that did not ask pays nothing —
+    /// not even a timer.
+    fn wanted(&self) -> bool {
+        self.target.is_some()
+    }
+
+    fn elapsed_s(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Best-effort. A send failure means the client is gone, which the
+    /// tool's own timeout already handles; failing the call because a
+    /// status update could not be delivered would be worse than the
+    /// silence this exists to prevent.
+    async fn beat(&mut self, message: String) {
+        let Some((peer, token)) = self.target.clone() else {
+            return;
+        };
+        self.beats += 1.0;
+        let mut param = ProgressNotificationParam::new(token, self.beats);
+        param.message = Some(message);
+        let _ = peer.notify_progress(param).await;
+    }
+}
+
 #[tool_router(router = streaming_router, vis = "pub(crate)")]
 impl WmMcpServer {
     #[tool(
@@ -175,6 +252,7 @@ impl WmMcpServer {
         &self,
         Extension(parts): Extension<http::request::Parts>,
         Parameters(args): Parameters<WaitForRequestArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<Json<WaitForRequestResult>, ErrorData> {
         let auth = auth_from(&parts)?;
         let filter = build_filter(
@@ -196,11 +274,40 @@ impl WmMcpServer {
         let mut rx = self.state.journal().subscribe();
         let mut entries = Vec::with_capacity(count as usize);
         let mut dropped_events: u32 = 0;
+
+        // Armed before the first beat so no event dispatched while we
+        // announce ourselves can slip past the subscription.
+        let mut heartbeat = Heartbeat::new(&ctx);
+        let beating = heartbeat.wanted();
+        heartbeat
+            .beat(format!("waiting for {count} matching request(s)"))
+            .await;
+
         let timed_out = loop {
             if entries.len() as u32 >= count {
                 break false;
             }
-            match tokio::time::timeout(timeout, rx.recv()).await {
+            let recv = tokio::time::timeout(timeout, rx.recv());
+            tokio::pin!(recv);
+            // Only the heartbeat sleep restarts on a beat; `recv` is
+            // pinned across the inner loop so the caller's timeout keeps
+            // running underneath it rather than being reset by our own
+            // status updates.
+            let received = loop {
+                tokio::select! {
+                    r = &mut recv => break r,
+                    _ = tokio::time::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_S)), if beating => {
+                        let seen = entries.len();
+                        let elapsed = heartbeat.elapsed_s();
+                        heartbeat
+                            .beat(format!(
+                                "waiting for {count} matching request(s); {seen} so far, {elapsed}s elapsed"
+                            ))
+                            .await;
+                    }
+                }
+            };
+            match received {
                 Ok(Ok(JournalEvent::Handled(record))) => {
                     if filter.matches(&JournalEvent::Handled(record.clone())) {
                         entries.push(*record);
@@ -238,6 +345,7 @@ impl WmMcpServer {
         &self,
         Extension(parts): Extension<http::request::Parts>,
         Parameters(args): Parameters<TailJournalArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<Json<TailJournalResult>, ErrorData> {
         let auth = auth_from(&parts)?;
         let filter = build_filter(
@@ -263,12 +371,37 @@ impl WmMcpServer {
         let mut entries: Vec<JournalRecord> = Vec::new();
         let mut unmatched: Vec<UnmatchedRecord> = Vec::new();
         let mut dropped_events: u32 = 0;
+
+        let mut heartbeat = Heartbeat::new(&ctx);
+        let beating = heartbeat.wanted();
+        heartbeat
+            .beat(format!("tailing, up to {max_entries} entries"))
+            .await;
+
         let stopped_reason = loop {
             let total = entries.len() as u32 + unmatched.len() as u32;
             if total >= max_entries {
                 break TailStopped::MaxEntries;
             }
-            match tokio::time::timeout(idle, rx.recv()).await {
+            let recv = tokio::time::timeout(idle, rx.recv());
+            tokio::pin!(recv);
+            // As in `wait_for_request`: beating must not extend the
+            // caller's idle window, so the receive future outlives the
+            // heartbeat sleeps rather than being rebuilt around them.
+            let received = loop {
+                tokio::select! {
+                    r = &mut recv => break r,
+                    _ = tokio::time::sleep(Duration::from_secs(HEARTBEAT_INTERVAL_S)), if beating => {
+                        let elapsed = heartbeat.elapsed_s();
+                        heartbeat
+                            .beat(format!(
+                                "tailing; {total} entries so far, {elapsed}s elapsed"
+                            ))
+                            .await;
+                    }
+                }
+            };
+            match received {
                 Ok(Ok(event)) => {
                     if !filter.matches(&event) {
                         continue;
