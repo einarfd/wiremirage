@@ -41,6 +41,12 @@ fn counter_bytes() -> Vec<u8> {
     std::fs::read(COUNTER_COMPONENT_PATH).expect("read counter fixture")
 }
 
+const ECHO_COMPONENT_PATH: &str = env!("WM_FIXTURE_ECHO_HANDLER_COMPONENT");
+
+fn echo_bytes() -> Vec<u8> {
+    std::fs::read(ECHO_COMPONENT_PATH).expect("read echo fixture")
+}
+
 struct SharedValkey {
     _container: Container<GenericImage>,
     url: String,
@@ -433,5 +439,157 @@ async fn the_dispatching_replica_delivers_each_event_exactly_once() {
         mine, 1,
         "the origin hears its own event back through Valkey exactly once — \
          publishing locally *and* remotely would deliver it twice"
+    );
+}
+
+#[tokio::test]
+async fn a_handler_update_on_one_replica_reaches_another() {
+    // The case the read-through floor structurally cannot cover: a stale
+    // route still *matches*, so the request never reaches the miss path
+    // where revalidation lives. Only an invalidation closes it — and the
+    // event has to carry the route id, because the compiled artifact is
+    // cached separately from the record, so a records-only reload would
+    // leave the old handler running behind a fresh record.
+    //
+    // Swaps the compiled artifact rather than JS source: the tier-3
+    // harness has no shared JS engine wired, and the mechanism under
+    // test is the artifact cache either way.
+    let url = tokio::task::spawn_blocking(|| shared().url.clone())
+        .await
+        .expect("init valkey container");
+
+    let storage = Storage::valkey(&url).expect("connect");
+    let registry = Registry::new(storage.clone());
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/swap".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: echo_bytes(),
+            source: None,
+            owner_id: "test-owner".into(),
+        })
+        .expect("create route");
+    let group = route.group_name.clone();
+
+    let body_of = |addr: String, group: String| async move {
+        reqwest::Client::new()
+            .get(format!("http://{addr}/swap"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
+            .send()
+            .await
+            .expect("send")
+            .text()
+            .await
+            .expect("body")
+    };
+
+    let (addr_a, routes_a, _srv_a) = boot_replica(&url).await;
+    let (addr_b, _routes_b, _srv_b) = boot_replica(&url).await;
+
+    // Both serve the original — and B has now cached its compiled
+    // component, which is the thing a records-only reload would miss.
+    for addr in [&addr_a, &addr_b] {
+        assert_eq!(
+            body_of(addr.clone(), group.clone()).await,
+            "echo: GET /swap"
+        );
+    }
+
+    // A serves the edit.
+    let updated = registry
+        .update_route(
+            &group,
+            route.number,
+            wm_host::registry::PatchRoute {
+                compiled_wasm: Some(counter_bytes()),
+                source: Some(None),
+                ..Default::default()
+            },
+        )
+        .expect("update route");
+    routes_a.refresh_after_update(updated);
+
+    assert_eq!(
+        body_of(addr_a.clone(), group.clone()).await,
+        "count=1",
+        "the editing replica is correct immediately"
+    );
+    assert!(
+        eventually(async || {
+            body_of(addr_b.clone(), group.clone())
+                .await
+                .starts_with("count=")
+        })
+        .await,
+        "replica B runs the new handler, not just holds the new record"
+    );
+}
+
+#[tokio::test]
+async fn a_tail_sees_its_own_replicas_traffic_with_no_connect_window() {
+    // Deliberately does NOT await subscriber readiness: the whole point
+    // is that a tail is armed the instant it is opened. Under the
+    // original design — publish to Valkey, deliver only via the
+    // subscriber — anything dispatched before psubscribe completed
+    // reached nobody, which is exactly when `wait_for_request` is armed.
+    let url = tokio::task::spawn_blocking(|| shared().url.clone())
+        .await
+        .expect("init valkey container");
+
+    let storage = Storage::valkey(&url).expect("connect");
+    let registry = Registry::new(storage.clone());
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/bump".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: counter_bytes(),
+            source: None,
+            owner_id: "test-owner".into(),
+        })
+        .expect("create route");
+    let group = route.group_name.clone();
+
+    let auth = Auth::new(storage.clone());
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let reg = Arc::new(Registry::new(storage.clone()));
+    let routes = RouteTable::warm(reg, runtime.engine().clone()).expect("table");
+    let journal = Journal::new(storage.clone());
+    let mut rx = journal.subscribe();
+    // Spawned but never awaited — no wait_ready here.
+    let _sub = wm_host::bus::spawn_journal_subscriber(journal.clone());
+    let app = router(AppState::new(runtime, routes, auth, journal));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let _srv = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    // Immediately — no sleep, no readiness await.
+    assert_eq!(mock_status(&addr, &group, "/bump").await, 200);
+
+    let mut seen = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !seen && std::time::Instant::now() < deadline {
+        let remaining = deadline - std::time::Instant::now();
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(wm_host::journal::JournalEvent::Handled(r))) if r.group_name == group => {
+                seen = true;
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => panic!("tail closed or lagged: {e:?}"),
+            Err(_) => break,
+        }
+    }
+    assert!(
+        seen,
+        "the tail saw traffic dispatched before the subscription was up"
     );
 }

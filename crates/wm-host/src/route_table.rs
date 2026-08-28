@@ -104,10 +104,13 @@ pub struct RouteTable {
     /// route id and evicted on update/delete exactly like `components`.
     engine_js: Mutex<HashMap<String, Arc<str>>>,
     /// Last read-through revalidation per group **id** (ADR-0037 item
-    /// 1). Keyed by id rather than by the requested host label so the
-    /// map is bounded by the number of real groups — the dispatcher
-    /// only revalidates after resolving the group, so an unknown
-    /// subdomain can never add an entry.
+    /// 1). Keyed by id rather than by the requested host label, so an
+    /// unknown subdomain can never add an entry — the dispatcher only
+    /// revalidates after resolving the group.
+    ///
+    /// Groups are ephemeral, so entries are dropped on cascade delete
+    /// rather than left to accumulate one per group the host has ever
+    /// served a miss for.
     revalidated_at: Mutex<HashMap<String, Instant>>,
     revalidate_interval: Duration,
 }
@@ -258,6 +261,10 @@ impl RouteTable {
     /// happened.
     fn revalidate_group(&self, group_id: &str, group_name: &str) -> bool {
         {
+            // The slot is claimed before the reload is attempted, so a
+            // storage failure consumes it for the full interval. That is
+            // deliberate: a backend that is failing is the last thing
+            // that should be retried on every unmatched request.
             let mut seen = self.revalidated_at.lock().expect("poisoned");
             let now = Instant::now();
             if let Some(last) = seen.get(group_id)
@@ -292,6 +299,39 @@ impl RouteTable {
         routes.retain(|r| r.group_id != group_id);
         routes.extend(fresh);
         true
+    }
+
+    /// Reload the whole table from storage and drop every cached
+    /// artifact. Used when a replica rejoins the invalidation bus
+    /// (ADR-0037 item 1), where it cannot know what it missed.
+    ///
+    /// Pub/sub has no replay, so an invalidation published while this
+    /// replica was disconnected is simply gone — and a stale delete or
+    /// update still *matches*, so the read-through floor never sees it.
+    /// Re-reading everything is the only sound recovery.
+    ///
+    /// Clearing the compiled-component and transpiled-JS caches is
+    /// deliberate rather than incidental: any route may have been
+    /// updated during the gap, and the caches are keyed by route id, so
+    /// a fresh record would otherwise sit in front of stale bytes. The
+    /// cost is one recompile per route on its next request, on a path
+    /// that runs at most once per reconnect.
+    pub fn reload_all(&self) {
+        let fresh = match self.registry.list_routes() {
+            Ok(routes) => routes,
+            Err(e) => {
+                tracing::warn!(error = %e, "full route-table resync failed; keeping the current set");
+                return;
+            }
+        };
+        let count = fresh.len();
+        *self.routes.write().expect("poisoned") = fresh;
+        self.components.lock().expect("poisoned").clear();
+        self.engine_js.lock().expect("poisoned").clear();
+        // Every group is freshly read, so nothing is owed a read-through
+        // yet; clearing also keeps this map from outliving its groups.
+        self.revalidated_at.lock().expect("poisoned").clear();
+        tracing::info!(routes = count, "route table resynced from storage");
     }
 
     /// Apply a route invalidation published by another replica
@@ -505,6 +545,7 @@ impl RouteTable {
     /// bytes.
     pub fn refresh_after_update(&self, route: Route) {
         let route_id = route.id.clone();
+        let group_id = route.group_id.clone();
         {
             let mut routes = self.routes.write().expect("poisoned");
             if let Some(slot) = routes.iter_mut().find(|r| r.id == route_id) {
@@ -519,6 +560,16 @@ impl RouteTable {
         }
         self.components.lock().expect("poisoned").remove(&route_id);
         self.engine_js.lock().expect("poisoned").remove(&route_id);
+        // Updates are the one case the read-through floor cannot reach:
+        // a stale route still *matches*, so the request never gets to
+        // the miss path where revalidation lives. Without this publish a
+        // sibling serves the old compiled component until it restarts.
+        // The route id is what matters here — the artifact caches are
+        // keyed by it, and a source edit that leaves the path alone
+        // would otherwise hide behind a freshly-read record.
+        self.publish_invalidation(
+            RouteInvalidation::for_group(group_id).with_routes(vec![route_id]),
+        );
     }
 
     /// Drop every route in `group_id` from the in-memory cache. Used
@@ -535,13 +586,16 @@ impl RouteTable {
             .filter(|r| r.group_id == group_id)
             .map(|r| r.id.clone())
             .collect();
-        if to_drop.is_empty() {
-            return;
-        }
-        let mut routes = self.routes.write().expect("poisoned");
-        routes.retain(|r| r.group_id != group_id);
-        drop(routes);
-        {
+        // Deliberately *not* an early return when `to_drop` is empty.
+        // Whether siblings hear about a cascade must not depend on
+        // whether this replica happened to have the routes cached — if
+        // it warmed before they existed, or missed their create
+        // invalidation, it would delete them in storage and tell nobody
+        // while replicas that do have them keep serving.
+        if !to_drop.is_empty() {
+            let mut routes = self.routes.write().expect("poisoned");
+            routes.retain(|r| r.group_id != group_id);
+            drop(routes);
             let mut cache = self.components.lock().expect("poisoned");
             let mut js_cache = self.engine_js.lock().expect("poisoned");
             for id in &to_drop {
@@ -549,6 +603,13 @@ impl RouteTable {
                 js_cache.remove(id);
             }
         }
+        // The group is gone, so its read-through slot is dead weight
+        // (finding: groups are ephemeral, so this map would otherwise
+        // accumulate one entry per group the host has ever seen).
+        self.revalidated_at
+            .lock()
+            .expect("poisoned")
+            .remove(group_id);
         self.publish_invalidation(RouteInvalidation::for_group(group_id).with_routes(to_drop));
     }
 
