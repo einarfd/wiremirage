@@ -83,7 +83,14 @@ impl Sweeper {
                     tracing::debug!("another replica holds the sweep lease this tick");
                     continue;
                 }
-                match tokio::task::block_in_place(|| self.single_pass()) {
+                let outcome = tokio::task::block_in_place(|| {
+                    let r = self.single_pass();
+                    // Release on success *and* error: a failed pass
+                    // holding the lease would stall the next tick too.
+                    self.release_sweep();
+                    r
+                });
+                match outcome {
                     Ok(stats) if stats.groups_swept > 0 => {
                         tracing::info!(
                             groups_swept = stats.groups_swept,
@@ -110,9 +117,15 @@ impl Sweeper {
     /// expires and the next tick proceeds. Nothing waits, nothing needs
     /// releasing, and a stuck lease cannot wedge the sweeper.
     ///
-    /// The lease is held slightly longer than the interval so a slow
-    /// sweep does not let a sibling start a second one on top of it.
+    /// The lease TTL is a crash guard, not the cadence: it is released
+    /// as soon as the pass finishes. Leaving it to expire instead — at
+    /// any TTL at or above the interval — means every replica finds it
+    /// still held on the next tick and the cluster sweeps on alternating
+    /// ticks, at half the configured rate, single-replica deployments
+    /// included.
     fn claim_sweep(&self) -> bool {
+        // Still generous, because it only has to outlive a slow sweep so
+        // a sibling cannot start a second one on top of it.
         let ttl = self.interval.as_secs().max(1) * 2;
         let mut bucket = match self.routes.registry().storage().admin_bucket() {
             Ok(b) => b,
@@ -129,6 +142,24 @@ impl Sweeper {
                 tracing::warn!(error = %e, "sweep lease: acquire failed");
                 true
             }
+        }
+    }
+
+    /// Release the sweep lease so the next tick can claim it.
+    ///
+    /// Benign race: a pass that outlives the TTL may delete a lease a
+    /// sibling has since taken, letting two replicas sweep in one tick.
+    /// Every operation a sweep performs is idempotent (ADR-0037 item 5
+    /// and this module's docs), so the cost is duplicated work on a rare
+    /// path — cheaper than the fencing token that would prevent it.
+    fn release_sweep(&self) {
+        let Ok(mut bucket) = self.routes.registry().storage().admin_bucket() else {
+            return;
+        };
+        if let Err(e) = bucket.delete("sweep:lease") {
+            // The TTL is the backstop, so this costs at most one skipped
+            // tick rather than wedging the sweeper.
+            tracing::warn!(error = %e, "releasing sweep lease");
         }
     }
 
@@ -177,6 +208,42 @@ mod tests {
     /// Manually wipe the group record from storage to simulate the
     /// Valkey TTL firing. We use the registry's storage handle via a
     /// helper crate of the test.
+    #[test]
+    fn the_lease_does_not_cost_every_other_sweep() {
+        // The lease is a crash guard, not the cadence. Left to expire on
+        // its own it outlives the interval, so every replica finds it
+        // held on the next tick and the cluster sweeps at half rate —
+        // on single-replica and in-memory deployments too, since every
+        // backend takes this path.
+        let table = fresh_route_table();
+        let sweeper = Sweeper::new(table).with_interval(Duration::from_millis(50));
+
+        for tick in 1..=3 {
+            assert!(
+                sweeper.claim_sweep(),
+                "tick {tick} must claim the lease; a released lease is \
+                 immediately re-claimable by the next tick"
+            );
+            sweeper.release_sweep();
+        }
+    }
+
+    #[test]
+    fn an_unreleased_lease_blocks_a_sibling() {
+        // The other half: while a pass is still running, a sibling must
+        // not start a second sweep on top of it.
+        let table = fresh_route_table();
+        let sweeper = Sweeper::new(table).with_interval(Duration::from_millis(50));
+
+        assert!(sweeper.claim_sweep());
+        assert!(
+            !sweeper.claim_sweep(),
+            "held for the duration of the pass, not released between ticks"
+        );
+        sweeper.release_sweep();
+        assert!(sweeper.claim_sweep(), "and claimable once released");
+    }
+
     fn wipe_group_record(registry: &Registry, group_id: &str, group_name: &str) {
         // A Valkey TTL firing drops the whole hash key, not individual
         // fields — delete the key outright so the simulation stays accurate
