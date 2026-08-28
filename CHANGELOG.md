@@ -57,6 +57,18 @@ they make the design better, and are called out here.
   store, or by two simultaneous first-logins for the same OIDC identity; the
   loser now gets the normal "email taken" error.
 
+- **A Helm chart** at `deploy/helm/wiremirage`, now that multiple replicas are
+  supported. Deployment, Service, Ingress and ConfigMap; storage and secrets
+  come from outside the release. Values with no safe default — `apexHost`,
+  `existingSecret`, `valkey.url`, `ingress.tls.secretName` — fail at render
+  time with a message naming what to set, rather than deploying a host that
+  would fail at boot. The ingress routes both the apex and `*.{apexHost}`,
+  since groups get their own subdomains at runtime. `just helm-lint` (folded
+  into `check-all`) lints it, renders it, and asserts a guardrail still fires.
+  Pods run with a read-only root filesystem, a size-capped emptyDir for the
+  compiled-engine cache, and a PodDisruptionBudget once there is more than one
+  replica.
+
 ### Changed
 
 - **The MCP transport is stateless** (ADR-0037, first slice). No `Mcp-Session-Id`

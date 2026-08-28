@@ -1,0 +1,70 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullName := include "wiremirage.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "wiremirage.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.apexHost | quote }}
+        - {{ printf "*.%s" .Values.apexHost | quote }}
+        {{- range .Values.ingress.extraHosts }}
+        - {{ . | quote }}
+        {{- end }}
+      # A *wildcard* certificate. The chart does not issue it — see the
+      # chart README; on Kubernetes this is normally cert-manager with a
+      # DNS-01 solver, since HTTP-01 cannot satisfy a wildcard.
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    # The apex is the control plane: REST, MCP, the UI, /health, /ready.
+    - host: {{ .Values.apexHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+    # Every group is served on its own subdomain (ADR-0030), and groups
+    # are created at runtime — so this has to be a wildcard rule rather
+    # than a host per group. The host resolves `{group}.{apex}` from the
+    # Host header and dispatches mock traffic there; unknown subdomains
+    # 404. Wildcard DNS must point here too, or the rule never matches.
+    - host: {{ printf "*.%s" .Values.apexHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+    {{- range .Values.ingress.extraHosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+    {{- end }}
+{{- end }}

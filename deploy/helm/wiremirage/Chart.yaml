@@ -1,0 +1,15 @@
+apiVersion: v2
+name: wiremirage
+description: An agent-native mock HTTP server. Handlers are TypeScript, executed as WebAssembly.
+type: application
+# Chart version tracks the chart; appVersion tracks the host image. Bump
+# the chart version for template changes even when the app is unchanged.
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/einarfd/wiremirage
+sources:
+  - https://github.com/einarfd/wiremirage
+keywords:
+  - mock
+  - testing
+  - webassembly

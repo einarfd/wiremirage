@@ -1,0 +1,47 @@
+WireMirage {{ .Chart.AppVersion }} — release {{ .Release.Name }}, {{ .Values.replicaCount }} replica(s).
+
+  Control plane:  https://{{ .Values.apexHost }}/ui/
+  Mock traffic:   https://{group}.{{ .Values.apexHost }}/
+
+Two prerequisites this chart cannot check for you, because they live
+outside the cluster or outside the release:
+
+  1. Wildcard DNS. `*.{{ .Values.apexHost }}` must resolve here, or every
+     mock request 404s at the ingress before reaching a pod. Groups are
+     created at runtime, so a record per group is not an option.
+
+{{- if .Values.ingress.tls.enabled }}
+  2. A wildcard certificate in the Secret `{{ .Values.ingress.tls.secretName }}`,
+     covering both `{{ .Values.apexHost }}` and `*.{{ .Values.apexHost }}`.
+     HTTP-01 cannot issue a wildcard; use a DNS-01 solver.
+{{- else }}
+  2. TLS is disabled on this ingress, so something upstream must be
+     terminating it. Sessions use Secure cookies over HTTPS.
+{{- end }}
+
+Check the host is up and reachable:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "wiremirage.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -s localhost:8080/ready
+
+{{- if .Values.bootstrapEmail }}
+
+First boot creates the admin {{ .Values.bootstrapEmail }} with the API token from
+WM_BOOTSTRAP_TOKEN in the Secret `{{ .Values.existingSecret }}`. Both are
+ignored once any user exists, so leaving them set is harmless.
+{{- else }}
+
+No bootstrapEmail is set. If this is a fresh install with an empty
+Valkey, the host has no way to authenticate anyone and will refuse to
+start. Set bootstrapEmail and WM_BOOTSTRAP_TOKEN, or point it at storage
+that already has users.
+{{- end }}
+
+{{- if gt (int .Values.replicaCount) 1 }}
+
+Running {{ .Values.replicaCount }} replicas. Everything cross-replica goes through
+Valkey (ADR-0037): route-cache invalidation, journal fan-out for live
+tails, the shared login throttle, and the sweep lease. One thing is
+deliberately not covered — an outbound callback fires on the replica
+that served the request, so a rolling deploy can drop one in flight.
+{{- end }}

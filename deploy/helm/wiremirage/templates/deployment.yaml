@@ -1,0 +1,125 @@
+{{- include "wiremirage.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "wiremirage.fullname" . }}
+  labels:
+    {{- include "wiremirage.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "wiremirage.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when non-secret config changes. Secret changes
+        # are deliberately not hashed here: the chart never reads the
+        # Secret's contents, so it cannot see them change.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "wiremirage.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "wiremirage.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # In-flight requests drain on SIGTERM; the host also tells its SSE
+      # journal tails to wrap up first, so a browser EventSource cannot
+      # hold the shutdown open indefinitely.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "wiremirage.fullname" . }}
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          env:
+            {{- if .Values.valkey.urlSecretKey }}
+            # Overrides the ConfigMap's WM_STORAGE: a URL carrying
+            # credentials belongs in the Secret, not in values.
+            - name: WM_STORAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.valkey.urlSecretKey }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # Startup gates the other two. The host compiles the ~12 MB
+          # JavaScript engine component before binding the listener, and
+          # caches the artifact under /tmp — which does not survive a
+          # pod, so every fresh pod pays it once. Measured at ~2s on a
+          # release image, so this probe is about keeping liveness from
+          # firing during startup, not about tolerating a long one.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          # Liveness asks only "is the process alive" — deliberately not
+          # /ready, or a Valkey blip would restart every pod instead of
+          # taking them out of rotation until it recovers.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          # Readiness pings the storage backend and returns 503 when it
+          # is unreachable, which is exactly the "stop sending me
+          # traffic" signal.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # The compiled-engine artifact cache — and the only thing the
+            # host writes, which is what lets the root filesystem stay
+            # read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpSizeLimit }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

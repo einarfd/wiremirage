@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "wiremirage.fullname" . }}
+  labels:
+    {{- include "wiremirage.labels" . | nindent 4 }}
+data:
+  # Bind on all interfaces: the pod network is the boundary here, not
+  # loopback. The published image already defaults to this; setting it
+  # explicitly keeps the manifest self-describing.
+  WM_LISTEN_ADDR: "0.0.0.0:8080"
+  WM_APEX_HOST: {{ .Values.apexHost | quote }}
+  # ADR-0027: one switch tells the host which forwarded headers to
+  # believe. Behind an ingress this must be set or secure-cookie and
+  # Host handling misbehave silently.
+  WM_TRUSTED_PROXY: {{ include "wiremirage.trustedProxy" . | quote }}
+  {{- if not .Values.valkey.urlSecretKey }}
+  WM_STORAGE: {{ .Values.valkey.url | quote }}
+  {{- end }}
+  {{- with .Values.bootstrapEmail }}
+  WM_BOOTSTRAP_EMAIL: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.auth.oidc.enabled }}
+  WM_OIDC_ISSUER: {{ .Values.auth.oidc.issuer | quote }}
+  WM_OIDC_CLIENT_ID: {{ .Values.auth.oidc.clientId | quote }}
+  {{- with .Values.auth.oidc.displayName }}
+  WM_OIDC_DISPLAY_NAME: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.auth.oidc.allowAll }}
+  WM_OIDC_ALLOW_ALL: "true"
+  {{- end }}
+  {{- with .Values.auth.oidc.allowEmails }}
+  WM_OIDC_ALLOW_EMAILS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.oidc.allowDomains }}
+  WM_OIDC_ALLOW_DOMAINS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.oidc.allowGroups }}
+  WM_OIDC_ALLOW_GROUPS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.oidc.adminEmails }}
+  WM_OIDC_ADMIN_EMAILS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.oidc.adminGroups }}
+  WM_OIDC_ADMIN_GROUPS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.oidc.groupsClaim }}
+  WM_OIDC_GROUPS_CLAIM: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.auth.oidc.extraScopes }}
+  WM_OIDC_EXTRA_SCOPES: {{ join "," . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.auth.github.enabled }}
+  WM_GITHUB_CLIENT_ID: {{ .Values.auth.github.clientId | quote }}
+  {{- with .Values.auth.github.allowUsers }}
+  WM_GITHUB_ALLOW_USERS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.github.allowOrgs }}
+  WM_GITHUB_ALLOW_ORGS: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.auth.github.adminUsers }}
+  WM_GITHUB_ADMIN_USERS: {{ join "," . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.egress.enabled }}
+  WM_EGRESS: "on"
+  {{- with .Values.egress.allow }}
+  WM_EGRESS_ALLOW: {{ join "," . | quote }}
+  {{- end }}
+  {{- with .Values.egress.deny }}
+  WM_EGRESS_DENY: {{ join "," . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.observability.otlpEndpoint }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ . | quote }}
+  {{- end }}

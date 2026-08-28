@@ -6,7 +6,33 @@ default:
 check: fmt-check clippy test
 
 # Like `check` but also runs the tier-3 testcontainers suite. Requires Docker.
-check-all: check test-valkey typecheck
+check-all: check test-valkey typecheck helm-lint
+
+# Lint the Helm chart and prove it renders. The render is the part that
+# matters: `helm lint` alone passes on a chart whose required values are
+# missing, because the failure only surfaces at template time.
+helm-lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v helm >/dev/null; then
+      echo "helm not installed; skipping chart lint" >&2
+      exit 0
+    fi
+    args=(--set apexHost=wm.example.com
+          --set existingSecret=wm-secrets
+          --set valkey.url=redis://valkey:6379
+          --set ingress.tls.secretName=wm-wildcard-tls)
+    helm lint deploy/helm/wiremirage "${args[@]}"
+    helm template wm deploy/helm/wiremirage "${args[@]}" >/dev/null
+    # The guardrails are the chart's real logic, so check one actually
+    # fires rather than only that the happy path renders.
+    if helm template wm deploy/helm/wiremirage \
+         --set apexHost=wm.example.com --set existingSecret=s \
+         --set valkey.url=memory >/dev/null 2>&1; then
+      echo "chart accepted in-memory storage; the guardrail regressed" >&2
+      exit 1
+    fi
+    echo "helm chart: lints, renders, and rejects in-memory storage"
 
 # Type-check the shipped handler types (ADR-0038) by compiling
 # types/example-handler.ts against types/wiremirage-handler.d.ts. The .d.ts

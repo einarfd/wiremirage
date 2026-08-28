@@ -232,6 +232,21 @@ the request, so a replica terminating during the delay drops that callback.
 That sits inside the existing single-attempt best-effort contract, but rolling
 deploys make it likelier.
 
+### Kubernetes
+
+A Helm chart lives at [`deploy/helm/wiremirage`](../deploy/helm/wiremirage/),
+with its own [README](../deploy/helm/wiremirage/README.md) covering the three
+prerequisites it can't provide for you: wildcard DNS for `*.{apex}`, a wildcard
+TLS certificate (cert-manager with a **DNS-01** solver — HTTP-01 can't issue
+one), and a Valkey instance.
+
+Two things about the chart are worth knowing before you read it. It refuses to
+render with in-memory storage, because a multi-replica release over it would
+look healthy while each pod served a divergent view. And it gates liveness
+behind a generous `startupProbe`: the host compiles the ~12 MB JavaScript
+engine before binding its listener, and that artifact is cached in the
+container's temp directory, so every fresh pod pays it once.
+
 All of this requires the Valkey backend — `WM_STORAGE=memory` is a
 single-process mode by construction, and every cross-replica mechanism above
 short-circuits on it.

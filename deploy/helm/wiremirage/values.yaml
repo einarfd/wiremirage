@@ -1,0 +1,195 @@
+# Default values for the wiremirage chart.
+#
+# Three values have no safe default and must be supplied: `apexHost`,
+# `valkey.url`, and `existingSecret`. The templates fail at render time
+# rather than starting a host that would fail at boot — the same
+# fail-fast posture the host itself takes on missing configuration.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/einarfd/wiremirage
+  # Defaults to .Chart.AppVersion. Pin a digest in production.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# The hostname the control plane is served on, e.g. `wm.example.com`.
+# Mock traffic is served on `{group}.{apexHost}` subdomains (ADR-0030),
+# which is why wildcard DNS and a wildcard certificate are prerequisites.
+# Required.
+apexHost: ""
+
+valkey:
+  # Required. `redis://host:port[/db]` or `rediss://...` for TLS.
+  #
+  # This chart deploys no storage. Valkey is real infrastructure with its
+  # own memory sizing, persistence and failover story, and bundling a
+  # cache into an app chart invites running an unbacked one in
+  # production. More than one replica requires it: every cross-replica
+  # mechanism (route invalidation, journal fan-out, the shared login
+  # throttle, the sweep lease) short-circuits on in-memory storage.
+  url: ""
+  # Set when the URL carries credentials you would rather not put in a
+  # values file. Names a key in `existingSecret` holding the full URL;
+  # takes precedence over `valkey.url`.
+  urlSecretKey: ""
+
+# Name of a pre-existing Secret holding every sensitive value. Required.
+#
+# The chart deliberately does not template secrets from values — they
+# would land in `helm get values`, shell history and any git-tracked
+# values file. Create it out of band (1Password, External Secrets, sops)
+# and name it here.
+#
+# Expected keys:
+#   SESSION_SECRET          required, >= 32 bytes
+#   WM_BOOTSTRAP_TOKEN      required on first boot, with bootstrapEmail
+#   WM_OIDC_CLIENT_SECRET   when auth.oidc.enabled
+#   WM_GITHUB_CLIENT_SECRET when auth.github.enabled
+#   WM_STORAGE              when valkey.urlSecretKey is set
+existingSecret: ""
+
+# Email of the admin created on first boot, paired with the
+# WM_BOOTSTRAP_TOKEN in the secret. Both are ignored once a user exists.
+bootstrapEmail: ""
+
+auth:
+  oidc:
+    enabled: false
+    issuer: ""
+    clientId: ""
+    displayName: ""
+    # Exactly one allow posture is required, and the host refuses to
+    # start without one — so the chart refuses to render without one.
+    #
+    # allowAll accepts every user the issuer authenticates. That is the
+    # right posture for a *private* IdP (Pocket ID, closed-registration
+    # Keycloak, corporate Okta), where account existence already is the
+    # authorization decision. Never set it against a public issuer like
+    # Google, where "authenticated" means anyone on the internet.
+    allowAll: false
+    # Or per-identity rules, which OR together. Setting these *and*
+    # allowAll is refused: the combination usually means someone
+    # believes the rules still restrict something they don't.
+    allowEmails: []
+    # Domain, not address: `acme.example` allows anyone@acme.example.
+    allowDomains: []
+    # Matched against the IdP's groups claim; needs groupsClaim set.
+    allowGroups: []
+    # Emails promoted to admin on first login.
+    adminEmails: []
+    adminGroups: []
+    groupsClaim: ""
+    extraScopes: []
+  github:
+    enabled: false
+    clientId: ""
+    allowUsers: []
+    allowOrgs: []
+    adminUsers: []
+
+# Outbound callbacks (ADR-0034). Off by default: this is the only egress
+# from an otherwise-closed sandbox, and it is opted into per host *and*
+# per group.
+egress:
+  enabled: false
+  # CIDRs or hostnames permitted beyond the hardcoded special-use denies.
+  allow: []
+  deny: []
+
+observability:
+  # OTLP/gRPC endpoint. Empty disables export; there is no localhost
+  # fallback, so an unset value means stderr logs only.
+  otlpEndpoint: ""
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  # The wildcard TLS secret. Mock traffic lands on `*.{apexHost}`, so a
+  # wildcard certificate is mandatory rather than a nicety.
+  #
+  # This chart does not issue it. On Kubernetes that is normally
+  # cert-manager with a DNS-01 solver — HTTP-01 cannot satisfy a
+  # wildcard. Provision the cert and name its secret here.
+  tls:
+    enabled: true
+    secretName: ""
+  # Extra hostnames to route, beyond `apexHost` and `*.apexHost`.
+  extraHosts: []
+
+service:
+  type: ClusterIP
+  port: 80
+
+# The host compiles the ~12 MB JavaScript engine component before it
+# binds the listener, so a pod is unreachable until that finishes. A
+# release build measures ~2s, and the startup probe exists to keep the
+# liveness probe from firing during it rather than to tolerate anything
+# lengthy: 12 * 5s = 60s is ample headroom for a slow node, while still
+# failing a genuinely stuck pod promptly.
+probes:
+  startup:
+    periodSeconds: 5
+    failureThreshold: 12
+  liveness:
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# Guards against a rolling node drain taking every replica at once.
+# Rolling updates keep the old pod serving until the new one passes its
+# probes; worth knowing either way is that an in-flight outbound callback
+# is lost when its replica terminates (ADR-0034).
+# Only rendered when replicaCount > 1 — a PDB over a single replica
+# blocks drains instead of protecting anything.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Size cap on the emptyDir backing the compiled-engine cache, so a
+# runaway write cannot consume node ephemeral storage.
+tmpSizeLimit: 512Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # The only thing the host writes is the compiled-engine cache, and the
+  # chart mounts an emptyDir over /tmp for it. Verified against the
+  # published image with a read-only root and a tmpfs /tmp.
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Extra environment variables, for settings the chart does not model.
+extraEnv: []
