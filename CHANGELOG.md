@@ -9,6 +9,8 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-08-28
+
 ### Added
 
 - **The route table revalidates on a match miss** (ADR-0037). When a request
@@ -172,5 +174,6 @@ First public release.
 - Configuration fails fast at startup with a message naming what to set,
   rather than falling back silently.
 
-[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/einarfd/wiremirage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/einarfd/wiremirage/releases/tag/v0.1.0
