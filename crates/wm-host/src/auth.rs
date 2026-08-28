@@ -517,10 +517,23 @@ impl Auth {
             user.created_at.to_rfc3339().into_bytes(),
         )?;
         bucket.hash_set(&key, "session_epoch", b"0".to_vec())?;
-        bucket.set(
+        // Claim the email index atomically (ADR-0037 item 6). The
+        // check at the top of this function is check-then-act, which
+        // two replicas cold-starting against an empty store — or two
+        // simultaneous first-logins for the same OIDC identity — can
+        // both pass. Losing this claim means someone else created the
+        // account a moment ago, which is exactly `EmailTaken`.
+        //
+        // Written after the record so the index never points at a
+        // half-built user; the loser's orphaned `user:{id}` hash is
+        // unreachable (nothing indexes it) and harmless.
+        let claimed = bucket.set_if_absent(
             &format!("user:by-email:{}", user.email),
             user.id.as_bytes().to_vec(),
         )?;
+        if !claimed {
+            return Err(AuthError::EmailTaken(user.email.clone()));
+        }
         bucket.set_add("user:all", &user.id)?;
         Ok(user)
     }

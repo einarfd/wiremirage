@@ -200,9 +200,8 @@ Then the first-deploy checklist:
 
 ## Scaling
 
-One replica, still — but the gap is closing.
-[ADR-0037](adr/0037-multi-replica-readiness.md) is being worked through, and
-two of its items have landed:
+Multiple replicas are supported. [ADR-0037](adr/0037-multi-replica-readiness.md)
+audited the host for per-process state and closed every item:
 
 - **The MCP transport is stateless**, so consecutive MCP requests may be served
   by different replicas.
@@ -216,14 +215,23 @@ two of its items have landed:
   own — a stale route still matches, so it never reaches the miss path. A lost
   message degrades to the read-through's staleness window rather than lasting
   until a restart.
-
 - **Live journal tails span replicas.** A tail sees traffic dispatched by any
   replica, not just the one holding the connection. Replicas subscribe only
   while something is actually tailing them, so this costs nothing when nobody
   is watching.
+- **The login throttle is shared.** Five failed password attempts in a minute
+  lock an IP out across every replica, not five per replica.
+- **One replica sweeps per tick.** The lifecycle sweeper claims a short lease
+  before each pass; the others skip it. Sweeping is idempotent, so this saves
+  duplicated work rather than fixing a correctness problem — and if the holder
+  dies mid-sweep the lease expires and the next tick proceeds.
 
-What still assumes a single host: the login throttle (N replicas would allow N
-times the failed-login budget) and the group sweeper (every replica sweeps;
-harmless but duplicated). Both degrade rather than break.
+One caveat remains, and it predates this work: an outbound callback
+([ADR-0034](adr/0034-outbound-callbacks.md)) fires on the replica that served
+the request, so a replica terminating during the delay drops that callback.
+That sits inside the existing single-attempt best-effort contract, but rolling
+deploys make it likelier.
 
-Until those land, run one instance and scale Valkey instead.
+All of this requires the Valkey backend — `WM_STORAGE=memory` is a
+single-process mode by construction, and every cross-replica mechanism above
+short-circuits on it.

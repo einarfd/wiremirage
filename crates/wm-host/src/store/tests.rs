@@ -223,12 +223,31 @@ pub fn case_set_add_wrong_type_traps(bk: &mut Bucket) {
     assert!(matches!(err, StoreError::WrongType { .. }));
 }
 
+/// Both backends must agree that a second claim on the same key
+/// fails. This is what makes the user-email index safe against two
+/// replicas cold-starting at once (ADR-0037 item 6).
+pub fn case_set_if_absent_claims_once(bk: &mut Bucket) {
+    assert!(bk.set_if_absent("claim", b"first".to_vec()).unwrap());
+    assert!(!bk.set_if_absent("claim", b"second".to_vec()).unwrap());
+    assert_eq!(bk.get("claim").unwrap().as_deref(), Some(&b"first"[..]));
+}
+
+/// A lease is exclusive while held. The expiry half can't be tested
+/// without sleeping past it, so this covers the property that matters
+/// per tick: a second caller is refused.
+pub fn case_lease_is_exclusive_while_held(bk: &mut Bucket) {
+    assert!(bk.try_acquire_lease("lease", 60).unwrap());
+    assert!(!bk.try_acquire_lease("lease", 60).unwrap());
+}
+
 /// Cases shared between in-memory and Valkey runs. Backend-specific cases
 /// (e.g., `case_incr_in_memory_overflow`) are listed separately.
 #[macro_export]
 macro_rules! storage_cases {
     ($macro:ident) => {
         $macro!(
+            case_set_if_absent_claims_once,
+            case_lease_is_exclusive_while_held,
             case_get_missing_returns_none,
             case_set_then_get_round_trips,
             case_set_overwrites,
@@ -278,6 +297,43 @@ mod in_memory {
 
     fn fresh() -> Bucket {
         Storage::in_memory().route_bucket("g", "r").unwrap()
+    }
+
+    /// An expired lease must be reclaimable.
+    ///
+    /// In-memory only, deliberately. Valkey enforces expiry itself
+    /// through `EX`, which is Valkey's guarantee to keep; what needs
+    /// testing is *our* deadline comparison, which exists only on this
+    /// backend and only because `set_ttl` is a no-op here. Without it a
+    /// lease would be taken once and never released — wedging the
+    /// lifecycle sweeper after a single pass and locking out any IP
+    /// that ever tripped the login throttle. Writing a past deadline
+    /// directly beats sleeping a real second in the test suite.
+    #[test]
+    fn expired_lease_is_reclaimable() {
+        let mut bk = fresh();
+        assert!(bk.try_acquire_lease("lease", 60).unwrap());
+        assert!(!bk.try_acquire_lease("lease", 60).unwrap(), "held");
+
+        let past = (chrono::Utc::now() - chrono::Duration::seconds(1))
+            .to_rfc3339()
+            .into_bytes();
+        bk.set("lease", past).unwrap();
+
+        assert!(
+            bk.try_acquire_lease("lease", 60).unwrap(),
+            "a lease whose deadline has passed can be taken again"
+        );
+    }
+
+    /// A lease value we can't parse is treated as expired rather than
+    /// held forever — otherwise one corrupt key would wedge the sweeper
+    /// permanently, with no way back short of manual intervention.
+    #[test]
+    fn unparseable_lease_is_treated_as_expired() {
+        let mut bk = fresh();
+        bk.set("lease", b"not-a-timestamp".to_vec()).unwrap();
+        assert!(bk.try_acquire_lease("lease", 60).unwrap());
     }
 
     macro_rules! decl_cases {

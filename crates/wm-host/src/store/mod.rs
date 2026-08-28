@@ -293,6 +293,105 @@ impl Bucket {
         }
     }
 
+    /// Atomically set `key` to `value` only if it does not already
+    /// exist. Returns whether this caller wrote it.
+    ///
+    /// The building block for claiming a unique name across replicas.
+    /// Unlike [`try_acquire_lease`] this never expires — it is for
+    /// records that should exist exactly once, not for coordination.
+    pub fn set_if_absent(&mut self, key: &str, value: Vec<u8>) -> Result<bool, StoreError> {
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                // One lock across the check and the write; atomic for
+                // the single process this backend serves.
+                let mut store = store.lock().expect("poisoned");
+                if memory::get(&store, &fk)
+                    .map_err(|e| restore_user_key(e, prefix))?
+                    .is_some()
+                {
+                    return Ok(false);
+                }
+                memory::set(&mut store, fk, value);
+                Ok(true)
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let got: Option<String> = redis::cmd("SET")
+                    .arg(&fk)
+                    .arg(value)
+                    .arg("NX")
+                    .query(conn)
+                    .map_err(|e| StoreError::Backend(format!("SET NX: {e}")))?;
+                Ok(got.is_some())
+            }
+        }
+    }
+
+    /// Atomically claim `key` for `ttl_seconds`, returning whether this
+    /// caller won it.
+    ///
+    /// A *lease*, not a lock: there is no release, and it expires on its
+    /// own. That suits coordination where losing the race means "skip
+    /// this round" rather than "wait" — the lifecycle sweeper, whose
+    /// work is idempotent anyway, so at worst a missed round happens on
+    /// the next tick.
+    ///
+    /// `ttl_seconds` is clamped to at least 1: Valkey rejects a
+    /// non-positive expire time, so accepting 0 would mean one backend
+    /// erroring where the other silently granted a lease that was
+    /// already stale.
+    ///
+    /// The expiry deadline is stored *in the value* as well as being
+    /// set on the key. That is what makes the in-memory backend behave
+    /// the same as Valkey here: `set_ttl` is a no-op in memory, so a
+    /// lease relying on server-side expiry alone would be taken once
+    /// and never released, wedging the sweeper after a single pass.
+    /// Comparing the stored deadline costs nothing and keeps both
+    /// backends honest.
+    pub fn try_acquire_lease(&mut self, key: &str, ttl_seconds: u64) -> Result<bool, StoreError> {
+        // Valkey rejects a non-positive expire time outright, so a
+        // zero would be an error on one backend and a no-op lease on
+        // the other. Clamp instead: a lease is a claim for *some*
+        // time, and the shortest meaningful one is a second.
+        let ttl_seconds = ttl_seconds.max(1);
+        let deadline = chrono::Utc::now() + chrono::Duration::seconds(ttl_seconds as i64);
+        let payload = deadline.to_rfc3339().into_bytes();
+        match self {
+            Bucket::InMemory { store, prefix } => {
+                let fk = format!("{prefix}{key}");
+                // The whole read-compare-write happens under one lock,
+                // so it is atomic for the single process this backend
+                // ever serves.
+                let mut store = store.lock().expect("poisoned");
+                if let Some(existing) =
+                    memory::get(&store, &fk).map_err(|e| restore_user_key(e, prefix))?
+                    && let Ok(text) = std::str::from_utf8(&existing)
+                    && let Ok(held_until) = chrono::DateTime::parse_from_rfc3339(text)
+                    && held_until > chrono::Utc::now()
+                {
+                    return Ok(false);
+                }
+                memory::set(&mut store, fk, payload);
+                Ok(true)
+            }
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                // SET .. NX EX is one round trip and atomic across
+                // replicas, which is the whole point.
+                let got: Option<String> = redis::cmd("SET")
+                    .arg(&fk)
+                    .arg(payload)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(ttl_seconds)
+                    .query(conn)
+                    .map_err(|e| StoreError::Backend(format!("SET NX: {e}")))?;
+                Ok(got.is_some())
+            }
+        }
+    }
+
     /// Publish `payload` to `channel` on this bucket's own connection.
     ///
     /// Channels are **not** prefixed: a bucket's key prefix scopes its

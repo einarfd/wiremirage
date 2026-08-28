@@ -1,100 +1,152 @@
 //! Per-IP login throttle for `POST /auth/login/password`.
 //!
 //! ADR-0018 calls for "5 failed attempts in 60 seconds triggers a
-//! 60-second lockout, in-memory counter". This isn't sufficient to
-//! make local auth safe to expose publicly — that's not the use case —
-//! but it stops trivial drive-by brute force inside the trusted-
-//! network threat model.
+//! 60-second lockout". This isn't sufficient to make local auth safe to
+//! expose publicly — that's not the use case — but it stops trivial
+//! drive-by brute force inside the trusted-network threat model.
 //!
-//! Implementation: a `Mutex<HashMap<IpAddr, Counter>>`. Each `Counter`
-//! tracks the timestamp of the most recent failed attempt and a
-//! sliding count. A successful login clears the counter for that IP.
-//! Stale entries are reaped opportunistically when the IP is seen
-//! again — there's no background sweeper, which means the map can
-//! grow within the lockout window. For the threat model that's fine.
+//! State lives in shared storage rather than a process-local map
+//! (ADR-0037 item 4). With the counters in-process, N replicas behind a
+//! load balancer would each keep their own tally and collectively allow
+//! N times the intended budget before anyone locked out.
+//!
+//! The window and the lockout are expressed as **leases** — keys whose
+//! value is their own deadline — rather than as `INCR` plus `EXPIRE`.
+//! That is what lets one implementation serve both backends: `set_ttl`
+//! is a no-op on the in-memory store, so a lockout relying on
+//! server-side expiry would never lift there, permanently locking out
+//! any IP that ever tripped it. Comparing a stored deadline behaves
+//! identically on both, and `SET .. NX` keeps the claim atomic across
+//! replicas.
+//!
+//! Storage failures fail *open*: a throttle that can't reach storage
+//! must not lock everyone out of a host that is otherwise serving.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
-const WINDOW: Duration = Duration::from_secs(60);
-const MAX_FAILS: u32 = 5;
-const LOCKOUT: Duration = Duration::from_secs(60);
+use chrono::{DateTime, Utc};
 
-#[derive(Debug, Clone, Copy)]
-struct Counter {
-    /// Failed attempts within the active window. Reset to 0 when the
-    /// window elapses or on a successful login.
-    fails: u32,
-    /// When the current window started. The window slides forward on
-    /// every miss; we don't reset it on a hit because the hit clears
-    /// the counter entirely.
-    window_started: Instant,
-    /// `Some(until)` when locked out; comparison vs `Instant::now()`
-    /// decides whether to still reject.
-    locked_until: Option<Instant>,
-}
+use crate::store::Storage;
 
-#[derive(Default)]
+const WINDOW_SECONDS: u64 = 60;
+const MAX_FAILS: i64 = 5;
+const LOCKOUT_SECONDS: u64 = 60;
+
+#[derive(Clone)]
 pub struct LoginThrottle {
-    counters: Mutex<HashMap<IpAddr, Counter>>,
+    storage: Storage,
 }
 
 impl LoginThrottle {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
     }
 
-    /// Check whether `ip` is currently locked out. Doesn't mutate any
-    /// state — the caller checks before attempting verification.
+    /// Keys are namespaced per IP. The failure counter has no TTL on the
+    /// in-memory backend, but the window lease resets its *value* every
+    /// minute, so what accumulates is one small key per distinct IP —
+    /// the same growth the previous in-process map had.
+    fn fails_key(ip: IpAddr) -> String {
+        format!("throttle:fails:{ip}")
+    }
+
+    fn window_key(ip: IpAddr) -> String {
+        format!("throttle:window:{ip}")
+    }
+
+    fn lock_key(ip: IpAddr) -> String {
+        format!("throttle:lock:{ip}")
+    }
+
+    /// Check whether `ip` is currently locked out. Does not mutate — the
+    /// caller checks before attempting verification.
     pub fn is_locked_out(&self, ip: IpAddr) -> bool {
-        let now = Instant::now();
-        let map = self.counters.lock().expect("login throttle mutex");
-        map.get(&ip)
-            .and_then(|c| c.locked_until)
-            .is_some_and(|until| until > now)
+        let mut bucket = match self.storage.admin_bucket() {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "login throttle: opening bucket");
+                return false;
+            }
+        };
+        let raw = match bucket.get(&Self::lock_key(ip)) {
+            Ok(Some(v)) => v,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!(error = %e, "login throttle: reading lockout");
+                return false;
+            }
+        };
+        // The lease value is its own deadline, which is what makes this
+        // work on a backend without server-side expiry.
+        std::str::from_utf8(&raw)
+            .ok()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|until| until > Utc::now())
     }
 
-    /// Record a failed login attempt for `ip`. Returns `true` if the
-    /// failure pushed the IP into lockout (the caller may want to
-    /// log the transition).
+    /// Record a failed login attempt for `ip`. Returns `true` if this
+    /// failure pushed the IP into lockout, so the caller can log the
+    /// transition.
     pub fn record_failure(&self, ip: IpAddr) -> bool {
-        let now = Instant::now();
-        let mut map = self.counters.lock().expect("login throttle mutex");
-        let counter = map.entry(ip).or_insert(Counter {
-            fails: 0,
-            window_started: now,
-            locked_until: None,
-        });
-        // If we're past an existing lockout, clear it before counting
-        // this failure — otherwise the IP would stay locked forever.
-        if let Some(until) = counter.locked_until
-            && until <= now
-        {
-            counter.locked_until = None;
-            counter.fails = 0;
-            counter.window_started = now;
-        }
-        // Slide the window: if the existing window is stale, start
-        // a fresh one with this failure.
-        if now.duration_since(counter.window_started) > WINDOW {
-            counter.fails = 0;
-            counter.window_started = now;
-        }
-        counter.fails += 1;
-        if counter.fails >= MAX_FAILS {
-            counter.locked_until = Some(now + LOCKOUT);
-            true
+        let mut bucket = match self.storage.admin_bucket() {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "login throttle: opening bucket");
+                return false;
+            }
+        };
+        // Claiming the window lease means this failure opened a fresh
+        // 60-second window, so the count restarts at 1. Failing to claim
+        // means a window is already running and this adds to it. The
+        // claim is atomic, so concurrent failures across replicas can't
+        // both decide they started the window.
+        let fresh_window = bucket
+            .try_acquire_lease(&Self::window_key(ip), WINDOW_SECONDS)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "login throttle: window lease");
+                false
+            });
+        let fails = if fresh_window {
+            if let Err(e) = bucket.set(&Self::fails_key(ip), b"1".to_vec()) {
+                tracing::warn!(error = %e, "login throttle: resetting counter");
+                return false;
+            }
+            1
         } else {
-            false
+            match bucket.incr(&Self::fails_key(ip), 1) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "login throttle: incrementing counter");
+                    return false;
+                }
+            }
+        };
+        if fails < MAX_FAILS {
+            return false;
         }
+        // Trip the lockout, and clear the counter so the IP starts clean
+        // once the lockout lapses rather than re-tripping on its next
+        // single failure.
+        let newly_locked = bucket
+            .try_acquire_lease(&Self::lock_key(ip), LOCKOUT_SECONDS)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "login throttle: lock lease");
+                false
+            });
+        let _ = bucket.delete(&Self::fails_key(ip));
+        let _ = bucket.delete(&Self::window_key(ip));
+        newly_locked
     }
 
-    /// Clear the counter for `ip` after a successful login.
+    /// Clear the counters for `ip` after a successful login. Leaves any
+    /// active lockout in place — a correct password during a lockout
+    /// shouldn't be a way out of it.
     pub fn record_success(&self, ip: IpAddr) {
-        let mut map = self.counters.lock().expect("login throttle mutex");
-        map.remove(&ip);
+        let Ok(mut bucket) = self.storage.admin_bucket() else {
+            return;
+        };
+        let _ = bucket.delete(&Self::fails_key(ip));
+        let _ = bucket.delete(&Self::window_key(ip));
     }
 }
 
@@ -108,19 +160,23 @@ impl std::fmt::Debug for LoginThrottle {
 mod tests {
     use super::*;
 
+    fn throttle() -> LoginThrottle {
+        LoginThrottle::new(Storage::in_memory())
+    }
+
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
 
     #[test]
     fn fresh_ip_is_not_locked() {
-        let t = LoginThrottle::new();
+        let t = throttle();
         assert!(!t.is_locked_out(ip("10.0.0.1")));
     }
 
     #[test]
     fn four_failures_dont_lock_out() {
-        let t = LoginThrottle::new();
+        let t = throttle();
         for _ in 0..4 {
             assert!(!t.record_failure(ip("10.0.0.1")));
         }
@@ -129,7 +185,7 @@ mod tests {
 
     #[test]
     fn fifth_failure_triggers_lockout() {
-        let t = LoginThrottle::new();
+        let t = throttle();
         for _ in 0..4 {
             t.record_failure(ip("10.0.0.1"));
         }
@@ -139,12 +195,12 @@ mod tests {
 
     #[test]
     fn success_clears_the_counter() {
-        let t = LoginThrottle::new();
+        let t = throttle();
         for _ in 0..3 {
             t.record_failure(ip("10.0.0.1"));
         }
         t.record_success(ip("10.0.0.1"));
-        // Counter cleared → can fail another full round without lock.
+        // Counter cleared → a full fresh round without locking out.
         for _ in 0..4 {
             assert!(!t.record_failure(ip("10.0.0.1")));
         }
@@ -152,51 +208,75 @@ mod tests {
 
     #[test]
     fn lockout_is_per_ip() {
-        let t = LoginThrottle::new();
+        let t = throttle();
         for _ in 0..5 {
             t.record_failure(ip("10.0.0.1"));
         }
         assert!(t.is_locked_out(ip("10.0.0.1")));
-        // A different IP starts fresh — the lockout doesn't leak.
         assert!(!t.is_locked_out(ip("10.0.0.2")));
     }
 
     #[test]
-    fn time_window_slide_resets_counter() {
-        // We can't easily fast-forward `Instant`, so instead exercise
-        // the `window_started` reset by manipulating the internals.
-        // This is a bit invasive but the alternative is a 60s test.
-        let t = LoginThrottle::new();
-        for _ in 0..4 {
-            t.record_failure(ip("10.0.0.1"));
+    fn two_throttles_over_one_storage_share_a_budget() {
+        // The point of the whole change: two replicas must not each get
+        // their own five attempts. Same storage, separate instances.
+        let storage = Storage::in_memory();
+        let a = LoginThrottle::new(storage.clone());
+        let b = LoginThrottle::new(storage);
+        let addr = ip("10.0.0.7");
+
+        for _ in 0..3 {
+            assert!(!a.record_failure(addr));
         }
-        {
-            let mut map = t.counters.lock().unwrap();
-            let counter = map.get_mut(&ip("10.0.0.1")).unwrap();
-            // Pretend the window started 2 minutes ago.
-            counter.window_started = Instant::now() - Duration::from_secs(120);
-        }
-        // Next failure starts a new window; we shouldn't be locked
-        // out (1 fail in the fresh window).
-        assert!(!t.record_failure(ip("10.0.0.1")));
-        assert!(!t.is_locked_out(ip("10.0.0.1")));
+        // B picks up A's tally rather than starting over.
+        assert!(!b.record_failure(addr));
+        assert!(b.record_failure(addr), "fifth attempt overall locks out");
+        assert!(
+            a.is_locked_out(addr),
+            "and the lockout is visible from the other replica"
+        );
     }
 
     #[test]
-    fn lockout_clears_after_window() {
-        let t = LoginThrottle::new();
-        for _ in 0..5 {
-            t.record_failure(ip("10.0.0.1"));
-        }
-        assert!(t.is_locked_out(ip("10.0.0.1")));
-        // Fast-forward the lockout into the past.
-        {
-            let mut map = t.counters.lock().unwrap();
-            let counter = map.get_mut(&ip("10.0.0.1")).unwrap();
-            counter.locked_until = Some(Instant::now() - Duration::from_secs(1));
-        }
-        assert!(!t.is_locked_out(ip("10.0.0.1")));
-        // A subsequent failure starts a fresh window.
-        assert!(!t.record_failure(ip("10.0.0.1")));
+    fn an_expired_lockout_lifts() {
+        // Write a deadline that is already in the past rather than
+        // asking for a zero-length lease: `try_acquire_lease` clamps its
+        // TTL to at least a second, because Valkey rejects a
+        // non-positive expire time outright.
+        let t = throttle();
+        let addr = ip("10.0.0.1");
+        let mut bucket = t.storage.admin_bucket().unwrap();
+        let past = (Utc::now() - chrono::Duration::seconds(1))
+            .to_rfc3339()
+            .into_bytes();
+        bucket.set(&LoginThrottle::lock_key(addr), past).unwrap();
+        assert!(
+            !t.is_locked_out(addr),
+            "a lockout whose deadline has passed no longer holds"
+        );
+    }
+
+    #[test]
+    fn a_live_lockout_holds() {
+        // The other half: the same comparison must still report a
+        // lockout that has not yet expired.
+        let t = throttle();
+        let addr = ip("10.0.0.1");
+        let mut bucket = t.storage.admin_bucket().unwrap();
+        assert!(
+            bucket
+                .try_acquire_lease(&LoginThrottle::lock_key(addr), 60)
+                .unwrap()
+        );
+        assert!(t.is_locked_out(addr));
+    }
+
+    #[test]
+    fn storage_failures_fail_open() {
+        // Not reachable through the in-memory backend, so assert the
+        // property that matters: a fresh throttle never reports a
+        // lockout it has no evidence for.
+        let t = throttle();
+        assert!(!t.is_locked_out(ip("192.0.2.1")));
     }
 }

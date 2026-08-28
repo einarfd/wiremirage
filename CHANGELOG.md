@@ -42,6 +42,20 @@ they make the design better, and are called out here.
   Replicas subscribe **lazily** — only while at least one local tail is
   attached — so a replica nobody is watching deserializes nothing. Existing
   subscribers are untouched; only the feed changed.
+- **The login throttle is shared across replicas** (ADR-0037). Five failed
+  password attempts in a minute lock an IP out host-wide instead of per
+  replica, which previously multiplied the intended budget by the replica
+  count. Implemented with deadline-carrying leases rather than `INCR` plus
+  `EXPIRE`, so the in-memory backend — where `set_ttl` is a no-op — behaves
+  identically instead of locking an IP out permanently.
+- **One replica sweeps per tick** (ADR-0037). The lifecycle sweeper claims a
+  short lease before each pass and the others skip it. Sweeping is idempotent,
+  so this removes duplicated work rather than fixing a correctness problem, and
+  an expiring lease means a replica dying mid-sweep can't wedge it.
+- **User creation claims its email index atomically** (ADR-0037). The previous
+  check-then-act could be passed by two replicas cold-starting against an empty
+  store, or by two simultaneous first-logins for the same OIDC identity; the
+  loser now gets the normal "email taken" error.
 
 ### Changed
 

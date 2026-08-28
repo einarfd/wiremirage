@@ -78,6 +78,11 @@ impl Sweeper {
             interval.tick().await;
             loop {
                 interval.tick().await;
+                // One replica sweeps per tick; the rest skip.
+                if !tokio::task::block_in_place(|| self.claim_sweep()) {
+                    tracing::debug!("another replica holds the sweep lease this tick");
+                    continue;
+                }
                 match tokio::task::block_in_place(|| self.single_pass()) {
                     Ok(stats) if stats.groups_swept > 0 => {
                         tracing::info!(
@@ -93,6 +98,38 @@ impl Sweeper {
                 }
             }
         })
+    }
+
+    /// Try to claim the sweep for this tick (ADR-0037 item 5).
+    ///
+    /// Every replica runs a sweeper and every operation a sweep
+    /// performs is idempotent, so racing sweepers converge harmlessly —
+    /// this is a cost reduction, not a correctness fix. A lease rather
+    /// than a lock precisely because of that: whoever loses simply
+    /// skips this round, and if the holder dies mid-sweep the lease
+    /// expires and the next tick proceeds. Nothing waits, nothing needs
+    /// releasing, and a stuck lease cannot wedge the sweeper.
+    ///
+    /// The lease is held slightly longer than the interval so a slow
+    /// sweep does not let a sibling start a second one on top of it.
+    fn claim_sweep(&self) -> bool {
+        let ttl = self.interval.as_secs().max(1) * 2;
+        let mut bucket = match self.routes.registry().storage().admin_bucket() {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "sweep lease: opening bucket");
+                // Fall through to sweeping: duplicated work is the
+                // benign outcome, a silently skipped sweep is not.
+                return true;
+            }
+        };
+        match bucket.try_acquire_lease("sweep:lease", ttl) {
+            Ok(got) => got,
+            Err(e) => {
+                tracing::warn!(error = %e, "sweep lease: acquire failed");
+                true
+            }
+        }
     }
 
     /// One sweep pass, executed synchronously. Public so tests can

@@ -202,6 +202,10 @@ impl AppState {
         auth: crate::auth::Auth,
         journal: crate::journal::Journal,
     ) -> Self {
+        // The throttle keys off shared storage (ADR-0037 item 4), so it
+        // borrows the runtime's handle before the runtime moves into
+        // the struct.
+        let throttle = crate::login_throttle::LoginThrottle::new(runtime.storage().clone());
         Self {
             runtime,
             routes,
@@ -209,7 +213,7 @@ impl AppState {
             journal,
             local_auth: Arc::new(crate::local_auth::LocalAuth::empty()),
             sessions: None,
-            login_throttle: Arc::new(crate::login_throttle::LoginThrottle::new()),
+            login_throttle: Arc::new(throttle),
             ui_templates: crate::ui::UiTemplates::new(),
             shutdown: None,
             secure_cookies: false,
