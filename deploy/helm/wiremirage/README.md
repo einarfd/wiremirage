@@ -58,14 +58,17 @@ a private, divergent view of the world.
 If the URL carries a password, put the whole URL in your Secret and set
 `valkey.urlSecretKey` to its key instead of `valkey.url`.
 
-Configure it with **`maxmemory` and `maxmemory-policy noeviction`**. The
-dataset is RAM-resident and sized by journal volume — every unmatched request
-is recorded — so an eviction policy would eventually drop live data. Losing a
-`group:` record while its routes survived would 404 a working subdomain and
-orphan the routes behind it, since route records carry no TTL of their own.
-`noeviction` turns that into a rejected write instead, which journal writes
-already tolerate. Managed cache offerings often default to an LRU policy, so
-this is worth checking rather than assuming.
+Set **`maxmemory`** on it, and check **`maxmemory-policy`** is `noeviction`.
+Both are Valkey server settings, not chart values.
+
+`maxmemory` defaults to unlimited everywhere, and without it Valkey grows
+until the OS kills it. `maxmemory-policy` already defaults to `noeviction`
+self-hosted, but managed cache offerings commonly default to an LRU policy —
+worth checking rather than assuming, because eviction here is worse than a
+full store: dropping a `group:` record while its routes survive 404s a working
+subdomain and orphans the routes behind it, since route records carry no TTL
+of their own. Size for peak journal volume; every unmatched request is
+recorded.
 
 ## Secrets
 

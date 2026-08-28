@@ -161,20 +161,34 @@ There is nothing here to back up; users and tokens are the only durable
 records, and they are cheap to recreate. Plan for the Valkey instance to be
 disposable and you have the operational model right.
 
-**Set `maxmemory` and `maxmemory-policy noeviction`**
-([ADR-0005](adr/0005-valkey-storage.md)). The whole dataset lives in RAM, and
-the sizing risk is journal volume rather than configuration: every request
-that reaches a group's subdomain and matches nothing is recorded, with no rate
-limit beyond a 4 KiB body cap and the 1 h TTL. A broken system under test — or
-anyone who guesses a group name on a public host — can therefore push a lot of
-short-lived data through.
+**Set `maxmemory`, and check `maxmemory-policy` is `noeviction`**
+([ADR-0005](adr/0005-valkey-storage.md)). These are Valkey server settings —
+`valkey.conf` or `CONFIG SET` on the instance — not anything WireMirage
+configures.
 
-`noeviction` is what keeps that a capacity problem instead of a correctness
-one. Journal writes are best-effort and a rejected one is logged and skipped,
-so the mock keeps answering; a store that evicted instead could drop a
-`group:` record while its routes survived, and those routes have no TTL of
-their own — the subdomain would start 404ing with the routes orphaned behind
-it. Size for peak journal volume, not for the routes you expect to define.
+The two matter for different reasons, and the defaults differ by where you
+run:
+
+- **`maxmemory` is unset (`0`, unlimited) by default everywhere.** Left that
+  way, Valkey grows until the OS OOM-kills it, which takes your storage down
+  abruptly rather than shedding load. This is the one you have to set.
+- **`maxmemory-policy` already defaults to `noeviction` self-hosted**, so
+  there it is a default to preserve. Managed cache offerings commonly default
+  to an LRU policy instead, so on those it is a default to change.
+
+Size for peak journal volume, not for the routes you expect to define. The
+sizing risk is journal, not configuration: every request that reaches a
+group's subdomain and matches nothing is recorded, bounded only by a 4 KiB
+body cap and the 1 h TTL, so a broken system under test — or anyone who
+guesses a group name on a public host — can push a lot of short-lived data
+through.
+
+Together the two settings keep that a capacity problem instead of a
+correctness one. Journal writes are best-effort, so a rejected one is logged
+and skipped and the mock keeps answering. An evicting policy could instead
+drop a `group:` record while its routes survived — group keys carry a TTL and
+route records do not — leaving the subdomain 404ing with its routes orphaned
+behind it, which is invisible until someone tries the mock.
 
 ## Production hardening
 

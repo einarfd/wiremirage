@@ -33,6 +33,17 @@
 services:
   valkey:
     image: valkey/valkey:9
+    # The shape docs/deployment.md recommends, so the reference stack
+    # demonstrates it rather than only describing it. `maxmemory` is
+    # unset by default, which lets Valkey grow until the OS kills it;
+    # `noeviction` is already the default here but is stated so that
+    # copying this into an environment which defaults to LRU keeps the
+    # behaviour. 512mb is a dev-scale number — size for peak journal
+    # volume in production, since every unmatched request is recorded.
+    command: >
+      valkey-server
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
     ports:
       - "6379:6379"
     volumes:
