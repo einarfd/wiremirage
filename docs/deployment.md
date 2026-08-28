@@ -216,9 +216,16 @@ audited the host for per-process state and closed every item:
   message degrades to the read-through's staleness window rather than lasting
   until a restart.
 - **Live journal tails span replicas.** A tail sees traffic dispatched by any
-  replica, not just the one holding the connection. Replicas subscribe only
+  replica, not just the one holding the connection. Its own replica's traffic
+  is delivered locally and immediately, so a tail is armed the moment it
+  opens; sibling traffic arrives over pub/sub, and replicas subscribe only
   while something is actually tailing them, so this costs nothing when nobody
   is watching.
+
+  Cross-replica tailing needs **SUBSCRIBE**, not just PUBLISH. On a Valkey
+  where publishing works but subscribing is blocked — restrictive ACLs, a
+  proxy without pub/sub support — a tail still sees its own replica's traffic
+  and silently misses everyone else's.
 - **The login throttle is shared.** Five failed password attempts in a minute
   lock an IP out across every replica, not five per replica.
 - **One replica sweeps per tick.** The lifecycle sweeper claims a short lease

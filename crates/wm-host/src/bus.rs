@@ -191,6 +191,21 @@ async fn run_route_invalidation_session(
         channel = ROUTE_INVALIDATION_CHANNEL,
         "route-invalidation subscriber connected"
     );
+    // Resync on every successful subscribe, first one included.
+    //
+    // Pub/sub has no replay, so anything published while this replica
+    // was disconnected is gone — and deletes and updates are exactly
+    // what the read-through floor cannot recover, since a stale route
+    // still matches and never reaches the miss path. Without this a
+    // five-second blip could leave a route serving forever, and the
+    // claim that a lost message degrades to the revalidation window
+    // would be false.
+    //
+    // Unconditional rather than only-on-reconnect: it costs one
+    // redundant reload at startup, just after `warm`, and avoids a
+    // "was this the first connection?" flag that would be wrong exactly
+    // once, in the case that matters.
+    routes.reload_all();
     let _ = ready.send(true);
 
     let mut stream = pubsub.on_message();
@@ -280,15 +295,23 @@ pub fn spawn_journal_subscriber(journal: crate::journal::Journal) -> Option<Jour
         loop {
             // Idle until something is actually tailing here.
             journal.await_demand().await;
-            match run_journal_session(&journal, &ready_tx).await {
-                Ok(()) => {
-                    let _ = ready_tx.send(false);
+            let outcome = run_journal_session(&journal, &ready_tx).await;
+            let _ = ready_tx.send(false);
+            match outcome {
+                // Nobody is tailing: loop straight back to awaiting
+                // demand, with no sleep and no backoff to carry.
+                Ok(SessionEnd::NoDemand) => {
                     backoff = RECONNECT_BACKOFF_START;
                     continue;
                 }
+                // The stream died while tails were still attached. Fall
+                // through to the sleep — otherwise `await_demand`
+                // returns immediately and this spins.
+                Ok(SessionEnd::StreamEnded) => {
+                    tracing::info!("journal fan-out stream ended; reconnecting");
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "journal fan-out subscription failed");
-                    let _ = ready_tx.send(false);
                 }
             }
             tokio::time::sleep(backoff).await;
@@ -298,13 +321,22 @@ pub fn spawn_journal_subscriber(journal: crate::journal::Journal) -> Option<Jour
     Some(JournalSubscriber { handle, ready })
 }
 
-/// One subscribe-and-pump cycle. Returns `Ok` when the last local tail
-/// went away (drop the subscription and idle), `Err` on a connection
-/// fault (reconnect with backoff).
+/// Why a fan-out session ended. The distinction matters: idling because
+/// nobody is tailing must not be treated like a connection that died,
+/// or a Valkey accepting and immediately dropping subscribers would spin
+/// with no backoff.
+enum SessionEnd {
+    /// The last local tail went away; drop the subscription and idle.
+    NoDemand,
+    /// The stream ended under us; reconnect with backoff.
+    StreamEnded,
+}
+
+/// One subscribe-and-pump cycle.
 async fn run_journal_session(
     journal: &crate::journal::Journal,
     ready: &tokio::sync::watch::Sender<bool>,
-) -> Result<(), String> {
+) -> Result<SessionEnd, String> {
     use futures::StreamExt as _;
 
     let mut pubsub = journal
@@ -336,10 +368,10 @@ async fn run_journal_session(
             Err(_) => {
                 if journal.local_subscriber_count() == 0 {
                     tracing::debug!("last journal tail left; dropping the subscription");
-                    return Ok(());
+                    return Ok(SessionEnd::NoDemand);
                 }
             }
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(SessionEnd::StreamEnded),
             Ok(Some(msg)) => {
                 let payload: Vec<u8> = match msg.get_payload() {
                     Ok(p) => p,
@@ -348,8 +380,13 @@ async fn run_journal_session(
                         continue;
                     }
                 };
-                match serde_json::from_slice(&payload) {
-                    Ok(event) => journal.deliver_local(event),
+                match serde_json::from_slice::<crate::journal::PublishedJournalEvent>(&payload) {
+                    // Our own event, already delivered locally by the
+                    // publish path. Dropping it here is what lets the
+                    // origin deliver synchronously without seeing every
+                    // event twice.
+                    Ok(wire) if wire.origin == journal.origin() => {}
+                    Ok(wire) => journal.deliver_local(wire.event),
                     Err(e) => {
                         tracing::warn!(error = %e, "undecodable journal event payload");
                     }

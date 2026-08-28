@@ -40,8 +40,12 @@ they make the design better, and are called out here.
   kept waiting. Events publish to a per-group channel on the same connection
   the journal write already used, so the dispatch hot path gains no round trip.
   Replicas subscribe **lazily** — only while at least one local tail is
-  attached — so a replica nobody is watching deserializes nothing. Existing
-  subscribers are untouched; only the feed changed.
+  attached — so a replica nobody is watching deserializes nothing. A tail also
+  sees its own replica's traffic immediately, without waiting for the
+  subscription to come up; events carry the id of the journal that produced
+  them so the origin does not then receive its own back. Existing subscribers
+  are untouched; only the feed changed. Note that cross-replica tailing
+  requires SUBSCRIBE, not just PUBLISH.
 - **The login throttle is shared across replicas** (ADR-0037). Five failed
   password attempts in a minute lock an IP out host-wide instead of per
   replica, which previously multiplied the intended budget by the replica

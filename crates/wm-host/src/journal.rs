@@ -354,12 +354,22 @@ pub fn truncate_body(body: Vec<u8>, limit: usize) -> (Vec<u8>, usize, bool) {
 /// because consumers (the SSE endpoint, the MCP streaming tools) are
 /// interested in the same events the journal already stores.
 ///
-/// Fan-out is two-stage under Valkey (ADR-0037 item 2): the dispatching
-/// replica publishes to a per-group channel, one subscriber task per
-/// replica pulls events off it and re-sends them into *this* local
-/// broadcast, and every existing subscriber is untouched — only the
-/// feed changes. On the in-memory backend there are no siblings, so the
-/// local broadcast is fed directly.
+/// Fan-out under Valkey (ADR-0037 item 2): the dispatching replica
+/// delivers to its own local broadcast *and* publishes to a per-group
+/// channel; every other replica's subscriber pulls the event off that
+/// channel and re-sends it into its own local broadcast. Existing
+/// subscribers are untouched — only the feed changes. On the in-memory
+/// backend there are no siblings, so only the local delivery happens.
+///
+/// Each event carries the id of the process that produced it, and a
+/// subscriber drops events bearing its own. ADR-0037 originally had the
+/// origin *not* deliver locally, receiving its own event back through
+/// Valkey instead, to keep one uniform delivery path — but that leaves
+/// a window between a tail attaching and the subscription being
+/// established in which events reach nobody, which is precisely when
+/// `wait_for_request` is armed. Local delivery is synchronous and
+/// closes that window; the origin id is what keeps it from also
+/// double-delivering.
 ///
 /// Variants are boxed so cloning around the broadcast bus is cheap —
 /// a `JournalRecord` is ~500 bytes, and the channel capacity is 256.
@@ -370,6 +380,28 @@ pub fn truncate_body(body: Vec<u8>, limit: usize) -> (Vec<u8>, usize, bool) {
 pub enum JournalEvent {
     Handled(Box<JournalRecord>),
     Unmatched(Box<UnmatchedRecord>),
+}
+
+/// A journal event plus the process that produced it. Only ever seen on
+/// the wire; local subscribers receive the bare [`JournalEvent`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PublishedJournalEvent {
+    pub origin: String,
+    pub event: JournalEvent,
+}
+
+/// Identifies the journal instance that produced an event.
+///
+/// Per `Journal`, not per process: clones share it (they are the same
+/// logical journal), while two `Journal::new` calls differ. In
+/// production that is one per replica either way, but it also means two
+/// simulated replicas inside one test process are genuinely distinct —
+/// which a process-global id would not be, and the cross-replica tests
+/// would then filter each other's events as their own.
+pub type OriginId = Arc<str>;
+
+fn new_origin_id() -> OriginId {
+    Arc::from(Ulid::generate().to_string().as_str())
 }
 
 impl JournalEvent {
@@ -402,6 +434,7 @@ pub struct Journal {
     /// Woken whenever a local tail subscribes, so the cross-replica
     /// subscriber can connect on demand instead of polling for it.
     demand: Arc<tokio::sync::Notify>,
+    origin: OriginId,
 }
 
 impl Journal {
@@ -411,7 +444,14 @@ impl Journal {
             storage,
             bus,
             demand: Arc::new(tokio::sync::Notify::new()),
+            origin: new_origin_id(),
         }
+    }
+
+    /// This journal's origin id, stamped on everything it publishes and
+    /// compared by its subscriber to drop its own events.
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// Borrow the backing storage, for the fan-out subscriber.
@@ -435,10 +475,10 @@ impl Journal {
         self.demand.notified().await;
     }
 
-    /// Feed an event into the local broadcast. Used only by the
-    /// cross-replica subscriber — the publish path must not also
-    /// deliver locally, or the originating replica would see every
-    /// event twice.
+    /// Feed an event from a *sibling* replica into the local broadcast.
+    /// The subscriber filters out this process's own events before
+    /// calling this, since the publish path already delivered those
+    /// locally.
     pub fn deliver_local(&self, event: JournalEvent) {
         let _ = self.bus.send(event);
     }
@@ -454,7 +494,13 @@ impl Journal {
         let rx = self.bus.subscribe();
         // Signal *after* the receiver exists, so a subscriber task
         // waking on this immediately sees a non-zero count.
-        self.demand.notify_waiters();
+        //
+        // `notify_one`, not `notify_waiters`: the latter wakes only
+        // already-registered waiters and stores no permit, so a
+        // subscribe landing between the fan-out task's count check and
+        // its first poll would be lost and the task would idle with a
+        // live tail attached.
+        self.demand.notify_one();
         rx
     }
 
@@ -472,16 +518,26 @@ impl Journal {
     /// `broadcast::Sender::send` returns `Err` only when there are zero
     /// receivers, which is normal; the bus is best-effort either way.
     fn publish(&self, bucket: &mut Bucket, event: JournalEvent) {
+        // Local delivery first, and unconditionally. This is what makes
+        // a tail on *this* replica see *this* replica's traffic with no
+        // dependence on the subscription being up — closing the window
+        // between a tail attaching and psubscribe completing, and
+        // keeping single-replica live tailing working even where
+        // SUBSCRIBE is unavailable.
+        let _ = self.bus.send(event.clone());
         if !self.storage.is_distributed() {
-            let _ = self.bus.send(event);
             return;
         }
-        // Nobody anywhere is tailing if this replica has no local
-        // subscribers *and* no sibling subscribed — but we cannot know
-        // the latter, so publish unconditionally. It is one pipelined
-        // command against an operation that already wrote several keys.
+        // Whether any *sibling* is tailing is unknowable from here, so
+        // this publishes unconditionally. It is a second round trip on
+        // the connection the journal write already used — connection
+        // setup is saved, the round trip is not.
         let channel = journal_channel(event.group_id());
-        match serde_json::to_vec(&event) {
+        let wire = PublishedJournalEvent {
+            origin: self.origin.to_string(),
+            event,
+        };
+        match serde_json::to_vec(&wire) {
             Ok(payload) => {
                 if let Err(e) = bucket.publish(&channel, payload) {
                     tracing::warn!(error = %e, channel, "publishing journal event");
