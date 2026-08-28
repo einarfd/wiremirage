@@ -272,6 +272,45 @@ impl Bucket {
         }
     }
 
+    /// Write `key` and set its TTL in a single command.
+    ///
+    /// Equivalent to `set` followed by `set_ttl`, but one round trip
+    /// instead of two — the sync store waits for each reply, so a pair
+    /// of calls is a pair of network waits. Worth using wherever a key
+    /// is written and immediately given a TTL, which is most places one
+    /// is written at all.
+    ///
+    /// It also closes a window the pair leaves open: between the two
+    /// calls the key exists with no expiry, so a failure in between
+    /// leaks it permanently. Here there is no in-between.
+    ///
+    /// Not a drop-in for every `set_ttl` caller — re-arming a *sliding*
+    /// TTL on a key written earlier still needs the standalone
+    /// `set_ttl`, since there is no value to rewrite.
+    pub fn set_with_ttl(
+        &mut self,
+        key: &str,
+        value: Vec<u8>,
+        ttl_seconds: u64,
+    ) -> Result<(), StoreError> {
+        match self {
+            // No wall-clock expiry on this backend, so this is just a
+            // write — same as `set_ttl` being a no-op here.
+            Bucket::InMemory { .. } => self.set(key, value),
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                redis::cmd("SET")
+                    .arg(&fk)
+                    .arg(value)
+                    .arg("EX")
+                    .arg(ttl_seconds.max(1))
+                    .query::<()>(conn)
+                    .map_err(|e| StoreError::Backend(format!("SET EX: {e}")))?;
+                Ok(())
+            }
+        }
+    }
+
     /// Set a TTL (in seconds) on `key`. No-op for the in-memory backend
     /// because tests don't need wall-clock-driven expiry; the journal /
     /// session lifecycles fall back to manual cleanup or the natural

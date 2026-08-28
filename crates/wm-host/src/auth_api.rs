@@ -364,14 +364,14 @@ async fn start_github(
         }
     };
     let key = format!("oauth_state:{nonce}");
-    if let Err(e) = bucket.set(&key, next.into_bytes()) {
+    // Written with its expiry in one command. The TTL used to be
+    // applied separately and best-effort, which left the state
+    // permanently resident if that second call failed; now a failure
+    // means no state at all, which the caller already handles.
+    if let Err(e) = bucket.set_with_ttl(&key, next.into_bytes(), OAUTH_STATE_TTL_SECONDS) {
         tracing::error!(error = %e, "persist oauth state");
         return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
     }
-    // Best-effort TTL — if Valkey errors here the stale state would
-    // hang around but it can't actually be used to log in (the
-    // session-mint step needs a valid GitHub code anyway).
-    let _ = bucket.set_ttl(&key, OAUTH_STATE_TTL_SECONDS);
 
     let redirect_uri = derive_redirect_uri(&headers, state.trust_forwarded_headers());
     let authorize = github.authorize_url(&redirect_uri, &nonce);
@@ -606,13 +606,12 @@ async fn start_oidc(
         }
     };
     let key = format!("oidc_state:{nonce}");
-    if let Err(e) = bucket.set(&key, value) {
+    // One command, same as the GitHub flow: no window in which the
+    // state exists without an expiry.
+    if let Err(e) = bucket.set_with_ttl(&key, value, OAUTH_STATE_TTL_SECONDS) {
         tracing::error!(error = %e, "persist oidc state");
         return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
     }
-    // Best-effort TTL, same reasoning as the GitHub flow: a stale
-    // record can't mint a session without a valid code + verifier.
-    let _ = bucket.set_ttl(&key, OAUTH_STATE_TTL_SECONDS);
 
     let redirect_uri = derive_oidc_redirect_uri(&headers, state.trust_forwarded_headers());
     let authorize = oidc.authorize_url(&redirect_uri, &nonce, &pkce_challenge);

@@ -583,11 +583,15 @@ impl Journal {
         let key = format!("journal:{}:{}", record.group_id, record.id);
         let json = serde_json::to_vec(&record)
             .map_err(|e| JournalError::Malformed(format!("encode: {e}")))?;
-        bucket.set(&key, json)?;
-        bucket.set_ttl(&key, HANDLED_TTL_SECONDS)?;
-        bucket.set(
+        bucket.set_with_ttl(&key, json, HANDLED_TTL_SECONDS)?;
+        // The index expires with the record it points at. Without a TTL
+        // it outlived it, leaving a pointer to a reaped entry until the
+        // whole group was cascaded — bounded, but pointlessly so, and a
+        // lookup through a dangling pointer just misses.
+        bucket.set_with_ttl(
             &format!("journal:by-number:{}:{}", record.group_id, record.number),
             record.id.as_bytes().to_vec(),
+            HANDLED_TTL_SECONDS,
         )?;
         self.publish(&mut bucket, JournalEvent::Handled(Box::new(record.clone())));
         Ok(record)
@@ -690,8 +694,7 @@ impl Journal {
         let key = format!("unmatched:{}", record.id);
         let json = serde_json::to_vec(&record)
             .map_err(|e| JournalError::Malformed(format!("encode: {e}")))?;
-        bucket.set(&key, json)?;
-        bucket.set_ttl(&key, UNMATCHED_TTL_SECONDS)?;
+        bucket.set_with_ttl(&key, json, UNMATCHED_TTL_SECONDS)?;
         bucket.set(
             &format!("unmatched:by-number:{}", record.number),
             record.id.as_bytes().to_vec(),
@@ -817,8 +820,7 @@ impl Journal {
         let key = format!("callback:{}:{}", record.group_id, record.id);
         let json = serde_json::to_vec(&record)
             .map_err(|e| JournalError::Malformed(format!("encode: {e}")))?;
-        bucket.set(&key, json)?;
-        bucket.set_ttl(&key, CALLBACK_TTL_SECONDS)?;
+        bucket.set_with_ttl(&key, json, CALLBACK_TTL_SECONDS)?;
         bucket.set(
             &format!("callback:by-number:{}:{}", record.group_id, record.number),
             record.id.as_bytes().to_vec(),

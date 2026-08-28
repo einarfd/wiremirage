@@ -229,10 +229,12 @@ impl SessionStore {
         let key = format!("session:{token}");
         let bytes = serde_json::to_vec(session)
             .map_err(|e| SessionError::Malformed(format!("encode: {e}")))?;
-        bucket.set(&key, bytes)?;
-        // Mirror the in-record TTL with a storage TTL so abandoned
-        // sessions are reaped on schedule even without a sweeper.
-        bucket.set_ttl(&key, self.ttl_seconds)?;
+        // One command, not a write plus an expire: this runs on every
+        // authenticated request, since a sliding TTL means each one
+        // rewrites the record. The storage TTL mirrors the in-record
+        // one so abandoned sessions are reaped on schedule even without
+        // a sweeper.
+        bucket.set_with_ttl(&key, bytes, self.ttl_seconds)?;
         Ok(())
     }
 

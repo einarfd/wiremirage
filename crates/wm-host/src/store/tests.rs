@@ -240,12 +240,24 @@ pub fn case_lease_is_exclusive_while_held(bk: &mut Bucket) {
     assert!(!bk.try_acquire_lease("lease", 60).unwrap());
 }
 
+/// `set_with_ttl` must behave like `set` for the value it writes. The
+/// expiry half is Valkey's to enforce and a no-op in memory, so what is
+/// worth pinning across both backends is that collapsing the pair did
+/// not change what is stored.
+pub fn case_set_with_ttl_writes_the_value(bk: &mut Bucket) {
+    bk.set_with_ttl("k", b"v".to_vec(), 60).unwrap();
+    assert_eq!(bk.get("k").unwrap().as_deref(), Some(&b"v"[..]));
+    bk.set_with_ttl("k", b"v2".to_vec(), 60).unwrap();
+    assert_eq!(bk.get("k").unwrap().as_deref(), Some(&b"v2"[..]));
+}
+
 /// Cases shared between in-memory and Valkey runs. Backend-specific cases
 /// (e.g., `case_incr_in_memory_overflow`) are listed separately.
 #[macro_export]
 macro_rules! storage_cases {
     ($macro:ident) => {
         $macro!(
+            case_set_with_ttl_writes_the_value,
             case_set_if_absent_claims_once,
             case_lease_is_exclusive_while_held,
             case_get_missing_returns_none,
