@@ -180,7 +180,19 @@ impl Auth {
                 }
             }
         }
-        let user = self.write_new_user(&mut bucket, &email, true)?;
+        let user = match self.write_new_user(&mut bucket, &email, true) {
+            Ok(u) => u,
+            // Lost the atomic email claim to a sibling replica cold-
+            // starting at the same instant (ADR-0037 item 6). That is
+            // the already-exists case arriving a few milliseconds late,
+            // not a failure: propagating it would abort startup and
+            // crash-loop every replica but the winner, when the whole
+            // point of the guard is that simultaneous cold starts
+            // converge on one record. Only this error — anything else
+            // is a real problem and still aborts.
+            Err(AuthError::EmailTaken(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
         self.write_new_token(&mut bucket, &user.id, "bootstrap", plaintext, None)?;
         Ok(true)
     }
@@ -1276,6 +1288,27 @@ mod tests {
         auth.create_user("alice@test.example", false).unwrap();
         auth.create_user("bob@test.example", true).unwrap();
         assert_eq!(auth.count_admins().unwrap(), 2);
+    }
+
+    #[test]
+    fn simultaneous_bootstrap_converges_on_one_admin() {
+        // Two replicas cold-starting against the same empty storage.
+        // The atomic email claim means one loses — and losing must be
+        // "the admin already exists", not a startup abort, or every
+        // replica but the winner crash-loops on first install.
+        let storage = Storage::in_memory();
+        let a = Auth::new(storage.clone());
+        let b = Auth::new(storage);
+
+        let first = a.bootstrap_admin("admin@test.example", "wmt_a").unwrap();
+        let second = b.bootstrap_admin("admin@test.example", "wmt_b").unwrap();
+
+        assert!(first, "the winner created the admin");
+        assert!(
+            !second,
+            "the loser reports already-exists rather than erroring"
+        );
+        assert_eq!(a.list_users().unwrap().len(), 1, "exactly one admin record");
     }
 
     #[test]
