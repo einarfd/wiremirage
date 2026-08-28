@@ -95,6 +95,15 @@ The WIT contract change (the `scheduleCallback` import) updates
 
 - Webhook-*receiver* testing becomes possible against the mock: the mock plays
   the real service end to end, instead of the test stubbing the send.
+- **A callback fires on the replica that served the request**, so a replica
+  terminating during the delay drops it. This sits inside the single-attempt
+  best-effort contract above rather than changing it — but running more than
+  one replica ([0037-multi-replica-readiness.md](0037-multi-replica-readiness.md)) makes rolling deploys a
+  routine way to hit it, so it is documented rather than discovered. Callbacks
+  are the one part of the host that deliberately got no cross-replica
+  treatment in that ADR: making delivery survive a terminating replica means
+  durable queueing and retries, which is a different contract from the one
+  chosen here.
 - First network egress from the sandbox — a genuine security surface, mitigated
   in depth: off-by-default, operator allow-list, hardcoded special-use deny,
   resolved-IP enforcement, per-group opt-in, single-attempt (no amplification),

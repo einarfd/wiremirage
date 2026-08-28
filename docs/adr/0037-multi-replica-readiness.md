@@ -1,6 +1,27 @@
 # ADR-0037: Multi-replica readiness — the per-process state blocking replicas > 1
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-08-28
+
+- *2026-08-28 — all six items landed; two diverged from the plan below.*
+  **Item 6 moved a layer deeper.** This ADR frames the bootstrap race as a
+  set-if-not-exists guard on the bootstrap path, but the race actually lives in
+  `write_new_user`'s check-then-act, so the `user:by-email` index claim is what
+  became atomic instead. That covers the case described here *and* two
+  simultaneous first-logins for the same OIDC identity, which a
+  bootstrap-specific guard would have missed.
+  **Item 2's per-group subscription is deferred.** Publishers use per-group
+  channels as designed, but the subscriber pattern-subscribes all of them
+  rather than tracking which groups are tailed. Selective subscription needs a
+  refcounted channel set maintained as tails come and go, and the win requires
+  many groups, high traffic and group-scoped tails together. Because the
+  channel naming is already per-group, narrowing it later is subscriber-side
+  only, with no wire-format change.
+  Two implementation notes worth keeping: the lease primitive backing items 4
+  and 5 stores its deadline *in the value* as well as setting a key TTL,
+  because `set_ttl` is a no-op on the in-memory backend and a lease relying on
+  server-side expiry alone would be taken once and never released; and its TTL
+  is clamped to at least a second, because Valkey rejects a non-positive expire
+  time where the in-memory path had been granting an already-stale lease.
 
 ## Context
 
