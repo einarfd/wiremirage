@@ -20,25 +20,8 @@
 
 use std::collections::HashMap;
 
-use argon2::Argon2;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use rand::Rng;
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use thiserror::Error;
-
-/// 16 bytes is the recommended argon2 salt length per OWASP. We use
-/// `rand`'s `OsRng` (already a wm-host dependency) rather than the
-/// rand_core re-export from argon2 — the latter requires enabling a
-/// feature flag we'd otherwise have no reason to turn on.
-fn fresh_salt() -> SaltString {
-    // 16 bytes is the OWASP-recommended argon2 salt length. We use
-    // `rand::rng()` (the same source `auth.rs` uses for token
-    // generation) rather than argon2's re-exported rand_core, which
-    // would require enabling a feature flag — different rand_core
-    // versions live in the workspace already.
-    let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
-    SaltString::encode_b64(&bytes).expect("salt encoding fits the buffer")
-}
 
 /// Per-user role declared in `WM_LOCAL_AUTH`. Mirrors the host's
 /// `User.is_admin` flag.
@@ -215,11 +198,12 @@ impl LocalAuth {
     pub fn verify(&self, email: &str, password: &str) -> Result<LocalRole, VerifyError> {
         let email = email.trim().to_ascii_lowercase();
         let credential = self.users.get(&email).ok_or(VerifyError::Invalid)?;
-        let parsed = PasswordHash::new(&credential.hash)
-            .map_err(|e| VerifyError::HashEngine(e.to_string()))?;
-        match Argon2::default().verify_password(password.as_bytes(), &parsed) {
+        // `PasswordVerifier<str>` parses the PHC string itself, so a
+        // malformed stored hash still lands in the `HashEngine` arm
+        // rather than being mistaken for a wrong password.
+        match Argon2::default().verify_password(password.as_bytes(), credential.hash.as_str()) {
             Ok(()) => Ok(credential.role),
-            Err(argon2::password_hash::Error::Password) => Err(VerifyError::Invalid),
+            Err(argon2::password_hash::Error::PasswordInvalid) => Err(VerifyError::Invalid),
             Err(e) => Err(VerifyError::HashEngine(e.to_string())),
         }
     }
@@ -239,9 +223,12 @@ fn parse_role(raw: &str) -> Option<LocalRole> {
 /// Pub so the OAuth dynamic-client-registration flow can hash the
 /// client_secret using the same parameters as user passwords.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = fresh_salt();
-    let hash = Argon2::default().hash_password(password.as_bytes(), &salt)?;
-    Ok(hash.to_string())
+    // `hash_password` generates its own salt from the OS RNG, at
+    // `RECOMMENDED_SALT_LEN` — 16 bytes, which is what OWASP recommends
+    // for argon2 and what this function used to roll by hand.
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes())?
+        .to_string())
 }
 
 /// Verify a plaintext value against a PHC-encoded argon2 hash.
@@ -251,17 +238,47 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
 /// authenticate registered clients (same shape as `LocalAuth::verify`,
 /// minus the username lookup).
 pub fn verify_password(stored_hash: &str, plaintext: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(stored_hash) else {
-        return false;
-    };
     Argon2::default()
-        .verify_password(plaintext.as_bytes(), &parsed)
+        .verify_password(plaintext.as_bytes(), stored_hash)
         .is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hashes written by argon2 0.5 must still verify after the 0.6
+    /// upgrade. `WM_LOCAL_AUTH` passwords are re-hashed from the env var
+    /// at every startup, so they'd survive a break — but OAuth client
+    /// secrets are hashed once at dynamic registration and persisted in
+    /// Valkey (`mcp_oauth.rs`), and a silent break there would lock
+    /// every registered client out at the token endpoint.
+    ///
+    /// This literal was produced by argon2 0.5.3 with library defaults,
+    /// which is what every hash in an existing deployment looks like.
+    const ARGON2_0_5_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$\
+        T30kl9EL8WUbZXoaHwzMvA$QFkfzPCKPoRur8QJn94UKT3au9kXWHHNLrtviY4dzhE";
+
+    #[test]
+    fn hashes_written_by_argon2_0_5_still_verify() {
+        assert!(verify_password(
+            ARGON2_0_5_HASH,
+            "correct horse battery staple"
+        ));
+        assert!(!verify_password(ARGON2_0_5_HASH, "wrong password"));
+    }
+
+    #[test]
+    fn hash_password_round_trips_and_salts_each_call() {
+        let a = hash_password("hunter2").expect("hash");
+        let b = hash_password("hunter2").expect("hash");
+        // 0.6 generates the salt itself; distinct salts mean distinct
+        // encodings for the same password.
+        assert_ne!(a, b, "each hash must carry a fresh salt");
+        assert!(a.starts_with("$argon2id$"), "PHC-encoded argon2id: {a}");
+        assert!(verify_password(&a, "hunter2"));
+        assert!(!verify_password(&a, "hunter3"));
+    }
 
     #[test]
     fn empty_env_var_parses_to_empty_map() {

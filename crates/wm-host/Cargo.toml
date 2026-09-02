@@ -53,7 +53,7 @@ ipnet = "2"
 # Local auth (slice 20): argon2id for password hashing, hmac+sha2 for
 # signed session cookies. argon2id is OWASP's recommendation; the
 # `argon2` crate is pure Rust and audit-friendly.
-argon2 = "0.5"
+argon2 = "0.6"
 hmac = "0.13"
 subtle = "2.6"
 # Web UI templates (slice 21). minijinja gives us Jinja-like syntax
