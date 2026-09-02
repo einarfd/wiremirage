@@ -28,9 +28,9 @@ which is shipped to *users* of WireMirage.
   pinned Docker image (`node:22-bookworm-slim`) to produce the artifact
   in cargo's `OUT_DIR` and stamps the path into `WM_JS_ENGINE_WASM`;
   `src/main.rs` `include_bytes!`'s it. ADR-0020. Nothing is checked in
-  under `crates/wm-host/vendored/` (gitignored). JS source is dispatched
-  through this shared component; TS is transpiled to JS in-host via swc
-  (`crate::ts_transpile`) before storage. No Node sidecar at runtime —
+  under `crates/wm-host/vendored/` (gitignored). Both source languages
+  are dispatched through this shared component, and both go through the
+  in-host swc transpiler (`wm-transpile`) first. No Node sidecar at runtime —
   `compiler/typescript/` was deleted. Set
   `WM_JS_ENGINE_WASM_OVERRIDE=/abs/path/to/prebuilt.wasm` to bypass the
   docker step (release-image builds, no-Docker contributors).
@@ -169,16 +169,37 @@ deliberate project convention.
 
 ## Source-language pipeline (ADR-0020)
 
-`POST /api/routes` accepts three body shapes (per `rest-api.md`):
+`POST /api/routes` takes **source only** — `language: "typescript"` or
+`"javascript"` plus a `source` string. `language: "wasm"` is rejected with
+`validation_failed` (ADR-0023 retired public wasm upload; routes still
+execute as wasm internally).
 
-- `language: "wasm"` — pre-compiled component bytes. Validated as a
-  `wasmtime::component::Component` at create time; per-route component
-  cache pins it at dispatch time.
-- `language: "javascript"` — source stored verbatim.
-- `language: "typescript"` — source goes through pure-Rust swc
-  (`crate::ts_transpile::transpile`) at create/patch time. swc's strip
-  pass erases TS-only syntax; the post-transpile JS is what's stored
-  on the Route record.
+**The two languages share one pipeline, and that is load-bearing.** Both
+go through `wm_transpile::transpile` (pure-Rust swc) at create/patch time,
+and both store the *author's original* source on the Route record — the
+runnable JS is derived again at dispatch and cached on `RouteTable`
+(`engine_source_for`), so `show_route_source` / `export_group` return what
+was written. `language` selects only the operator-facing label and the
+UI's Ace syntax mode.
+
+Don't reintroduce a "JS is already JS, hand it straight to the engine"
+shortcut. `transpile` does two jobs, and only the first is TypeScript's:
+
+1. strip TS-only syntax (a no-op on plain JS), and
+2. **unwrap the module's `handle` export into script shape**, because the
+   engine evaluates source through `new Function`, where a surviving
+   top-level `export` or `import` is a syntax error.
+
+Job 2 applies to JavaScript exactly as much as to TypeScript. Skipping it
+for JS is the bug fixed on 2026-09-02: `export function handle` — the form
+the docs document — was accepted at create and 500'd on every request. See
+the amendment on ADR-0020, and `script-api-wit.md`'s "Handler source shape"
+for the accepted forms. `transpile` returns `Err` for anything that cannot
+produce a callable `handle`, so **create-time validation is predictive**:
+if `create_route` accepted it, it runs. Keep it that way — a new export
+form gets an arm in `to_script_shape` plus a case in the
+`js_engine_dispatch.rs` round-trip, never a create-time pass with a
+runtime failure.
 
 JS / TS routes dispatch through a single embedded
 `js-engine.wasm` component, produced at cargo build time by

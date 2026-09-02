@@ -11,6 +11,37 @@ they make the design better, and are called out here.
 
 ### Fixed
 
+- **`language: "javascript"` handlers ran the source the docs document.**
+  A handler written the documented way — `export function handle(...)` — was
+  accepted by `create_route`, listed as a healthy route, and then returned 500
+  on every request with `engine: syntax error in handler source`. The engine
+  evaluates handler source as a *script*, where a top-level `export` is a
+  syntax error, and JavaScript reached it without passing through the
+  transpiler that removes one. The identical source declared `typescript`
+  worked, which is what made a broken route set look fine: five dead routes in
+  a ten-route group, with nothing in the listing to say so.
+
+  Both languages now go through one pipeline. Three consequences:
+
+  - **Create-time validation is predictive.** `javascript` previously got no
+    validation at all — not even a syntax check — so the only way to discover
+    a dead route was to call it. Anything that cannot produce a callable
+    `handle` is now `compile_failed` with diagnostics at create/patch time,
+    on every surface. If the host accepted your handler, it runs.
+  - **Every export form that names `handle` works**, under either language:
+    `export function handle`, `export async function handle`,
+    `export const handle = ...`, `export default function handle`,
+    `export { handle }`, or no export at all. Previously only the exact
+    literal `export function handle` was handled, and only for TypeScript —
+    the other spellings passed create and failed at request time too.
+  - **`import` and anonymous `export default` are rejected** with a message
+    naming the problem, instead of failing inside the engine. Handlers run
+    with no module loader; inline what they need.
+
+  `language` now selects only the operator-facing label and the UI's syntax
+  mode. No migration: stored handler source is unchanged, and source that
+  worked before still works.
+
 - **`summarize_workspace` reports a real `recent_unmatched_count_5m`.** The
   field shipped hardcoded to `0` with a note that a follow-up would wire it;
   this is that follow-up. Scoped like the group list beside it — an admin

@@ -2,8 +2,8 @@
 //!
 //! Boots a real wm-host with the vendored js-engine.wasm wired in,
 //! registers a `language: "javascript"` route directly via the
-//! registry (no compile path involved — the source-language route
-//! stores source verbatim), and hits the mock-traffic path with a
+//! registry (no create-time validation involved — the route record
+//! stores the author's source), and hits the mock-traffic path with a
 //! real HTTP request. Asserts the response came back through the
 //! shared engine.
 
@@ -824,4 +824,46 @@ async fn negative_incr_delta_reports_the_upstream_limitation() {
         "the error should name the upstream defect, got: {body}"
     );
     server.abort();
+}
+
+/// The reported bug: a handler written the way `get_capabilities()`
+/// documents it — `export function handle` — returned 500 at request
+/// time when the route was declared `language: "javascript"`, while the
+/// identical source worked as `"typescript"`. The engine evaluates a
+/// script, where a top-level `export` is a syntax error, and JS used to
+/// reach it without going through the transpiler that unwraps exports.
+///
+/// This walks every export form the contract accepts, as JavaScript,
+/// end to end through a real dispatch. It is the JS half of
+/// `transpile`'s unit coverage: the unit test proves the `export` is
+/// gone from the emitted JS, this proves the engine then runs it.
+#[tokio::test]
+async fn documented_export_forms_dispatch_as_javascript() {
+    let body = r#"{ status: 200, headers: [], body: new TextEncoder().encode("ok") }"#;
+    for source in [
+        // Verbatim from the `get_capabilities()` overview.
+        &format!("export function handle(req, routeStore, groupStore) {{ return {body}; }}"),
+        &format!("export async function handle(req, routeStore, groupStore) {{ return {body}; }}"),
+        &format!("export const handle = (req) => ({body});"),
+        &format!("export default function handle(req) {{ return {body}; }}"),
+        &format!("function handle(req) {{ return {body}; }}\nexport {{ handle }};"),
+        // The form that always worked, so a regression here is loud.
+        &format!("function handle(req) {{ return {body}; }}"),
+    ] {
+        let Some((addr, group, server)) = start_with_js_route(source).await else {
+            eprintln!("skipping: vendored js-engine.wasm not present");
+            return;
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/v1/echo"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
+            .send()
+            .await
+            .expect("request");
+        let status = resp.status();
+        let text = resp.text().await.expect("body");
+        server.abort();
+        assert_eq!(status, 200, "source {source:?} served {status}: {text}");
+        assert_eq!(text, "ok", "source {source:?}");
+    }
 }

@@ -148,7 +148,8 @@ pub struct CreateRouteArgs {
     pub path: String,
     /// Source language: `typescript` or `javascript`.
     pub language: String,
-    /// Handler source as a string. TypeScript is transpiled in-host
+    /// Handler source as a string, for either language: a module that
+    /// exports a `handle` function. Validated and transpiled in-host
     /// via swc (no external compiler); the host surfaces
     /// `compile_failed` with diagnostics back to the caller on
     /// failure. Call `get_capabilities()` for the handler API spec.
@@ -167,9 +168,10 @@ pub struct UpdateRouteArgs {
     /// handler `source`. `typescript` or `javascript`. Omit to leave
     /// the artifact unchanged.
     pub language: Option<String>,
-    /// Replace the handler with this source string. TypeScript is
-    /// transpiled in-host via swc. Call `get_capabilities()` for the
-    /// handler API spec.
+    /// Replace the handler with this source string, for either
+    /// language: a module that exports a `handle` function. Validated
+    /// and transpiled in-host via swc. Call `get_capabilities()` for
+    /// the handler API spec.
     pub source: Option<String>,
 }
 
@@ -342,7 +344,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "create_route",
-        description = "Create a new route from a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source`). TypeScript is transpiled to JS in-host via swc, then dispatched through the embedded js-engine.wasm. Returns `compile_failed` with diagnostics if the source doesn't compile. **Before writing your first handler, call `get_capabilities()` to see the handler signature, request/response shape, store/log/clock API, and gotchas.**"
+        description = "Create a new route from a source-language handler (`language: \"typescript\"` or `\"javascript\"` plus `source`). Both languages go through the same in-host swc pipeline and dispatch through the embedded js-engine.wasm. Returns `compile_failed` with diagnostics if the source doesn't compile or doesn't declare a `handle` function. **Before writing your first handler, call `get_capabilities()` to see the handler signature, accepted export forms, request/response shape, store/log/clock API, and gotchas.**"
     )]
     pub async fn create_route(
         &self,
@@ -369,7 +371,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "update_route",
-        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, or `source` (with `language`). Source swaps re-transpile in-host via swc (for TypeScript) or store JS verbatim. Call `get_capabilities()` for the handler API spec."
+        description = "Update a route's mutable fields by `{group}/{n}` slug. Owner-or-admin only. Pass at least one of `methods`, `path`, or `source` (with `language`). Source swaps are re-validated through the same in-host swc pipeline as create, for both languages. Call `get_capabilities()` for the handler API spec."
     )]
     pub async fn update_route(
         &self,

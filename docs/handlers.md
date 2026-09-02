@@ -1,8 +1,8 @@
 # Writing handlers
 
-A handler is a small TypeScript or JavaScript function. The host transpiles
-TypeScript in-process (swc) and runs both languages inside a shared
-WebAssembly engine component, one fresh instance per request
+A handler is a small TypeScript or JavaScript function. The host processes
+the source in-process (swc) — the same pipeline for both languages — and runs
+it inside a shared WebAssembly engine component, one fresh instance per request
 ([ADR-0020](adr/0020-shared-wasm-engine-for-interpreted-languages.md)). There
 is no build step and no toolchain to install: you hand the host source, it
 hands back a live route.
@@ -34,6 +34,34 @@ export function handle(req, routeStore, groupStore) {
   };
 }
 ```
+
+Any export form that names `handle` works, and it works the same under
+`language: "typescript"` and `language: "javascript"` — plain JavaScript is
+valid TypeScript, so the label picks the editor's syntax mode and nothing
+else:
+
+```ts
+export function handle(req, routeStore, groupStore) { ... }
+export async function handle(req, routeStore, groupStore) { ... }
+export const handle = (req, routeStore, groupStore) => { ... };
+export default function handle(req, routeStore, groupStore) { ... }
+
+function handle(req, routeStore, groupStore) { ... }
+export { handle };
+
+function handle(req, routeStore, groupStore) { ... }   // no export at all
+```
+
+Two things are rejected when you create or update the route, as
+`compile_failed` with diagnostics rather than a 500 on the first request:
+
+- **An anonymous `export default`** — `export default function () {}` or
+  `export default (req) => {}`. Name it `handle`.
+- **`import` and `export ... from`** — a handler runs with no module loader.
+  Inline what it needs; handlers are meant to be self-contained.
+
+Source that never declares `handle` fails the same way. If the host accepted
+your handler, it runs.
 
 `req` is:
 

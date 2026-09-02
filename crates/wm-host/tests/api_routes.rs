@@ -624,13 +624,132 @@ async fn typescript_source_path_surfaces_transpile_errors() {
     assert_eq!(body["error"]["code"], "compile_failed");
 }
 
+#[tokio::test]
+async fn javascript_source_is_validated_at_create_time() {
+    // The reported bug's worse half: `language: "javascript"` used to skip
+    // validation entirely, so a handler that could never run was accepted
+    // with a 201 and a route id, and only failed when traffic arrived. A
+    // bundle of routes could stand up, list correctly, and serve nothing.
+    // Both languages now go through the same swc pipeline at create time.
+    let h = Harness::start().await;
+
+    for (case, source) in [
+        ("syntax error", "function handle(req {"),
+        // Would 500 with "did not declare a top-level `handle` function".
+        ("no handle declared", "function other() { return 1; }"),
+        // Each of these would 500 with an engine SyntaxError, because the
+        // engine evaluates a script and these leave a module construct
+        // that a script cannot contain.
+        (
+            "import",
+            "import { x } from 'y';\nfunction handle() { return x; }",
+        ),
+        ("anonymous default export", "export default function () {}"),
+        (
+            "renaming re-export",
+            "function h() {}\nexport { h as handle };",
+        ),
+    ] {
+        let resp = h
+            .create_route_body(json!({
+                "methods": ["GET"],
+                "path": format!("/{}", case.replace(' ', "-")),
+                "language": "javascript",
+                "source": source,
+            }))
+            .await;
+        assert_eq!(resp.status().as_u16(), 400, "{case} was accepted");
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["error"]["code"], "compile_failed", "{case}");
+    }
+}
+
+#[tokio::test]
+async fn documented_export_forms_are_accepted_under_both_languages() {
+    // The docs say the same source works as either language. Create-time
+    // agreement is the half this test owns; `js_engine_dispatch.rs` proves
+    // the accepted source then actually serves.
+    let h = Harness::start().await;
+
+    let mut n = 0;
+    for source in [
+        "export function handle(req, routeStore, groupStore) { return { status: 200, headers: [], body: new Uint8Array() }; }",
+        "export async function handle(req) { return { status: 200, headers: [], body: new Uint8Array() }; }",
+        "export const handle = (req) => ({ status: 200, headers: [], body: new Uint8Array() });",
+        "export default function handle(req) { return { status: 200, headers: [], body: new Uint8Array() }; }",
+        "function handle(req) { return { status: 200, headers: [], body: new Uint8Array() }; }\nexport { handle };",
+    ] {
+        for language in ["javascript", "typescript"] {
+            n += 1;
+            let resp = h
+                .create_route_body(json!({
+                    "methods": ["GET"],
+                    "path": format!("/form-{n}"),
+                    "language": language,
+                    "source": source,
+                }))
+                .await;
+            assert_eq!(
+                resp.status().as_u16(),
+                201,
+                "{language} rejected {source:?}: {:?}",
+                resp.text().await
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn javascript_source_swap_is_validated_on_patch() {
+    // The same gap existed on the update path — a broken JS swap was
+    // stored and only surfaced as a 500 on the next request.
+    let h = Harness::start().await;
+    let resp = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/swap",
+            "language": "javascript",
+            "source": JS_SOURCE,
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let slug = format!(
+        "{}/{}",
+        body["group"]["name"].as_str().unwrap(),
+        body["number"].as_u64().unwrap()
+    );
+
+    let resp = h
+        .client
+        .patch(h.url(&format!("/api/routes/{slug}")))
+        .json(&json!({ "language": "javascript", "source": "function handle( {" }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "compile_failed");
+
+    // The original handler is untouched — a rejected swap must not leave
+    // the route half-updated.
+    let resp = h
+        .client
+        .get(h.url(&format!("/api/routes/{slug}/source")))
+        .send()
+        .await
+        .expect("get source");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["source"].as_str().unwrap(), JS_SOURCE);
+}
+
 // -- Source storage + GET /source ---------------------------------------------
 
-// JS round-trips verbatim through `/api/routes` source storage (no
-// transpile, no whitespace munging). TS now goes through swc before
-// storage, so byte-for-byte assertions on TS belong in
-// `tests/ts_transpile.rs`; the source-storage assertions below use JS
-// to keep the round-trip clean.
+// Source round-trips through `/api/routes` storage exactly as authored,
+// for both languages — the JS the engine runs is derived at dispatch and
+// never stored (ADR-0020). The assertions below use JS because it is the
+// shorter literal; `typescript_source_path_preserves_original_source`
+// covers the same property for TS, annotations and all.
 const JS_SOURCE: &str =
     "function handle(req, _r, _g) { return { status: 200, headers: [], body: new Uint8Array() }; }";
 

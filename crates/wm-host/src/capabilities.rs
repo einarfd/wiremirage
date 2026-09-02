@@ -74,7 +74,39 @@ export function handle(req, routeStore, groupStore) {
 
 That's a complete handler. Drop it into `create_route`'s `source` field
 with `language: "typescript"` (or `"javascript"`) and it'll serve the
-declared `path` and methods.
+declared `path` and methods. Both languages take the same source shape
+and go through the same in-host pipeline — plain JavaScript is valid
+TypeScript, so the only thing the choice changes is the label and the
+editor's syntax mode.
+
+## How `handle` is exported
+
+Your source is a module, but it runs as a self-contained script. Any
+export form that names `handle` works, and the host unwraps it for you:
+
+```ts
+export function handle(req, routeStore, groupStore) { ... }
+export async function handle(req, routeStore, groupStore) { ... }
+export const handle = (req, routeStore, groupStore) => { ... };
+export default function handle(req, routeStore, groupStore) { ... }
+
+function handle(req, routeStore, groupStore) { ... }
+export { handle };
+
+function handle(req, routeStore, groupStore) { ... }   // no export at all
+```
+
+Two things are rejected at create time, with `compile_failed`:
+
+- **An `export default` with no name** — `export default function () {}`
+  or `export default (req) => {}`. There's nothing to unwrap; name it
+  `handle`.
+- **`import` and `export ... from`** — a handler runs with no module
+  loader, so there is nothing to resolve them against. Inline what you
+  need. Handlers are meant to be small and self-contained.
+
+Source that never declares `handle` fails the same way. If `create_route`
+accepted your handler, it will run.
 
 ## Available topics
 

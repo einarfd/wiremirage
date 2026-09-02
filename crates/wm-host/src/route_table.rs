@@ -485,20 +485,22 @@ impl RouteTable {
 
     /// Return the JavaScript the shared engine should run for a source-
     /// language route (ADR-0020). The stored `source` is the *original*
-    /// authored source: for `javascript` it's already JS; for `typescript`
-    /// it's TS, which we transpile to JS once and cache (keyed by route id,
-    /// evicted on update/delete like `components`). Preserving the original
-    /// source — rather than storing the transpiled JS — is what lets
-    /// `show_route_source` / `export_group` return what the author wrote.
+    /// authored source, for both `javascript` and `typescript`; we
+    /// transpile it to script-shape JS once and cache the result (keyed by
+    /// route id, evicted on update/delete like `components`). Preserving
+    /// the original source — rather than storing the derived JS — is what
+    /// lets `show_route_source` / `export_group` return what the author
+    /// wrote.
+    ///
+    /// JS goes through the transpiler too, rather than being handed to the
+    /// engine as-is: the engine evaluates a *script*, so a module's
+    /// exports have to be unwrapped whatever language they were declared
+    /// as. The source was already validated at create time, so a failure
+    /// here means the record was written by an older host.
     pub fn engine_source_for(&self, route: &Route) -> Result<String> {
         let source = route.source.as_deref().ok_or_else(|| {
             anyhow::anyhow!("source-language route {} has no source stored", route.id)
         })?;
-        if route.language != "typescript" {
-            // `javascript` (and any future already-JS engine language): the
-            // stored source is dispatch-ready as-is.
-            return Ok(source.to_string());
-        }
         {
             let cache = self.engine_js.lock().expect("poisoned");
             if let Some(js) = cache.get(&route.id) {

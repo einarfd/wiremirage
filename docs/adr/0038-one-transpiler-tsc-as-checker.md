@@ -2,6 +2,8 @@
 
 **Status:** Accepted (2026-08)
 
+- *2026-09-02 — the script-shape rewrite generalised.* The decision below describes `transpile` as "rewriting `export function handle` to script shape", which the implementation did literally: a string replace against that one spelling. It covered the documented example and silently missed every other export form, so `export default function handle`, `export { handle }`, `export const handle` and any `import` transpiled cleanly and then failed inside the engine's `new Function` wrapper at request time. It is now an AST pass over the module's top level, and `language: "javascript"` goes through the same entry point rather than bypassing it. The decision here is unchanged — one transpiler, two named entry points, `tsc` as an `engine.ts`-only checker. See [0020-shared-wasm-engine-for-interpreted-languages.md](0020-shared-wasm-engine-for-interpreted-languages.md) and `script-api-wit.md`'s "Handler source shape" for the accepted forms.
+
 ## Context
 
 Two separate things turn TypeScript into JavaScript in this project, and only one of them was ever a decision.

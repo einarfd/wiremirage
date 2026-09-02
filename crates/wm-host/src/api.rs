@@ -3,10 +3,10 @@
 //! Routes (`/api/routes`): POST/GET/DELETE per `rest-api.md`. The
 //! only public artifact input is source (`language: "javascript" |
 //! "typescript"`, `source`); pre-compiled wasm upload was retired in
-//! ADR-0023. Requests are handled in-process: JS is stored verbatim and
-//! dispatched through the shared `js-engine.wasm` component, TS goes
-//! through `wm_transpile::transpile` (pure-Rust swc) first and is stored
-//! as JS. No external compiler.
+//! ADR-0023. Requests are handled in-process: both languages store the
+//! author's source, validate it through `wm_transpile::transpile`
+//! (pure-Rust swc) at create time, and dispatch through the shared
+//! `js-engine.wasm` component. No external compiler.
 //!
 //! Tokens (`/api/tokens`): POST/GET/DELETE for the caller's own
 //! tokens, per ADR-0012. Plaintext is returned exactly once, in the
@@ -145,8 +145,9 @@ pub(crate) struct CreateRouteBody {
     pub(crate) methods: Vec<String>,
     pub(crate) path: String,
     pub(crate) language: String,
-    /// Handler source. Stored verbatim for `javascript`; transpiled
-    /// in-process for `typescript`. The only public artifact input
+    /// Handler source. Stored as authored; validated at create time
+    /// and transpiled to script-shape JS at dispatch, for both
+    /// `javascript` and `typescript`. The only public artifact input
     /// (ADR-0023 — pre-compiled wasm upload was retired).
     pub(crate) source: Option<String>,
 }
@@ -604,43 +605,28 @@ pub(crate) async fn create_route_core(
                  with `language: \"typescript\"` or `\"javascript\"`",
             ));
         }
-        "javascript" => {
-            // ADR-0020 shared-engine path: source is stored verbatim
-            // on the Route record, no per-route componentize. The
-            // dispatcher branches on `language: "javascript"` to
-            // route the call through the shared `js-engine.wasm`
-            // component at request time.
+        // ADR-0020 shared-engine path: both source languages store the
+        // author's original source on the Route record and dispatch it
+        // through the shared `js-engine.wasm` component. They share one
+        // pipeline because plain JS is valid TypeScript input, so there
+        // is no second path to keep in step — and no way for JS to skip
+        // the validation TS gets.
+        lang @ ("javascript" | "typescript") => {
             let source = body.source.ok_or_else(|| {
-                ApiError::validation("source required when language=\"javascript\"")
+                ApiError::validation(format!("source required when language=\"{lang}\""))
             })?;
-            (
-                Vec::new(),
-                "javascript".to_string(),
-                SUPPORTED_BINDINGS_VERSION.to_string(),
-                Some(source),
-            )
-        }
-        "typescript" => {
-            // ADR-0020 slice B: pure-Rust swc transpiles TS → JS in
-            // the host before storage. The route's `language` is
-            // preserved as "typescript" for operator visibility, but
-            // dispatch resolves it as engine-language via
-            // `dispatches_via_engine`.
-            let source = body.source.ok_or_else(|| {
-                ApiError::validation("source required when language=\"typescript\"")
-            })?;
-            let ts_source = source.clone();
+            let to_check = source.clone();
             // Transpile now to surface compile errors at create time, but
-            // store the *original* TS — the engine-runnable JS is derived and
-            // cached at dispatch (ADR-0020; preserves the authored source so
-            // show_route_source / export return what the author wrote).
-            tokio::task::spawn_blocking(move || wm_transpile::transpile(&ts_source))
+            // store the *original* source — the engine-runnable JS is derived
+            // and cached at dispatch (ADR-0020; preserves what the author
+            // wrote so show_route_source / export return exactly that).
+            tokio::task::spawn_blocking(move || wm_transpile::transpile(&to_check))
                 .await
                 .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
                 .map_err(ApiError::compile_failed)?;
             (
                 Vec::new(),
-                "typescript".to_string(),
+                lang.to_string(),
                 SUPPORTED_BINDINGS_VERSION.to_string(),
                 Some(source),
             )
@@ -966,34 +952,23 @@ pub(crate) async fn patch_route_core(
                      with `language: \"typescript\"` or `\"javascript\"`",
                 ));
             }
-            "javascript" => {
-                // ADR-0020 shared-engine swap: store source, drop
-                // any prior componentized wasm. The dispatcher
-                // picks up the language change on the next request.
+            // ADR-0020 shared-engine swap: store the author's source, drop
+            // any prior componentized wasm. One arm for both languages, for
+            // the same reason as `create_route_core` above.
+            lang @ ("javascript" | "typescript") => {
                 let source = body.source.as_deref().ok_or_else(|| {
-                    ApiError::validation("source required when language=\"javascript\"")
+                    ApiError::validation(format!("source required when language=\"{lang}\""))
                 })?;
-                (
-                    Some(Vec::new()),
-                    Some("javascript".to_string()),
-                    Some(SUPPORTED_BINDINGS_VERSION.to_string()),
-                    Some(Some(source.to_string())),
-                )
-            }
-            "typescript" => {
-                let source = body.source.as_deref().ok_or_else(|| {
-                    ApiError::validation("source required when language=\"typescript\"")
-                })?;
-                let ts_source = source.to_string();
-                // Validate (compile_failed) but store the original TS; the JS
-                // is derived + cached at dispatch (ADR-0020).
-                tokio::task::spawn_blocking(move || wm_transpile::transpile(&ts_source))
+                let to_check = source.to_string();
+                // Validate (compile_failed) but store the original source; the
+                // JS is derived + cached at dispatch (ADR-0020).
+                tokio::task::spawn_blocking(move || wm_transpile::transpile(&to_check))
                     .await
                     .map_err(|e| ApiError::compile_failed(format!("transpile task: {e}")))?
                     .map_err(ApiError::compile_failed)?;
                 (
                     Some(Vec::new()),
-                    Some("typescript".to_string()),
+                    Some(lang.to_string()),
                     Some(SUPPORTED_BINDINGS_VERSION.to_string()),
                     Some(Some(source.to_string())),
                 )

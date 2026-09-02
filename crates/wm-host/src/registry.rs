@@ -65,10 +65,11 @@ pub struct Route {
     pub bindings_version: String,
     #[serde(with = "serde_bytes")]
     pub compiled_wasm: Vec<u8>,
-    /// Original handler source as submitted by the caller. `Some` for
-    /// source-language routes (`typescript`, `javascript`, ...) so the
-    /// UI / CLI / MCP can show the code; `None` for routes uploaded as
-    /// pre-compiled `wasm` and for routes that pre-date this field.
+    /// Original handler source as submitted by the caller, for both
+    /// source languages (`typescript`, `javascript`), so the UI / CLI /
+    /// MCP can show exactly what the author wrote. The JS the engine
+    /// runs is derived from this at dispatch. `None` for routes uploaded
+    /// as pre-compiled `wasm` and for routes that pre-date this field.
     pub source: Option<String>,
     pub created_at: DateTime<Utc>,
     /// User ULID of the caller that created the route. DELETE/PATCH require

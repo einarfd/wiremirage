@@ -56,10 +56,10 @@ export function handle(req, routeStore, groupStore) {
 }
 EOF
 
-# Add a route pointing at the handler. The host transpiles TypeScript
-# to JavaScript in-process (via swc) and dispatches both languages
-# through the embedded js-engine.wasm (ADR-0020). No external compile
-# step, no Node sidecar.
+# Add a route pointing at the handler. The host processes both source
+# languages in-process (via swc) and dispatches them through the
+# embedded js-engine.wasm (ADR-0020). No external compile step, no
+# Node sidecar. Bad source fails here, not on the first request.
 wm routes add --group stripe-mock --method POST --path /v1/charges \
   --source-file /tmp/charge.ts
 
@@ -156,6 +156,16 @@ export function handle(req, routeStore, groupStore) {
   };
 }
 ```
+
+Any export form that names `handle` works, under either language —
+`export function handle`, `export async function handle`,
+`export const handle = ...`, `export default function handle`, a bare
+`function handle` with `export { handle }` at the bottom, or no export at
+all. What doesn't work, and comes back as `compile_failed` when you add
+the route rather than as a 500 on the first request: an anonymous
+`export default`, and `import` (a handler runs with no module loader —
+inline what it needs). `--language javascript` and `--language typescript`
+behave identically; the label picks the editor's syntax mode, nothing else.
 
 Two binding quirks worth knowing up front, both inherited from the WIT-to-JS conversion:
 

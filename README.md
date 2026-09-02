@@ -168,8 +168,8 @@ from the running host, and `wit/wiremirage.wit` for the WIT definition.
                                             Valkey (or in-memory)
 ```
 
-TypeScript is transpiled to JavaScript in-process with swc, then dispatched
-through a shared WebAssembly engine component (StarlingMonkey, built at
+Handler source is processed in-process with swc — TypeScript and JavaScript
+alike — then dispatched through a shared WebAssembly engine component (StarlingMonkey, built at
 compile time and embedded in the binary), instantiated fresh per request. Fuel
 metering, an epoch deadline, and a memory cap bound every call. Per-route and
 per-group state live in Valkey behind TTLs; so do journal entries.
