@@ -156,17 +156,23 @@ async fn handle_version(client: &Client, format: Format) -> Result<(), ClientErr
     // /health when reachable. Best-effort: a network failure
     // shouldn't block printing the CLI version.
     let cli_version = env!("CARGO_PKG_VERSION");
-    let host_version = client.health().await.ok().map(|h| h.version);
+    let health = client.health().await.ok();
+    let host_version = health.as_ref().map(|h| h.version.clone());
+    let host_build = health.as_ref().and_then(|h| h.build.clone());
     match format {
         Format::Json => format::print_json(&serde_json::json!({
             "cli_version": cli_version,
             "host_version": host_version,
+            "host_build": host_build,
         })),
         Format::Human => {
             println!("wm-cli:  {cli_version}");
-            match host_version {
-                Some(v) => println!("wm-host: {v}"),
-                None => println!("wm-host: (unreachable)"),
+            match (host_version, host_build) {
+                // The version repeats between releases, so the commit is
+                // what names the running artifact.
+                (Some(v), Some(b)) => println!("wm-host: {v} ({b})"),
+                (Some(v), None) => println!("wm-host: {v}"),
+                _ => println!("wm-host: (unreachable)"),
             }
         }
     }

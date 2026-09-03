@@ -6,7 +6,11 @@
 //      module as a Component, and stamp the resulting paths into
 //      `cargo:rustc-env` so tier-2 integration tests can locate them via
 //      `env!("WM_FIXTURE_<name>_COMPONENT")`.
-//   2. Build the shared js-engine.wasm component (ADR-0020) by running
+//   2. Stamp the git commit into `WM_BUILD_SHA` so the running host can
+//      say which build it is. The image build cannot read git itself —
+//      `.dockerignore` excludes `.git/` — so CI passes the SHA in and the
+//      git lookup here is the local-development fallback.
+//   3. Build the shared js-engine.wasm component (ADR-0020) by running
 //      `compiler/js-engine/`'s Dockerfile-based build, dropping the
 //      output into OUT_DIR, and stamping the path into
 //      `cargo:rustc-env=WM_JS_ENGINE_WASM=...` for main.rs to
@@ -30,6 +34,8 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    stamp_build_sha(workspace_root);
 
     // Re-run this script when the WIT contract or fixture sources change.
     // (Cargo will also re-run on its own dependency changes.)
@@ -226,4 +232,58 @@ fn read_id(cmd: &str, args: &[&str]) -> String {
         .expect("uid/gid output is utf-8")
         .trim()
         .to_string()
+}
+
+/// Stamp the short git commit into `WM_BUILD_SHA`.
+///
+/// The version alone cannot identify a build: every commit between two
+/// releases reports the version of the last bump, so two different images
+/// both say `0.1.2`. The SHA is what maps a running host to a deployed
+/// artifact — `sha-<short>` is literally the image tag CI publishes.
+///
+/// Three sources, in order:
+///   1. `WM_BUILD_SHA` from the environment — how the container build gets
+///      it, since `.dockerignore` excludes `.git/` and there is no repo to
+///      read inside the image build.
+///   2. `git rev-parse` — local development, where a checkout is present.
+///   3. Nothing. An unstamped build reports its version alone rather than
+///      failing or inventing a value; a source tarball is a legitimate way
+///      to build this.
+///
+/// Note the host image is never rebuilt on tag (`release.yml` retags the
+/// tested manifest by digest), so this is always the commit's SHA and never
+/// a tag name — the tag does not exist yet when this runs.
+fn stamp_build_sha(workspace_root: &Path) {
+    println!("cargo:rerun-if-env-changed=WM_BUILD_SHA");
+
+    if let Ok(sha) = env::var("WM_BUILD_SHA") {
+        let sha = sha.trim();
+        if !sha.is_empty() {
+            println!("cargo:rustc-env=WM_BUILD_SHA={}", short(sha));
+            return;
+        }
+    }
+
+    let head = workspace_root.join(".git/HEAD");
+    if head.exists() {
+        println!("cargo:rerun-if-changed={}", head.display());
+    }
+    let out = Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .current_dir(workspace_root)
+        .output();
+    if let Ok(out) = out
+        && out.status.success()
+        && let Ok(sha) = String::from_utf8(out.stdout)
+        && !sha.trim().is_empty()
+    {
+        println!("cargo:rustc-env=WM_BUILD_SHA={}", short(sha.trim()));
+    }
+    // No stamp: `option_env!("WM_BUILD_SHA")` is None and callers omit it.
+}
+
+/// CI passes a full 40-character SHA; the image tag and the footer both
+/// use the 7-character short form.
+fn short(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }

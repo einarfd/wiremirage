@@ -51,9 +51,27 @@ they make the design better, and are called out here.
   `/health` serves it unauthenticated, so gating it would claim a privilege
   the data doesn't have.
 
-  Note the limit: between releases every build off `main` reports the version
-  of the last bump, so two images can both say `0.1.2`. Identifying an exact
-  build still means checking the image digest.
+- **The host reports the git commit it was built from**, beside the version,
+  on `GET /health` and `/ready` (new `build` field), in `wm version`
+  (`wm-host: 0.1.2 (a73e574)`), in `summarize_workspace`'s `host` block, and
+  in the UI footer. The version alone can't identify a build — every commit
+  between two releases reports the version of the last bump, so two different
+  images both say `0.1.2` — and the short SHA matches the `sha-<short>`
+  container tag, which is what maps a running host to a deployed artifact.
+
+  CI passes the commit as a Docker build arg because `.dockerignore` excludes
+  `.git/`, so the image build has no repository to read. `build.rs` falls back
+  to `git rev-parse` locally and stamps nothing when neither is available; an
+  unstamped build reports its version alone rather than failing, which keeps
+  building from a source tarball working.
+
+  It is shown on releases too. Hiding it for a tagged build isn't possible:
+  `release.yml` retags the tested manifest by digest instead of rebuilding, so
+  the binary is compiled from a commit that has no tag yet. Making it knowable
+  would mean rebuilding on tag and giving up the bit-identical-to-what-was-
+  tested guarantee. Since a release *is* the main-branch image, the commit is
+  also the only field naming which one — so always showing it is the more
+  useful behaviour, not just the cheaper one.
 
 ### Fixed
 

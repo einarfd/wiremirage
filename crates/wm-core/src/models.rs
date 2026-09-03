@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    /// Short git commit of the host build, when it knew one. The version
+    /// repeats between releases; this names the exact artifact, and
+    /// matches the host's `sha-<short>` container tag.
+    #[serde(default)]
+    pub build: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -25,6 +30,8 @@ pub struct ReadyResponse {
     pub valkey: String,
     pub compiler: String,
     pub version: String,
+    #[serde(default)]
+    pub build: Option<String>,
 }
 
 // -- Groups ------------------------------------------------------------------

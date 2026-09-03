@@ -45,7 +45,7 @@
 
 <footer class="app-footer">
   <div class="app-footer__inner">
-    <span>WireMirage <code>{{ host_version }}</code></span>
+    <span>WireMirage <code>{{ host_version }}</code>{% if build_sha %} <code>{{ build_sha }}</code>{% endif %}</span>
   </div>
 </footer>
 </body>

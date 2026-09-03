@@ -222,6 +222,11 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The image build has no .git (excluded by .dockerignore), so the
+          # commit has to be handed in. It matches the `sha-<short>` tag this
+          # image is published under.
+          build-args: |
+            WM_BUILD_SHA=${{ github.sha }}
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true

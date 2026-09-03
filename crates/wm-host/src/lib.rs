@@ -44,6 +44,30 @@ pub mod wire;
 /// when the WIT contract changes shape.
 pub const SUPPORTED_BINDINGS_VERSION: &str = "0.1.0";
 
+/// This build's version, from the crate manifest.
+pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// This build's short git commit, when the build knew one — `build.rs`
+/// takes it from `WM_BUILD_SHA` (how the container build receives it) or
+/// from `git rev-parse` locally, and stamps nothing when neither is
+/// available.
+///
+/// The version alone cannot identify a build: every commit between two
+/// releases reports the version of the last bump, so two different images
+/// both say `0.1.2`. This is what maps a running host to a deployed
+/// artifact, since `sha-<short>` is the image tag CI publishes. It is
+/// always a commit, never a tag — the host image is retagged by digest
+/// rather than rebuilt on release, so no tag exists when it is compiled.
+pub const BUILD_SHA: Option<&str> = option_env!("WM_BUILD_SHA");
+
+/// `0.1.2 (a73e574)`, or just `0.1.2` for an unstamped build.
+pub fn build_id() -> String {
+    match BUILD_SHA {
+        Some(sha) => format!("{HOST_VERSION} ({sha})"),
+        None => HOST_VERSION.to_string(),
+    }
+}
+
 pub use bindings::Handler;
 pub use bindings::wiremirage::handler::http::{Header, PathParam, Request, Response};
 pub use host_state::HostState;

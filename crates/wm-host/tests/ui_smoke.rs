@@ -472,6 +472,22 @@ async fn every_page_footer_reports_the_running_version() {
         );
     }
 
+    // The build stamp too, when this build has one. A source build with
+    // no git and no WM_BUILD_SHA reports the version alone rather than
+    // failing, so the assertion follows the constant.
+    if let Some(sha) = wm_host::BUILD_SHA {
+        let body = client
+            .get(url(&h, "/ui/"))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains(sha), "footer names the build commit");
+    }
+
     // It matches what /health reports, so the two can't drift.
     let health: serde_json::Value = client
         .get(url(&h, "/health"))
@@ -482,4 +498,34 @@ async fn every_page_footer_reports_the_running_version() {
         .await
         .unwrap();
     assert_eq!(health["version"], version, "UI and /health agree");
+    assert_eq!(
+        health["build"].as_str(),
+        wm_host::BUILD_SHA,
+        "/health reports the same build the UI does"
+    );
+}
+
+#[tokio::test]
+async fn build_stamp_is_present_and_is_a_short_commit() {
+    // Guards the wiring, not the value: a build.rs that silently stops
+    // stamping would otherwise show up only as a missing footer field
+    // nobody notices. Skipped for an unstamped build (source tarball,
+    // no git, no WM_BUILD_SHA) — that is a supported way to build.
+    let Some(sha) = wm_host::BUILD_SHA else {
+        return;
+    };
+    assert_eq!(
+        sha.len(),
+        7,
+        "short form, matching the sha-<short> tag: {sha}"
+    );
+    assert!(
+        sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "a commit, never a tag name — the host image is retagged by \
+         digest rather than rebuilt, so no tag exists at compile time: {sha}"
+    );
+    assert_eq!(
+        wm_host::build_id(),
+        format!("{} ({sha})", wm_host::HOST_VERSION)
+    );
 }

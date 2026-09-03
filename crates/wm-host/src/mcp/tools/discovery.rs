@@ -25,7 +25,7 @@ use crate::mcp::tools::routes::RouteRecord;
 use crate::registry::render_slug;
 use crate::route_table::{MatchProbe, NearMissReason};
 
-const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+use crate::{BUILD_SHA, HOST_VERSION};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SummarizeWorkspaceResult {
@@ -38,6 +38,11 @@ pub struct SummarizeWorkspaceResult {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HostInfo {
     pub version: String,
+    /// Short git commit of this build, when the build knew one. The
+    /// version alone repeats between releases, so this is what names the
+    /// exact artifact — it matches the `sha-<short>` container tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
     /// Public base URL this host is reached at (e.g.
     /// `https://wm.example.com`), derived from the request and honoring
     /// `X-Forwarded-*` behind a trusted proxy. Mock routes
@@ -294,6 +299,7 @@ impl WmMcpServer {
         Ok(Json(SummarizeWorkspaceResult {
             host: HostInfo {
                 version: HOST_VERSION.into(),
+                build: BUILD_SHA.map(str::to_string),
                 base_url,
             },
             user: UserInfo {

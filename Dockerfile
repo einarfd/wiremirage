@@ -156,6 +156,19 @@ RUN rustup show && rustup target add wasm32-unknown-unknown
 COPY --from=js-engine-builder /out/js-engine.wasm /tmp/js-engine.wasm
 ENV WM_JS_ENGINE_WASM_OVERRIDE=/tmp/js-engine.wasm
 
+# The commit this image is built from, surfaced by the host on /health, in
+# `wm version`, in summarize_workspace, and in the UI footer. It has to be
+# passed in: .dockerignore excludes .git/, so build.rs cannot read a repo
+# that isn't in the context. Unset is fine — the host then reports its
+# version alone rather than failing.
+#
+# Declared *after* the dependency-cache layers on purpose. A new commit
+# changes this value, and everything below an ARG's first use is
+# invalidated when it changes, so putting it earlier would defeat the
+# dependency cache on every single build.
+ARG WM_BUILD_SHA=""
+ENV WM_BUILD_SHA=${WM_BUILD_SHA}
+
 # Real build, reusing the dependency layer's target/ and registry.
 #
 # `touch` first: cargo fingerprints on mtime, and the stub sources compiled

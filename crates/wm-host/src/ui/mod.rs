@@ -50,10 +50,11 @@ pub struct UiTemplates {
 impl UiTemplates {
     pub fn new() -> Self {
         let mut env = Environment::new();
-        // The running host's version, available to every template
-        // without each handler having to thread it through its own
-        // context. `base.html`'s footer is the only consumer today.
-        env.add_global("host_version", env!("CARGO_PKG_VERSION"));
+        // The running build, available to every template without each
+        // handler having to thread it through its own context.
+        // `base.html`'s footer is the only consumer today.
+        env.add_global("host_version", crate::HOST_VERSION);
+        env.add_global("build_sha", crate::BUILD_SHA);
         // One `add_template` call per file. Macro-driven so a new
         // template is one line at the call site — easy to keep in
         // sync as new screens land in subsequent slices.

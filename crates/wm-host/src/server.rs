@@ -492,7 +492,7 @@ async fn internal_http_metrics(req: Request, next: Next) -> Response {
     .await
 }
 
-const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+use crate::{BUILD_SHA, HOST_VERSION};
 
 /// Liveness probe. Public, unauthenticated. Always 200 as long as the
 /// process can answer at all — orchestrators use this to decide whether to
@@ -501,6 +501,7 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
         "version": HOST_VERSION,
+        "build": BUILD_SHA,
     }))
 }
 
@@ -522,6 +523,7 @@ async fn ready(State(state): State<AppState>) -> Response {
         "status": if healthy { "ready" } else { "not_ready" },
         "valkey": valkey,
         "version": HOST_VERSION,
+        "build": BUILD_SHA,
     });
     (status, Json(body)).into_response()
 }
