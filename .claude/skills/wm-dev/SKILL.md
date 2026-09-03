@@ -1516,7 +1516,8 @@ page at `/ui/unmatched/{number}`.
   journal-write or read time), and the actual
   `/ui/routes/new` form the deep-links point at — that's a
   later slice. The `ui_smoke.rs` placeholder-routes loop was
-  trimmed to just `/ui/settings` to reflect the new state.
+  trimmed to just `/ui/settings` to reflect the new state
+  (that path is `/ui/admin` since ADR-0039).
 
 ## Web UI state pages (slice 27)
 
@@ -1642,6 +1643,14 @@ Fifth UI slice. Replaces the `/ui/me/tokens` stub with a real
 self-service tokens page (list / create / revoke), and lands the
 double-submit CSRF middleware that every future authed UI form
 will rely on.
+
+> **Current state (2026-09-03, ADR-0039).** The page described below
+> is now the **account screen at `/ui/me`** (`account.html`), holding
+> all three of a user's credentials: API tokens, MCP applications, and
+> sessions. It is reached by clicking the identity chip in the header,
+> not from a nav link. The POST action routes kept their
+> `/ui/me/tokens/...` paths; only the GET page moved. Everything about
+> CSRF below is unchanged.
 
 - **CSRF middleware (`ui::csrf::csrf_middleware`):**
   - Safe methods (GET/HEAD/OPTIONS): if no `wm_csrf` cookie was

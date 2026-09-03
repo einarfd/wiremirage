@@ -1,6 +1,9 @@
 # ADR-0039: Structural admin gating in the web UI — the path prefix carries the privilege
 
-**Status:** Proposed
+**Status:** Accepted — implemented 2026-09-03
+
+- *2026-09-03 — landed as designed, with one count corrected during implementation.* The Context section first said six inline admin gates; there are **four** (`/ui/admin` plus its three POST actions). The other two `is_admin` reads in `ui/mod.rs` are list-scope helpers that widen results from "mine" to "everyone" — scoping, not gating, and untouched. The eleven owner-or-admin checks are likewise untouched, as designed.
+  The account half of the same change went further than this ADR required, because the two decisions share a cause: `/ui/me/tokens` became `/ui/me`, holding all three of a user's credentials, and the header user area became a chip linking to it. That is specified in ../web-ui-design.md rather than here — this ADR governs the gate, not the information architecture.
 
 ## Context
 
@@ -14,7 +17,7 @@ The action has been relocated to `/ui/me/sessions/revoke-all` and now renders on
 
 An audit of the two authenticated surfaces:
 
-- **Web UI.** Every admin decision is a hand-written inline check in `ui/mod.rs`. Six are pure admin gates of the form `if !auth.is_admin { return forbidden_page(...) }` — the settings page, its three mutating POST actions, and two list-scope helpers. There is no helper function and no middleware. The privilege is expressed only inside handler bodies.
+- **Web UI.** Every admin decision is a hand-written inline check in `ui/mod.rs`. Four are pure admin gates of the form `if !auth.is_admin { return forbidden_page(...) }` — the settings page and its three mutating POST actions. Two further inline `is_admin` reads sit in list-page helpers, but those choose "everyone" over "mine" rather than refusing; they are result scoping, not gates, and this decision leaves them alone. There is no helper function and no middleware. The privilege is expressed only inside handler bodies.
 - **REST.** There is a named helper, `require_admin(&auth)?`, used at four call sites. Other admin decisions are result scoping rather than gating (`if auth.is_admin` selects "everyone" instead of "mine").
 
 A further eleven sites in `ui/mod.rs` take the form `if !auth.is_admin && resource.owner_id != auth.user_id`. These are owner-or-admin authorization, which is a different thing from an admin gate, and this ADR is careful not to conflate them.
@@ -26,7 +29,7 @@ Because the check lives inside the handler, nothing about the router says which 
 That cuts in two directions and both are live:
 
 - **False assurance.** Someone reviewing the router for privilege boundaries concludes the subtree is protected. One route in it is not.
-- **Silent removal.** Someone hoisting five repeated `if !auth.is_admin` checks into one layer over `/ui/settings/*` — the obvious tidy-up, and the change this ADR would otherwise invite — deletes a security capability that users rely on. The test suite would not have stopped them: all five session tests posted directly to the URL, four of them with an admin cookie, and none loaded the page as a non-admin. The behaviour was well covered; the reachability was not covered at all. (A `sessions_card_is_reachable_by_non_admins` test now closes that specific hole.)
+- **Silent removal.** Someone hoisting the four repeated `if !auth.is_admin` checks — spread across five routes, which is the whole problem — into one layer over `/ui/settings/*` — the obvious tidy-up, and the change this ADR would otherwise invite — deletes a security capability that users rely on. The test suite would not have stopped them: all five session tests posted directly to the URL, four of them with an admin cookie, and none loaded the page as a non-admin. The behaviour was well covered; the reachability was not covered at all. (A `sessions_card_is_reachable_by_non_admins` test now closes that specific hole.)
 
 ### Prior art on the prefix
 

@@ -52,7 +52,11 @@
     <li><a href="/ui/groups/new">Create a group</a></li>
     <li><a href="/ui/routes/new">Create a route</a></li>
     <li><a href="/ui/journal/live">Watch live journal</a></li>
-    <li><a href="/ui/me/tokens">Manage API tokens</a></li>
+    <li><a href="/ui/unmatched">Review unmatched requests</a></li>
+    <li><a href="/ui/me">Your account (API tokens, MCP apps, sessions)</a></li>
+    {%- if user.is_admin %}
+    <li><a href="/ui/admin">Admin (users, identity providers)</a></li>
+    {%- endif %}
   </ul>
 </section>
 {% endblock %}

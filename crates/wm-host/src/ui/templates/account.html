@@ -2,10 +2,11 @@
 
 {% block content %}
 <section class="page-header">
-  <h1>API tokens</h1>
+  <h1>Your account</h1>
   <p class="text-muted">
-    Tokens authenticate <code>wm</code>, MCP, and curl against this host's <code>/api/*</code>.
-    They belong to you; admins manage other users' tokens via the CLI.
+    <code>{{ user.email }}</code> — the three credentials this account holds: API
+    tokens, the MCP applications you have authorised, and your browser sessions.
+    Everything here is yours alone; admins manage other users' tokens via the CLI.
   </p>
 </section>
 
@@ -28,7 +29,7 @@
 
 <section class="card">
   <header class="card__header">
-    <h2>Create a new token</h2>
+    <h2>Create a new API token</h2>
   </header>
   <form method="post" action="/ui/me/tokens" class="filter-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">

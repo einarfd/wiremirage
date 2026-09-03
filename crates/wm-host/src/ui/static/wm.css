@@ -143,6 +143,7 @@ p { margin: 0 0 var(--space-3); }
 
 .app-nav {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-4);
   margin-right: auto;
 }
@@ -163,7 +164,60 @@ p { margin: 0 0 var(--space-3); }
   gap: var(--space-3);
   font-size: var(--text-sm);
 }
-.app-user__name { color: var(--text); font-weight: 500; }
+
+/* The identity chip: avatar, email and role as one link to /ui/me.
+   Admin is carried by the word as well as the colour — it is a
+   privilege indicator, and colour alone fails anyone who can't
+   distinguish it. */
+.identity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-2) 2px 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-weight: 500;
+  max-width: 20rem;
+}
+.identity:hover {
+  background: var(--accent-bg);
+  text-decoration: none;
+}
+.identity__initials {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  flex: none;
+  border-radius: 999px;
+  background: var(--border);
+  color: var(--text);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.identity__email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.identity__role {
+  flex: none;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.identity--admin .identity__initials {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
 
 .app-main {
   max-width: 1200px;

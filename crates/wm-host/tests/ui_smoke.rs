@@ -226,7 +226,7 @@ async fn home_page_renders_after_login() {
 }
 
 #[tokio::test]
-async fn home_page_shows_admin_badge_for_admin_user() {
+async fn header_identity_chip_carries_email_role_and_account_link() {
     let h = start_with_users("admin@test.example:devpassword:admin").await;
     let client = no_redirect_client();
     let cookie = login_and_get_cookie(&h, &client).await;
@@ -239,11 +239,24 @@ async fn home_page_shows_admin_badge_for_admin_user() {
         .text()
         .await
         .unwrap();
-    // The admin badge sits in the header next to the user name.
+    // One chip carries all three signals and links to the account
+    // screen. The email stays visible beside the initials on purpose:
+    // this is a multi-user host, and an avatar that replaces it removes
+    // the only answer to "which account am I on?".
     assert!(
-        body.contains("badge--admin"),
-        "expected admin badge in the header"
+        body.contains(r#"href="/ui/me""#),
+        "chip links to the account"
     );
+    assert!(body.contains("admin@test.example"), "email stays visible");
+    assert!(
+        body.contains("identity--admin"),
+        "admin styling on the chip"
+    );
+    assert!(
+        body.contains(">admin<"),
+        "admin is spelled out, not carried by colour alone"
+    );
+    assert!(body.contains(">AD<"), "initials derived from the email");
 }
 
 #[tokio::test]
@@ -336,12 +349,12 @@ async fn admin_only_pages_are_forbidden_for_non_admin() {
     // not planned, so the route was deleted rather than left as a
     // placeholder. It 404s like any other unknown path now.
     let resp = client
-        .get(url(&h, "/ui/settings"))
+        .get(url(&h, "/ui/admin"))
         .header("cookie", &cookie)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 403, "non-admin GET /ui/settings");
+    assert_eq!(resp.status().as_u16(), 403, "non-admin GET /ui/admin");
 
     let resp = client
         .get(url(&h, "/ui/admin/health"))

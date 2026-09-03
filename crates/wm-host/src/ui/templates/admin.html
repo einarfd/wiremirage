@@ -2,11 +2,12 @@
 
 {% block content %}
 <section class="page-header">
-  <h1>Settings</h1>
+  <h1>Admin</h1>
   <p class="text-muted">
-    User administration and the identity providers this host is configured with.
-    Everything here mirrors <code>wm users</code>; MCP deliberately does not expose
-    user management.
+    Host administration: the users of this host and the identity providers it is
+    configured with. Everything here mirrors <code>wm users</code>; MCP deliberately
+    does not expose user management. Your own credentials live on
+    <a href="/ui/me">your account</a>.
   </p>
 </section>
 
@@ -42,12 +43,12 @@
         <td>{% if u.is_admin %}<span class="badge badge--admin">admin</span>{% else %}<span class="text-muted">user</span>{% endif %}</td>
         <td class="text-muted">{{ u.created_at }}</td>
         <td class="token-actions">
-          <form method="post" action="/ui/settings/users/{{ u.email }}/admin" class="inline-form">
+          <form method="post" action="/ui/admin/users/{{ u.email }}/admin" class="inline-form">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <input type="hidden" name="is_admin" value="{% if u.is_admin %}false{% else %}true{% endif %}">
             <button type="submit" class="btn btn--ghost">{% if u.is_admin %}Demote{% else %}Promote{% endif %}</button>
           </form>
-          <form method="post" action="/ui/settings/users/{{ u.email }}/delete" class="inline-form"
+          <form method="post" action="/ui/admin/users/{{ u.email }}/delete" class="inline-form"
                 onsubmit="return confirm('Delete {{ u.email }}? This also deletes their API tokens. This can\'t be undone.');">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <button type="submit" class="btn btn--ghost">Delete</button>
@@ -67,7 +68,7 @@
   <header class="card__header">
     <h2>Add user</h2>
   </header>
-  <form method="post" action="/ui/settings/users" class="filter-form">
+  <form method="post" action="/ui/admin/users" class="filter-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <label class="filter-field">
       <span class="filter-field__label">Email</span>

@@ -17,9 +17,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use minijinja::Environment;
@@ -72,8 +73,8 @@ impl UiTemplates {
         tmpl!("route_detail.html", "templates/route_detail.html");
         tmpl!("live_journal.html", "templates/live_journal.html");
         tmpl!("journal_entry.html", "templates/journal_entry.html");
-        tmpl!("tokens.html", "templates/tokens.html");
-        tmpl!("settings.html", "templates/settings.html");
+        tmpl!("account.html", "templates/account.html");
+        tmpl!("admin.html", "templates/admin.html");
         tmpl!("group_state.html", "templates/group_state.html");
         tmpl!("group_callbacks.html", "templates/group_callbacks.html");
         tmpl!("route_state.html", "templates/route_state.html");
@@ -170,7 +171,8 @@ pub fn router(state: AppState) -> Router {
         .route("/ui/journal/{group}/{number}", get(journal_entry_page))
         .route("/ui/unmatched", get(unmatched_index_page))
         .route("/ui/unmatched/{number}", get(unmatched_detail_page))
-        .route("/ui/me/tokens", get(tokens_page).post(create_token_form))
+        .route("/ui/me", get(account_page))
+        .route("/ui/me/tokens", axum::routing::post(create_token_form))
         .route(
             "/ui/me/tokens/{name}/revoke",
             axum::routing::post(revoke_token_form),
@@ -187,18 +189,7 @@ pub fn router(state: AppState) -> Router {
             "/ui/me/sessions/revoke-all",
             axum::routing::post(revoke_all_sessions_form),
         )
-        .route(
-            "/ui/settings",
-            get(settings_page).post(settings_create_user),
-        )
-        .route(
-            "/ui/settings/users/{email}/admin",
-            axum::routing::post(settings_set_admin),
-        )
-        .route(
-            "/ui/settings/users/{email}/delete",
-            axum::routing::post(settings_delete_user),
-        )
+        .merge(admin_router(&state))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             csrf::csrf_middleware,
@@ -207,6 +198,44 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             auth_redirect::require_session,
         ));
+
+    /// The admin subtree. Every route under `/ui/admin` is admin-only, and
+    /// the `require_admin` layer — not a check inside each handler — is what
+    /// makes that true (ADR-0039). Register an admin page here and it is
+    /// gated; there is no per-handler step to forget, and no way to file a
+    /// self-service action under this prefix without the gate catching it.
+    ///
+    /// The layer is applied here, inside `router`'s session and CSRF layers:
+    /// it needs an authenticated `AuthContext`, and a request that fails CSRF
+    /// should be rejected as a CSRF failure rather than masked by a 403.
+    fn admin_router(state: &AppState) -> Router<AppState> {
+        Router::new()
+            .route("/ui/admin", get(admin_page).post(admin_create_user))
+            .route(
+                "/ui/admin/users/{email}/admin",
+                axum::routing::post(admin_set_admin),
+            )
+            .route(
+                "/ui/admin/users/{email}/delete",
+                axum::routing::post(admin_delete_user),
+            )
+            .layer(middleware::from_fn_with_state(state.clone(), require_admin))
+    }
+
+    /// Refuse a non-admin with the same styled 403 the handlers used to
+    /// render themselves.
+    async fn require_admin(
+        State(state): State<AppState>,
+        auth: AuthContext,
+        req: Request,
+        next: Next,
+    ) -> Response {
+        if auth.is_admin {
+            next.run(req).await
+        } else {
+            forbidden_page(&state, &auth)
+        }
+    }
 
     let public: Router<AppState> = Router::new()
         // Static assets are deliberately *not* behind auth — CSS for
@@ -848,6 +877,13 @@ fn ui_error_400(state: &AppState, auth: &AuthContext, msg: String) -> Response {
 pub(crate) struct UserBadge {
     pub email: String,
     pub is_admin: bool,
+    /// Up to two letters for the header chip's avatar. Derived locally
+    /// from the email — no gravatar, which would mean an external
+    /// request per page load and would leak the user list to a third
+    /// party. The email stays visible beside it: this is a multi-user
+    /// host, and "which account am I on?" is a question the chip has to
+    /// answer, not hide behind initials.
+    pub initials: String,
 }
 
 impl UserBadge {
@@ -855,8 +891,30 @@ impl UserBadge {
         Self {
             email: auth.user_email.clone(),
             is_admin: auth.is_admin,
+            initials: initials_for(&auth.user_email),
         }
     }
+}
+
+/// First letters of the local part's words — `ada.lovelace@x` -> `AL`,
+/// `einarfd@x` -> `EI`. Falls back to `?` for an email that starts with
+/// no alphanumeric at all, so the chip never renders empty.
+fn initials_for(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or(email);
+    let words: Vec<&str> = local
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let letters: String = match words.as_slice() {
+        [] => return "?".into(),
+        [one] => one.chars().take(2).collect(),
+        [first, second, ..] => first
+            .chars()
+            .take(1)
+            .chain(second.chars().take(1))
+            .collect(),
+    };
+    letters.to_uppercase()
 }
 
 // -- /ui/groups/{group} ---------------------------------------------------
@@ -2740,7 +2798,7 @@ async fn route_delete_form(
     axum::response::Redirect::to(&landing).into_response()
 }
 
-// -- /ui/me/tokens --------------------------------------------------------
+// -- /ui/me (account: API tokens, MCP grants, sessions) ---------------------
 //
 // Self-service API token management. Lists the caller's own tokens,
 // lets them create a new one (plaintext shown once on the response),
@@ -2778,7 +2836,7 @@ struct CsrfOnlyForm {
     _csrf: String,
 }
 
-async fn tokens_page(
+async fn account_page(
     State(state): State<AppState>,
     auth: AuthContext,
     Query(q): Query<UiTokensQuery>,
@@ -2790,8 +2848,8 @@ async fn tokens_page(
     let (sort, dir) = resolve_token_sort(q.sort.as_deref(), q.dir.as_deref());
     sort_tokens(&mut tokens, sort, dir);
     let grants = load_oauth_grants(&state, &auth);
-    let data = TokensPageData::list_with_sort(&tokens, grants, sort, dir);
-    render_tokens_page(&state, &auth, data)
+    let data = AccountPageData::list_with_sort(&tokens, grants, sort, dir);
+    render_account_page(&state, &auth, data)
 }
 
 fn resolve_token_sort<'a>(sort: Option<&'a str>, dir: Option<&'a str>) -> (&'a str, &'a str) {
@@ -2833,7 +2891,7 @@ async fn create_token_form(
 ) -> Response {
     let name = form.name.trim();
     if name.is_empty() {
-        return tokens_page_with_error(&state, &auth, "Name is required.");
+        return account_page_with_error(&state, &auth, "Name is required.");
     }
     const DAY: u64 = 86_400;
     let ttl = match form.ttl_preset.as_deref().map(str::trim) {
@@ -2848,7 +2906,7 @@ async fn create_token_form(
             Some(s) => match s.parse::<u64>() {
                 Ok(h) if h > 0 => Some(h * 3600),
                 _ => {
-                    return tokens_page_with_error(
+                    return account_page_with_error(
                         &state,
                         &auth,
                         "TTL hours must be a positive integer.",
@@ -2861,7 +2919,7 @@ async fn create_token_form(
     let (token, plaintext) = match state.auth().create_token(&auth.user_id, name, ttl) {
         Ok(pair) => pair,
         Err(crate::auth::AuthError::NameTaken(n)) => {
-            return tokens_page_with_error(
+            return account_page_with_error(
                 &state,
                 &auth,
                 &format!("A token named {n:?} already exists. Pick a different name."),
@@ -2880,10 +2938,10 @@ async fn create_token_form(
         })
         .unwrap_or_default();
     let grants = load_oauth_grants(&state, &auth);
-    render_tokens_page(
+    render_account_page(
         &state,
         &auth,
-        TokensPageData::after_create(&tokens, grants, &plaintext, name),
+        AccountPageData::after_create(&tokens, grants, &plaintext, name),
     )
 }
 
@@ -2902,7 +2960,7 @@ async fn revoke_token_form(
     }
     // 303 See Other so a browser refresh after revoke doesn't replay
     // the POST.
-    axum::response::Redirect::to("/ui/me/tokens").into_response()
+    axum::response::Redirect::to("/ui/me").into_response()
 }
 
 /// Revoke every active OAuth grant for `(caller, client_id)`. Marks
@@ -2924,7 +2982,7 @@ async fn revoke_oauth_grant_form(
         Ok(_n) => {}
         Err(e) => return ui_error_500(&state, &auth, format!("revoke oauth grant: {e}")),
     }
-    axum::response::Redirect::to("/ui/me/tokens").into_response()
+    axum::response::Redirect::to("/ui/me").into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2942,17 +3000,17 @@ async fn rename_token_form(
 ) -> Response {
     let new_name = form.new_name.trim();
     if new_name.is_empty() {
-        return tokens_page_with_error(&state, &auth, "New name must not be empty.");
+        return account_page_with_error(&state, &auth, "New name must not be empty.");
     }
     match state
         .auth()
         .rename_token(&auth.user_id, &old_name, new_name)
     {
-        Ok(_) => axum::response::Redirect::to("/ui/me/tokens").into_response(),
+        Ok(_) => axum::response::Redirect::to("/ui/me").into_response(),
         Err(crate::auth::AuthError::NotFound) => {
-            tokens_page_with_error(&state, &auth, &format!("Token {old_name:?} not found."))
+            account_page_with_error(&state, &auth, &format!("Token {old_name:?} not found."))
         }
-        Err(crate::auth::AuthError::NameTaken(n)) => tokens_page_with_error(
+        Err(crate::auth::AuthError::NameTaken(n)) => account_page_with_error(
             &state,
             &auth,
             &format!("A token named {n:?} already exists. Pick a different name."),
@@ -2962,7 +3020,7 @@ async fn rename_token_form(
 }
 
 #[derive(Serialize)]
-struct TokensPageData {
+struct AccountPageData {
     tokens: Vec<TokenRow>,
     oauth_grants: Vec<OAuthGrantRow>,
     plaintext: Option<String>,
@@ -2974,7 +3032,7 @@ struct TokensPageData {
     sort_links: TokensSortLinks,
 }
 
-impl TokensPageData {
+impl AccountPageData {
     fn list_with_sort(
         tokens: &[crate::auth::Token],
         grants: Vec<OAuthGrantRow>,
@@ -3071,7 +3129,7 @@ impl TokensSortLinks {
             } else {
                 default_dir
             };
-            format!("/ui/me/tokens?sort={col}&dir={dir}")
+            format!("/ui/me?sort={col}&dir={dir}")
         };
         Self {
             name: mk("name", "asc"),
@@ -3101,26 +3159,26 @@ impl From<&crate::auth::Token> for TokenRow {
     }
 }
 
-fn render_tokens_page(state: &AppState, auth: &AuthContext, data: TokensPageData) -> Response {
+fn render_account_page(state: &AppState, auth: &AuthContext, data: AccountPageData) -> Response {
     render(
         state,
-        "tokens.html",
+        "account.html",
         context! {
-            page_title => "API tokens",
+            page_title => "Account",
             user => UserBadge::from(auth),
             data => data,
         },
     )
 }
 
-fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> Response {
+fn account_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> Response {
     let tokens = state
         .auth()
         .list_tokens_for(&auth.user_id)
         .unwrap_or_default();
     let grants = load_oauth_grants(state, auth);
-    let data = TokensPageData::with_error(&tokens, grants, error);
-    let mut resp = render_tokens_page(state, auth, data);
+    let data = AccountPageData::with_error(&tokens, grants, error);
+    let mut resp = render_account_page(state, auth, data);
     *resp.status_mut() = StatusCode::BAD_REQUEST;
     resp
 }
@@ -3128,7 +3186,7 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
 /// Sign out everywhere: the third credential on this page, alongside
 /// API tokens and MCP grants. Self-service by nature — it can only
 /// ever affect the caller's own sessions — which is why it lives under
-/// `/ui/me/*` and not in the admin-gated `/ui/settings/*` subtree.
+/// `/ui/me/*` and not in the admin-gated `/ui/admin/*` subtree.
 ///
 /// Bumps the caller's session epoch, invalidating every session they
 /// hold including this one, so the response also clears the cookie and
@@ -3874,7 +3932,7 @@ async fn group_export_download(
 // or curl until the real page lands. Stubs share a single template
 // to keep the code DRY.
 
-// -- Settings (slice: admin user management) --------------------------------
+// -- Admin (/ui/admin — host user management, ADR-0039) ---------------------
 //
 // The UI half of the CLI+UI user-management pairing; MCP deliberately
 // excludes user management, since it's a setup operation done before
@@ -3902,7 +3960,7 @@ struct ProviderRow {
 }
 
 #[derive(Debug, Serialize)]
-struct SettingsPageData {
+struct AdminPageData {
     users: Vec<SettingsUserRow>,
     providers: Vec<ProviderRow>,
     error: Option<String>,
@@ -3910,14 +3968,14 @@ struct SettingsPageData {
 }
 
 #[derive(Debug, Deserialize)]
-struct SettingsQuery {
+struct AdminQuery {
     /// Set by the post-create redirect so the new row is confirmed in
     /// words, not just by the table growing.
     created: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SettingsCreateUserForm {
+struct AdminCreateUserForm {
     email: String,
     /// Unchecked boxes aren't submitted at all, so presence is the value.
     is_admin: Option<String>,
@@ -3926,22 +3984,19 @@ struct SettingsCreateUserForm {
 }
 
 #[derive(Debug, Deserialize)]
-struct SettingsSetAdminForm {
+struct AdminSetAdminForm {
     is_admin: String,
     #[serde(rename = "_csrf")]
     _csrf: String,
 }
 
-async fn settings_page(
+async fn admin_page(
     State(state): State<AppState>,
     auth: AuthContext,
-    Query(q): Query<SettingsQuery>,
+    Query(q): Query<AdminQuery>,
 ) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
     let notice = q.created.map(|e| format!("Created {e}."));
-    render_settings(&state, &auth, None, notice, StatusCode::OK)
+    render_admin(&state, &auth, None, notice, StatusCode::OK)
 }
 
 fn provider_rows(state: &AppState) -> Vec<ProviderRow> {
@@ -3968,7 +4023,7 @@ fn provider_rows(state: &AppState) -> Vec<ProviderRow> {
     ]
 }
 
-fn render_settings(
+fn render_admin(
     state: &AppState,
     auth: &AuthContext,
     error: Option<String>,
@@ -3989,7 +4044,7 @@ fn render_settings(
             is_self: u.id == auth.user_id,
         })
         .collect();
-    let data = SettingsPageData {
+    let data = AdminPageData {
         users: rows,
         providers: provider_rows(state),
         error,
@@ -3997,9 +4052,9 @@ fn render_settings(
     };
     let mut resp = render(
         state,
-        "settings.html",
+        "admin.html",
         context! {
-            page_title => "Settings",
+            page_title => "Admin",
             user => UserBadge::from(auth),
             data => data,
         },
@@ -4009,18 +4064,15 @@ fn render_settings(
 }
 
 fn settings_error(state: &AppState, auth: &AuthContext, msg: impl Into<String>) -> Response {
-    render_settings(state, auth, Some(msg.into()), None, StatusCode::BAD_REQUEST)
+    render_admin(state, auth, Some(msg.into()), None, StatusCode::BAD_REQUEST)
 }
 
 /// Mirrors `POST /api/users` + `wm users create`.
-async fn settings_create_user(
+async fn admin_create_user(
     State(state): State<AppState>,
     auth: AuthContext,
-    axum::Form(form): axum::Form<SettingsCreateUserForm>,
+    axum::Form(form): axum::Form<AdminCreateUserForm>,
 ) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
     let email = form.email.trim();
     // Same shape check the REST handler applies; the deeper "is this a
     // real mailbox" question is the IdP's, not ours.
@@ -4029,7 +4081,7 @@ async fn settings_create_user(
     }
     match state.auth().create_user(email, form.is_admin.is_some()) {
         Ok(user) => axum::response::Redirect::to(&format!(
-            "/ui/settings?created={}",
+            "/ui/admin?created={}",
             urlencoding::encode(&user.email)
         ))
         .into_response(),
@@ -4043,15 +4095,12 @@ async fn settings_create_user(
 }
 
 /// Mirrors `PATCH /api/users/{email}` + `wm users update --admin|--no-admin`.
-async fn settings_set_admin(
+async fn admin_set_admin(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(email): Path<String>,
-    axum::Form(form): axum::Form<SettingsSetAdminForm>,
+    axum::Form(form): axum::Form<AdminSetAdminForm>,
 ) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
     let target = match state.auth().get_user_by_email(&email) {
         Ok(Some(u)) => u,
         Ok(None) => return settings_error(&state, &auth, format!("No user with email {email}.")),
@@ -4074,20 +4123,17 @@ async fn settings_set_admin(
     if let Err(e) = state.auth().set_user_admin(&target.id, want_admin) {
         return ui_error_500(&state, &auth, format!("update user: {e}"));
     }
-    axum::response::Redirect::to("/ui/settings").into_response()
+    axum::response::Redirect::to("/ui/admin").into_response()
 }
 
 /// Mirrors `DELETE /api/users/{email}` + `wm users delete`, including
 /// all three of that handler's refusals.
-async fn settings_delete_user(
+async fn admin_delete_user(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(email): Path<String>,
     axum::Form(_form): axum::Form<CsrfOnlyForm>,
 ) -> Response {
-    if !auth.is_admin {
-        return forbidden_page(&state, &auth);
-    }
     let target = match state.auth().get_user_by_email(&email) {
         Ok(Some(u)) => u,
         Ok(None) => return settings_error(&state, &auth, format!("No user with email {email}.")),
@@ -4131,7 +4177,7 @@ async fn settings_delete_user(
     if let Err(e) = state.auth().delete_user(&target.id) {
         return ui_error_500(&state, &auth, format!("delete user: {e}"));
     }
-    axum::response::Redirect::to("/ui/settings").into_response()
+    axum::response::Redirect::to("/ui/admin").into_response()
 }
 
 fn forbidden_page(state: &AppState, auth: &AuthContext) -> Response {

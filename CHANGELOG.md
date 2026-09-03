@@ -9,6 +9,38 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The web UI now has two clearly separated areas: your account and host
+  administration.** Following the sign-out-everywhere bug below, the UI was
+  reorganised around the distinction that bug turned on — credentials you hold
+  versus the host you administer.
+
+  - **`/ui/me/tokens` → `/ui/me`, "Your account".** One screen for all three
+    credentials a user holds: API tokens, authorised MCP applications, and
+    browser sessions. The POST action routes keep their `/ui/me/tokens/...`
+    paths; only the page moved.
+  - **`/ui/settings` → `/ui/admin`, "Admin".** "Settings" named a topic where
+    the screen enforces a privilege, and the vagueness was load-bearing — it is
+    why a user looking for account settings lands on a user-administration
+    table. Users and identity providers are all that remain there.
+  - **The admin gate is now structural** (ADR-0039). Every route under
+    `/ui/admin` sits behind one `require_admin` router layer instead of four
+    per-handler `is_admin` checks, so the path prefix and the privilege cannot
+    disagree. A sweep test asserts every admin route refuses a non-admin;
+    axum exposes no route table, so that list is hand-maintained and is a
+    backstop rather than a proof.
+  - **The header user area is one identity chip** linking to your account:
+    initials, email, and the `admin` role when you have it. The email stays
+    visible (on a multi-user host, "which account am I on?" is a real
+    question), initials are derived locally rather than fetched from gravatar,
+    and admin is spelled out rather than signalled by colour alone.
+  - Home's quick actions gained Unmatched, your account, and — for admins —
+    Admin. The nav bar wraps instead of overflowing on narrow viewports.
+
+  Old URLs are not redirected. Pre-1.0, and the moved paths are a page and its
+  form targets, not an API.
+
 ### Fixed
 
 - **Non-admins could not sign out everywhere from the browser.** "Sign out

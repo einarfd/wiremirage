@@ -1,7 +1,7 @@
-//! Tier-2 smoke tests for the slice-25 tokens page + CSRF middleware.
+//! Tier-2 smoke tests for the account screen (`/ui/me`) + CSRF middleware.
 //!
 //! Coverage:
-//!   * Tokens page renders the user's own tokens
+//!   * The account page renders the user's own tokens
 //!   * Create-token form mints a fresh token and shows the plaintext
 //!     exactly once
 //!   * Revoke removes the token and redirects back
@@ -145,10 +145,10 @@ async fn post(
         .unwrap()
 }
 
-/// Read the tokens page and hand back (body, csrf form value).
-async fn tokens_page(h: &Harness, client: &Client, cookie: &str) -> (String, String) {
+/// Read the account page and hand back (body, csrf form value).
+async fn account_screen(h: &Harness, client: &Client, cookie: &str) -> (String, String) {
     let body = client
-        .get(url(h, "/ui/me/tokens"))
+        .get(url(h, "/ui/me"))
         .header("cookie", cookie)
         .send()
         .await
@@ -161,13 +161,13 @@ async fn tokens_page(h: &Harness, client: &Client, cookie: &str) -> (String, Str
 }
 
 #[tokio::test]
-async fn tokens_page_renders_empty_state_for_new_user() {
+async fn account_page_renders_empty_state_for_new_user() {
     let h = start().await;
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
 
     let body = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -190,7 +190,7 @@ async fn create_token_shows_plaintext_once_and_lists_it() {
     let cookie = login_cookie(&h, &client, "admin").await;
     // Read the page-level csrf cookie + form value from the tokens page.
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -215,7 +215,7 @@ async fn create_token_shows_plaintext_once_and_lists_it() {
 
     // A subsequent GET no longer shows the plaintext.
     let later = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -236,7 +236,7 @@ async fn revoke_redirects_and_drops_token_from_list() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -266,7 +266,7 @@ async fn revoke_redirects_and_drops_token_from_list() {
     );
 
     let later = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -283,7 +283,7 @@ async fn create_token_empty_name_shows_inline_error() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -366,7 +366,7 @@ async fn alice_does_not_see_admins_tokens() {
     // Admin creates a token.
     let admin_cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &admin_cookie)
         .send()
         .await
@@ -386,7 +386,7 @@ async fn alice_does_not_see_admins_tokens() {
     let alice_client = no_redirect_client();
     let alice_cookie = login_cookie(&h, &alice_client, "alice").await;
     let body = alice_client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &alice_cookie)
         .send()
         .await
@@ -404,7 +404,7 @@ async fn ttl_preset_30d_sets_a_30_day_expiry() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -440,7 +440,7 @@ async fn ttl_preset_never_creates_token_without_expiry() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -476,7 +476,7 @@ async fn ttl_preset_custom_falls_through_to_hours_field() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -516,7 +516,7 @@ async fn token_list_sorts_by_name_when_requested() {
     // Create three tokens with names that sort differently from creation order.
     for n in ["gamma", "alpha", "beta"] {
         let page = client
-            .get(url(&h, "/ui/me/tokens"))
+            .get(url(&h, "/ui/me"))
             .header("cookie", &cookie)
             .send()
             .await
@@ -533,7 +533,7 @@ async fn token_list_sorts_by_name_when_requested() {
     }
     // Default sort = created desc → beta, alpha, gamma (newest first).
     let default_body = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -545,7 +545,7 @@ async fn token_list_sorts_by_name_when_requested() {
     assert_eq!(default_order, vec!["beta", "alpha", "gamma"]);
     // sort=name asc → alpha, beta, gamma.
     let by_name = client
-        .get(url(&h, "/ui/me/tokens?sort=name&dir=asc"))
+        .get(url(&h, "/ui/me?sort=name&dir=asc"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -568,7 +568,7 @@ async fn rename_redirects_and_swaps_token_name() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -597,7 +597,7 @@ async fn rename_redirects_and_swaps_token_name() {
         resp.status()
     );
     let later = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -615,7 +615,7 @@ async fn rename_collision_shows_inline_error_and_keeps_old_name() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -644,7 +644,7 @@ async fn rename_collision_shows_inline_error_and_keeps_old_name() {
     assert!(body.contains("already exists"), "collision error: {body}");
     // Both tokens still present under their original names.
     let later = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -662,7 +662,7 @@ async fn rename_empty_new_name_shows_inline_error() {
     let client = no_redirect_client();
     let cookie = login_cookie(&h, &client, "admin").await;
     let page = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", &cookie)
         .send()
         .await
@@ -719,7 +719,7 @@ async fn sessions_card_is_reachable_by_non_admins() {
 
     for user in ["admin", "alice"] {
         let cookie = login_cookie(&h, &client, user).await;
-        let (body, _) = tokens_page(&h, &client, &cookie).await;
+        let (body, _) = account_screen(&h, &client, &cookie).await;
         assert!(
             body.contains("/ui/me/sessions/revoke-all"),
             "{user} can see the sign-out-everywhere form"
@@ -732,7 +732,7 @@ async fn sign_out_everywhere_kills_every_session_including_the_caller() {
     let h = start().await;
     let client = no_redirect_client();
     let admin = login_cookie(&h, &client, "admin").await;
-    let (_, csrf) = tokens_page(&h, &client, &admin).await;
+    let (_, csrf) = account_screen(&h, &client, &admin).await;
 
     // A second, independent session for the same user.
     let other_client = no_redirect_client();
@@ -779,7 +779,7 @@ async fn a_non_admin_can_sign_out_everywhere() {
     let h = start().await;
     let client = no_redirect_client();
     let alice = login_cookie(&h, &client, "alice").await;
-    let (_, csrf) = tokens_page(&h, &client, &alice).await;
+    let (_, csrf) = account_screen(&h, &client, &alice).await;
 
     let resp = post(
         &h,
@@ -813,7 +813,7 @@ async fn sign_out_everywhere_leaves_api_tokens_alone() {
         .unwrap();
     let (_token, plaintext) = h.auth.create_token(&user.id, "ci", None).expect("token");
 
-    let (_, csrf) = tokens_page(&h, &client, &admin).await;
+    let (_, csrf) = account_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
@@ -885,4 +885,31 @@ async fn a_users_revoke_does_not_touch_another_users_sessions() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200, "the epoch is per-user");
+}
+
+#[tokio::test]
+async fn initials_come_from_the_email_and_never_render_empty() {
+    // Two-word local parts take one letter from each; single words take
+    // the first two. Both users on this harness exercise the second
+    // form, so assert on the rendered chip rather than a unit call.
+    let h = start().await;
+    let client = no_redirect_client();
+    for (user, initials) in [("admin", ">AD<"), ("alice", ">AL<")] {
+        let cookie = login_cookie(&h, &client, user).await;
+        let (body, _) = account_screen(&h, &client, &cookie).await;
+        assert!(body.contains(initials), "{user} chip shows {initials}");
+    }
+}
+
+#[tokio::test]
+async fn account_page_is_the_only_credentials_screen() {
+    // All three credentials on one screen — the rule ADR-0039 draws out
+    // of the sign-out-everywhere incident.
+    let h = start().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "alice").await;
+    let (body, _) = account_screen(&h, &client, &cookie).await;
+    for section in ["Create a new API token", "MCP applications", "Sessions"] {
+        assert!(body.contains(section), "account screen has {section:?}");
+    }
 }

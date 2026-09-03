@@ -1,11 +1,14 @@
-//! Tier-2 tests for the Settings page — admin user management.
+//! Tier-2 tests for the Admin screen (`/ui/admin`) — host user
+//! management, gated by the `require_admin` router layer per ADR-0039.
 //!
 //! Coverage:
-//!   * Settings renders every user, not just admins; non-admins get 403
+//!   * Admin renders every user, not just admins; non-admins get 403
 //!   * Create / promote / demote / delete mirror the `wm users` verbs
 //!   * The three host guards surface as inline 400s, not generic errors:
 //!     last-admin demote, last-admin delete, self-delete, owns-routes
-//!   * The nav exposes Settings to admins only
+//!   * The nav exposes Admin to admins only
+//!   * Every route under `/ui/admin` refuses a non-admin — the sweep
+//!     that stands in for the route enumeration axum will not give us
 //!
 //! Sessions ("sign out everywhere") are self-service and live on the
 //! tokens page — see `ui_tokens.rs`.
@@ -120,9 +123,9 @@ async fn login_cookie(h: &Harness, client: &Client, user: &str) -> String {
 }
 
 /// GET the settings page and return (body, csrf form value).
-async fn settings(h: &Harness, client: &Client, cookie: &str) -> (String, String) {
+async fn admin_screen(h: &Harness, client: &Client, cookie: &str) -> (String, String) {
     let body = client
-        .get(url(h, "/ui/settings"))
+        .get(url(h, "/ui/admin"))
         .header("cookie", cookie)
         .send()
         .await
@@ -152,12 +155,12 @@ async fn post(
 }
 
 #[tokio::test]
-async fn settings_lists_every_user_and_is_admin_only() {
+async fn admin_lists_every_user_and_is_admin_only() {
     let h = start().await;
     let client = no_redirect_client();
 
     let admin = login_cookie(&h, &client, "admin").await;
-    let (body, _) = settings(&h, &client, &admin).await;
+    let (body, _) = admin_screen(&h, &client, &admin).await;
     // Every user, not only admins — matches `wm users list`.
     assert!(body.contains("admin@test.example"), "admin row: {body}");
     assert!(body.contains("alice@test.example"), "non-admin row listed");
@@ -171,7 +174,7 @@ async fn settings_lists_every_user_and_is_admin_only() {
     // Non-admins are refused outright.
     let alice = login_cookie(&h, &client, "alice").await;
     let resp = client
-        .get(url(&h, "/ui/settings"))
+        .get(url(&h, "/ui/admin"))
         .header("cookie", &alice)
         .send()
         .await
@@ -180,7 +183,7 @@ async fn settings_lists_every_user_and_is_admin_only() {
 }
 
 #[tokio::test]
-async fn nav_shows_settings_to_admins_only() {
+async fn nav_shows_admin_to_admins_only() {
     let h = start().await;
     let client = no_redirect_client();
 
@@ -194,7 +197,7 @@ async fn nav_shows_settings_to_admins_only() {
         .text()
         .await
         .unwrap();
-    assert!(body.contains("/ui/settings"), "admin sees the nav entry");
+    assert!(body.contains("/ui/admin"), "admin sees the nav entry");
 
     let alice = login_cookie(&h, &client, "alice").await;
     let body = client
@@ -207,7 +210,7 @@ async fn nav_shows_settings_to_admins_only() {
         .await
         .unwrap();
     assert!(
-        !body.contains("/ui/settings"),
+        !body.contains("/ui/admin"),
         "non-admin sees no nav entry: {body}"
     );
 }
@@ -217,19 +220,19 @@ async fn create_promote_demote_delete_round_trip() {
     let h = start().await;
     let client = no_redirect_client();
     let admin = login_cookie(&h, &client, "admin").await;
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
 
     // Create.
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings",
+        "/ui/admin",
         format!("_csrf={csrf}&email=bob%40test.example"),
     )
     .await;
     assert_eq!(resp.status().as_u16(), 303, "create redirects");
-    let (body, csrf) = settings(&h, &client, &admin).await;
+    let (body, csrf) = admin_screen(&h, &client, &admin).await;
     assert!(body.contains("bob@test.example"), "bob listed");
     assert!(
         !h.auth
@@ -245,7 +248,7 @@ async fn create_promote_demote_delete_round_trip() {
         &h,
         &client,
         &admin,
-        "/ui/settings/users/bob@test.example/admin",
+        "/ui/admin/users/bob@test.example/admin",
         format!("_csrf={csrf}&is_admin=true"),
     )
     .await;
@@ -260,12 +263,12 @@ async fn create_promote_demote_delete_round_trip() {
     );
 
     // Demote (safe now — there are two admins).
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings/users/bob@test.example/admin",
+        "/ui/admin/users/bob@test.example/admin",
         format!("_csrf={csrf}&is_admin=false"),
     )
     .await;
@@ -280,12 +283,12 @@ async fn create_promote_demote_delete_round_trip() {
     );
 
     // Delete.
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings/users/bob@test.example/delete",
+        "/ui/admin/users/bob@test.example/delete",
         format!("_csrf={csrf}"),
     )
     .await;
@@ -304,13 +307,13 @@ async fn create_user_with_admin_checkbox_sets_the_flag() {
     let h = start().await;
     let client = no_redirect_client();
     let admin = login_cookie(&h, &client, "admin").await;
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
 
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings",
+        "/ui/admin",
         format!("_csrf={csrf}&email=root%40test.example&is_admin=on"),
     )
     .await;
@@ -331,12 +334,12 @@ async fn guards_render_inline_errors() {
     let admin = login_cookie(&h, &client, "admin").await;
 
     // Last admin cannot be demoted.
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings/users/admin@test.example/admin",
+        "/ui/admin/users/admin@test.example/admin",
         format!("_csrf={csrf}&is_admin=false"),
     )
     .await;
@@ -345,12 +348,12 @@ async fn guards_render_inline_errors() {
     assert!(body.contains("last admin"), "names the guard: {body}");
 
     // An admin cannot delete themselves.
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings/users/admin@test.example/delete",
+        "/ui/admin/users/admin@test.example/delete",
         format!("_csrf={csrf}"),
     )
     .await;
@@ -363,12 +366,12 @@ async fn guards_render_inline_errors() {
     );
 
     // Unknown email.
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings/users/nobody@test.example/delete",
+        "/ui/admin/users/nobody@test.example/delete",
         format!("_csrf={csrf}"),
     )
     .await;
@@ -376,12 +379,12 @@ async fn guards_render_inline_errors() {
     assert!(resp.text().await.unwrap().contains("No user with email"));
 
     // Duplicate email on create.
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings",
+        "/ui/admin",
         format!("_csrf={csrf}&email=alice%40test.example"),
     )
     .await;
@@ -389,12 +392,12 @@ async fn guards_render_inline_errors() {
     assert!(resp.text().await.unwrap().contains("already exists"));
 
     // Malformed email on create.
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings",
+        "/ui/admin",
         format!("_csrf={csrf}&email=notanemail"),
     )
     .await;
@@ -403,7 +406,7 @@ async fn guards_render_inline_errors() {
 }
 
 #[tokio::test]
-async fn settings_post_without_csrf_is_rejected() {
+async fn admin_post_without_csrf_is_rejected() {
     let h = start().await;
     let client = no_redirect_client();
     let admin = login_cookie(&h, &client, "admin").await;
@@ -412,7 +415,7 @@ async fn settings_post_without_csrf_is_rejected() {
         &h,
         &client,
         &admin,
-        "/ui/settings",
+        "/ui/admin",
         "email=nocsrf%40test.example".to_string(),
     )
     .await;
@@ -451,12 +454,12 @@ async fn cannot_delete_a_user_who_still_owns_routes() {
         })
         .expect("route");
 
-    let (_, csrf) = settings(&h, &client, &admin).await;
+    let (_, csrf) = admin_screen(&h, &client, &admin).await;
     let resp = post(
         &h,
         &client,
         &admin,
-        "/ui/settings/users/alice@test.example/delete",
+        "/ui/admin/users/alice@test.example/delete",
         format!("_csrf={csrf}"),
     )
     .await;
@@ -473,4 +476,65 @@ async fn cannot_delete_a_user_who_still_owns_routes() {
             .is_some(),
         "user survived the refused delete"
     );
+}
+
+/// Every route mounted under `/ui/admin` refuses a non-admin.
+///
+/// ADR-0039 makes the gate structural — `admin_router()` applies one
+/// `require_admin` layer over the whole subtree, so a route registered
+/// there is gated by construction. This test is the backstop, not the
+/// guarantee: axum exposes no route table, so the list below is
+/// hand-maintained and goes stale silently if someone adds an admin
+/// route and forgets this line. It is here because it would have caught
+/// the incident that prompted the ADR — a route under `/ui/settings/*`
+/// that answered a non-admin — on the day it landed.
+#[tokio::test]
+async fn every_admin_route_refuses_a_non_admin() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let alice = login_cookie(&h, &client, "alice").await;
+    let admin = login_cookie(&h, &client, "admin").await;
+    // A valid csrf pair from a page alice can actually read, so the
+    // POSTs below fail on the admin gate rather than on CSRF.
+    let page = client
+        .get(url(&h, "/ui/me"))
+        .header("cookie", &alice)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&page).expect("csrf");
+
+    let gets = ["/ui/admin"];
+    let posts = [
+        "/ui/admin",
+        "/ui/admin/users/admin@test.example/admin",
+        "/ui/admin/users/admin@test.example/delete",
+    ];
+
+    for path in gets {
+        let resp = client
+            .get(url(&h, path))
+            .header("cookie", &alice)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 403, "GET {path} as non-admin");
+    }
+    for path in posts {
+        let resp = post(&h, &client, &alice, path, format!("_csrf={csrf}")).await;
+        assert_eq!(resp.status().as_u16(), 403, "POST {path} as non-admin");
+    }
+
+    // The same paths are reachable for an admin, so the assertions above
+    // are about the gate and not about a typo in the path list.
+    let resp = client
+        .get(url(&h, "/ui/admin"))
+        .header("cookie", &admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "admin reads the screen");
 }

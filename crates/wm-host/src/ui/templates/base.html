@@ -18,15 +18,18 @@
       <a href="/ui/routes">Routes</a>
       <a href="/ui/journal/live">Live</a>
       <a href="/ui/unmatched">Unmatched</a>
-      <a href="/ui/me/tokens">Tokens</a>
       {%- if user and user.is_admin %}
-      <a href="/ui/settings">Settings</a>
+      <a href="/ui/admin">Admin</a>
       {%- endif %}
     </nav>
     {% if user %}
     <div class="app-user">
-      <span class="app-user__name">{{ user.email }}</span>
-      {%- if user.is_admin %}<span class="badge badge--admin">admin</span>{% endif %}
+      <a class="identity{% if user.is_admin %} identity--admin{% endif %}" href="/ui/me"
+         title="Your account — API tokens, MCP applications, sessions">
+        <span class="identity__initials" aria-hidden="true">{{ user.initials }}</span>
+        <span class="identity__email">{{ user.email }}</span>
+        {%- if user.is_admin %}<span class="identity__role">admin</span>{% endif %}
+      </a>
       <form method="post" action="/auth/logout" class="logout-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button type="submit" class="link-button">Log out</button>

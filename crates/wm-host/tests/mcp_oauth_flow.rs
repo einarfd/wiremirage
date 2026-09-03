@@ -521,7 +521,7 @@ async fn tokens_page_lists_active_mcp_grant_after_authorization() {
     // mint a fresh one for the tokens-page GET.
     let session = login_as_alice(&h, &client).await;
     let resp = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", format!("wm_session={session}"))
         .send()
         .await
@@ -552,7 +552,7 @@ async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
     // Get a session + the csrf cookie/form value for the revoke POST.
     let session = login_as_alice(&h, &client).await;
     let get = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", format!("wm_session={session}"))
         .send()
         .await
@@ -580,7 +580,7 @@ async fn revoke_oauth_grant_from_ui_marks_refresh_token_revoked() {
 
     // The grant row is gone.
     let after = client
-        .get(url(&h, "/ui/me/tokens"))
+        .get(url(&h, "/ui/me"))
         .header("cookie", format!("wm_session={session}"))
         .send()
         .await
