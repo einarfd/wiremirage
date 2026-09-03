@@ -41,6 +41,20 @@ they make the design better, and are called out here.
   Old URLs are not redirected. Pre-1.0, and the moved paths are a page and its
   form targets, not an API.
 
+### Added
+
+- **The web UI reports the running host version**, in a footer on every
+  authenticated screen. This closes a cross-surface gap rather than adding a
+  feature: the version was already on `GET /health`, on `wm version`, and in
+  `summarize_workspace`'s `host` block, and the UI was the only surface that
+  could not answer "which build am I looking at?". It is not admin-gated —
+  `/health` serves it unauthenticated, so gating it would claim a privilege
+  the data doesn't have.
+
+  Note the limit: between releases every build off `main` reports the version
+  of the last bump, so two images can both say `0.1.2`. Identifying an exact
+  build still means checking the image digest.
+
 ### Fixed
 
 - **Non-admins could not sign out everywhere from the browser.** "Sign out

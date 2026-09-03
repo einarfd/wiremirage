@@ -225,6 +225,20 @@ p { margin: 0 0 var(--space-3); }
   padding: var(--space-6) var(--space-5);
 }
 
+/* Which build am I looking at? The version is on /health, `wm version`
+   and summarize_workspace; the UI was the only surface without it. */
+.app-footer {
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-10);
+}
+.app-footer__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-5);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
 /* -- Common pieces ------------------------------------------------ */
 
 .page-header {

@@ -444,3 +444,42 @@ async fn connect_page_shows_mcp_endpoint_and_configs() {
     );
     assert!(body.contains("mcpServers"), "shows the config-file JSON");
 }
+
+#[tokio::test]
+async fn every_page_footer_reports_the_running_version() {
+    // The version is on /health, `wm version` and summarize_workspace;
+    // the UI was the only surface without it. It is deliberately not
+    // admin-gated — /health serves it unauthenticated, so gating it in
+    // the UI would claim a privilege the data doesn't have.
+    let h = start_with_users("admin@test.example:devpassword:admin").await;
+    let client = no_redirect_client();
+    let cookie = login_and_get_cookie(&h, &client).await;
+    let version = env!("CARGO_PKG_VERSION");
+
+    for path in ["/ui/", "/ui/connect", "/ui/me", "/ui/groups"] {
+        let body = client
+            .get(url(&h, path))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            body.contains(&format!("<code>{version}</code>")),
+            "{path} footer reports the version"
+        );
+    }
+
+    // It matches what /health reports, so the two can't drift.
+    let health: serde_json::Value = client
+        .get(url(&h, "/health"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["version"], version, "UI and /health agree");
+}
