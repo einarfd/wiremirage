@@ -4,8 +4,8 @@ description: An agent-native mock HTTP server. Handlers are TypeScript, executed
 type: application
 # Chart version tracks the chart; appVersion tracks the host image. Bump
 # the chart version for template changes even when the app is unchanged.
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.1.2
+appVersion: "0.1.2"
 home: https://github.com/einarfd/wiremirage
 sources:
   - https://github.com/einarfd/wiremirage

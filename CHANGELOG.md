@@ -9,6 +9,8 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-09-03
+
 ### Fixed
 
 - **`language: "javascript"` handlers ran the source the docs document.**
@@ -234,6 +236,7 @@ First public release.
 - Configuration fails fast at startup with a message naming what to set,
   rather than falling back silently.
 
-[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/einarfd/wiremirage/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/einarfd/wiremirage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/einarfd/wiremirage/releases/tag/v0.1.0
