@@ -9,6 +9,8 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-09-03
+
 ### Changed
 
 - **The web UI now has two clearly separated areas: your account and host
@@ -326,7 +328,8 @@ First public release.
 - Configuration fails fast at startup with a message naming what to set,
   rather than falling back silently.
 
-[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/einarfd/wiremirage/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/einarfd/wiremirage/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/einarfd/wiremirage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/einarfd/wiremirage/releases/tag/v0.1.0
