@@ -144,4 +144,21 @@
   </table>
   {% endif %}
 </section>
+
+<section class="card">
+  <header class="card__header">
+    <h2>Sessions</h2>
+  </header>
+  <p class="text-muted">
+    Browser sign-ins, the third credential alongside the two above. Signing out
+    everywhere ends every session this account holds, on every device, including
+    this browser. API tokens and MCP grants are unaffected — revoke those from
+    their own sections.
+  </p>
+  <form method="post" action="/ui/me/sessions/revoke-all"
+        onsubmit="return confirm('Sign out everywhere? You will be logged out of this browser too.');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button type="submit" class="btn btn--ghost">Sign out everywhere</button>
+  </form>
+</section>
 {% endblock %}

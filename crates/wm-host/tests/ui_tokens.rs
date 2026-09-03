@@ -9,6 +9,9 @@
 //!   * POST without `_csrf` is 403
 //!   * POST with a mismatched `_csrf` is 403
 //!   * Each user only sees their own tokens
+//!   * Sessions: the sign-out-everywhere form is reachable by every
+//!     user (not just admins), kills every session for the caller and
+//!     nobody else, and leaves API tokens alone
 //!
 //! The CSRF middleware itself is exercised through every test that
 //! does a successful POST — they wouldn't 303 without the cookie+form
@@ -30,6 +33,7 @@ const SECRET: &[u8; 32] = b"thirty-two-byte-development-key!";
 
 struct Harness {
     addr: String,
+    auth: Auth,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -60,7 +64,7 @@ async fn start() -> Harness {
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage.clone());
-    let state = AppState::new(runtime, routes, auth, journal)
+    let state = AppState::new(runtime, routes, auth.clone(), journal)
         .with_local_auth(
             LocalAuth::parse("admin@test.example:devpassword:admin,alice@test.example:devpassword")
                 .expect("auth"),
@@ -72,7 +76,7 @@ async fn start() -> Harness {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    Harness { addr, server }
+    Harness { addr, auth, server }
 }
 
 /// Mint a wm_csrf cookie + read its embedded form value off the login
@@ -121,6 +125,39 @@ fn extract_csrf_value(body: &str) -> Option<String> {
     let start = body.find(needle)? + needle.len();
     let end = body[start..].find('"')?;
     Some(body[start..start + end].to_string())
+}
+
+/// POST a form-encoded body with the session + csrf cookie pair.
+async fn post(
+    h: &Harness,
+    client: &Client,
+    cookie: &str,
+    path: &str,
+    body: String,
+) -> reqwest::Response {
+    client
+        .post(url(h, path))
+        .header("cookie", cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Read the tokens page and hand back (body, csrf form value).
+async fn tokens_page(h: &Harness, client: &Client, cookie: &str) -> (String, String) {
+    let body = client
+        .get(url(h, "/ui/me/tokens"))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = extract_csrf_value(&body).expect("csrf form value");
+    (body, csrf)
 }
 
 #[tokio::test]
@@ -663,4 +700,189 @@ fn order_of_names(body: &str, needles: &[&str]) -> Vec<String> {
         .collect();
     found.sort_by_key(|(i, _)| *i);
     found.into_iter().map(|(_, n)| n.to_string()).collect()
+}
+
+// -- Sessions -----------------------------------------------------------------
+//
+// Browser sessions are the third credential on this page, alongside API
+// tokens and MCP grants. "Sign out everywhere" bumps the caller's session
+// epoch, so it can only ever affect the caller — which is why it lives
+// here under `/ui/me/*` rather than in the admin-gated settings subtree.
+
+#[tokio::test]
+async fn sessions_card_is_reachable_by_non_admins() {
+    // The regression that motivated the move: the action was always
+    // self-service, but its only affordance sat on an admin-only page,
+    // so a non-admin had no way to reach it from a browser.
+    let h = start().await;
+    let client = no_redirect_client();
+
+    for user in ["admin", "alice"] {
+        let cookie = login_cookie(&h, &client, user).await;
+        let (body, _) = tokens_page(&h, &client, &cookie).await;
+        assert!(
+            body.contains("/ui/me/sessions/revoke-all"),
+            "{user} can see the sign-out-everywhere form"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sign_out_everywhere_kills_every_session_including_the_caller() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let admin = login_cookie(&h, &client, "admin").await;
+    let (_, csrf) = tokens_page(&h, &client, &admin).await;
+
+    // A second, independent session for the same user.
+    let other_client = no_redirect_client();
+    let other = login_cookie(&h, &other_client, "admin").await;
+
+    let resp = post(
+        &h,
+        &client,
+        &admin,
+        "/ui/me/sessions/revoke-all",
+        format!("_csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 303);
+    assert!(
+        pick_set_cookie(&resp, "wm_session").is_some_and(|c| c.is_empty()),
+        "clears the session cookie"
+    );
+
+    // Both sessions are dead — the epoch moved, not one record.
+    for (label, c) in [("calling", &admin), ("other", &other)] {
+        let resp = client
+            .get(url(&h, "/api/users/me"))
+            .header("cookie", c)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 401, "{label} session revoked");
+    }
+
+    // A fresh login works again, stamped with the new epoch.
+    let fresh = login_cookie(&h, &client, "admin").await;
+    let resp = client
+        .get(url(&h, "/api/users/me"))
+        .header("cookie", &fresh)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "re-login works");
+}
+
+#[tokio::test]
+async fn a_non_admin_can_sign_out_everywhere() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let alice = login_cookie(&h, &client, "alice").await;
+    let (_, csrf) = tokens_page(&h, &client, &alice).await;
+
+    let resp = post(
+        &h,
+        &client,
+        &alice,
+        "/ui/me/sessions/revoke-all",
+        format!("_csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 303);
+
+    let resp = client
+        .get(url(&h, "/api/users/me"))
+        .header("cookie", &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401, "own session revoked");
+}
+
+#[tokio::test]
+async fn sign_out_everywhere_leaves_api_tokens_alone() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let admin = login_cookie(&h, &client, "admin").await;
+
+    let user = h
+        .auth
+        .get_user_by_email("admin@test.example")
+        .unwrap()
+        .unwrap();
+    let (_token, plaintext) = h.auth.create_token(&user.id, "ci", None).expect("token");
+
+    let (_, csrf) = tokens_page(&h, &client, &admin).await;
+    let resp = post(
+        &h,
+        &client,
+        &admin,
+        "/ui/me/sessions/revoke-all",
+        format!("_csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 303);
+
+    // Sessions are a different credential from tokens.
+    let resp = client
+        .get(url(&h, "/api/users/me"))
+        .bearer_auth(&plaintext)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "token still authenticates");
+}
+
+#[tokio::test]
+async fn rest_revoke_all_endpoint_returns_204_and_kills_sessions() {
+    // The UI button and `POST /api/users/me/sessions/revoke-all` are two
+    // entry points to the same epoch bump; this covers the REST one.
+    let h = start().await;
+    let client = no_redirect_client();
+    let admin = login_cookie(&h, &client, "admin").await;
+
+    let resp = client
+        .post(url(&h, "/api/users/me/sessions/revoke-all"))
+        .header("cookie", &admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204, "no body, nothing enumerated");
+    assert!(
+        resp.text().await.unwrap().is_empty(),
+        "deliberately reports no count"
+    );
+
+    let resp = client
+        .get(url(&h, "/api/users/me"))
+        .header("cookie", &admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401, "session revoked");
+}
+
+#[tokio::test]
+async fn a_users_revoke_does_not_touch_another_users_sessions() {
+    let h = start().await;
+    let client = no_redirect_client();
+    let admin = login_cookie(&h, &client, "admin").await;
+    let alice = login_cookie(&h, &client, "alice").await;
+
+    let resp = client
+        .post(url(&h, "/api/users/me/sessions/revoke-all"))
+        .header("cookie", &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204);
+
+    let resp = client
+        .get(url(&h, "/api/users/me"))
+        .header("cookie", &admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "the epoch is per-user");
 }

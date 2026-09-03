@@ -9,6 +9,32 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Non-admins could not sign out everywhere from the browser.** "Sign out
+  everywhere" is self-service — it bumps the caller's own session epoch and can
+  only ever affect the caller, which is why the handler has never been
+  admin-gated. But its only affordance was a button on `/ui/settings`, which
+  403s for non-admins, so a non-admin who wanted to end their sessions had no
+  UI path to the action at all. They would have needed to hand-roll the REST
+  call with an API token — no help if the credential they are worried about is
+  a stolen browser session.
+
+  The action moves to the namespace that matches its blast radius:
+  `POST /ui/settings/sessions/revoke-all` → `POST /ui/me/sessions/revoke-all`,
+  rendered as a "Sessions" card on the tokens page, which is nav-linked for
+  every user and already the home of the other two credentials (API tokens and
+  MCP grants). Removed from the Settings page, which is now purely host
+  administration. Behaviour is unchanged; only the location and the URL move.
+
+  The old URL is gone rather than redirected — pre-1.0, and a browser form
+  target is not a surface anyone has bookmarked.
+
+  Also fixes a latent trap: a self-service route sat inside `/ui/settings/*`,
+  whose every other member is admin-only. Anyone adding a blanket admin layer
+  to that subtree — the obvious tidy-up — would have silently deleted a
+  security control that users rely on.
+
 ## [0.1.2] — 2026-09-03
 
 ### Fixed

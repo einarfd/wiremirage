@@ -109,20 +109,4 @@
     </tbody>
   </table>
 </section>
-
-<section class="card">
-  <header class="card__header">
-    <h2>Session</h2>
-  </header>
-  <p class="text-muted">
-    Sign out of every device this account is signed in on, including this one.
-    API tokens are unaffected — revoke those from
-    <a href="/ui/me/tokens">Tokens</a>.
-  </p>
-  <form method="post" action="/ui/settings/sessions/revoke-all"
-        onsubmit="return confirm('Sign out everywhere? You will be logged out of this browser too.');">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <button type="submit" class="btn btn--ghost">Sign out everywhere</button>
-  </form>
-</section>
 {% endblock %}

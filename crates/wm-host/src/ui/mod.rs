@@ -184,6 +184,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(revoke_oauth_grant_form),
         )
         .route(
+            "/ui/me/sessions/revoke-all",
+            axum::routing::post(revoke_all_sessions_form),
+        )
+        .route(
             "/ui/settings",
             get(settings_page).post(settings_create_user),
         )
@@ -194,10 +198,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/ui/settings/users/{email}/delete",
             axum::routing::post(settings_delete_user),
-        )
-        .route(
-            "/ui/settings/sessions/revoke-all",
-            axum::routing::post(settings_revoke_all_sessions),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -3125,6 +3125,32 @@ fn tokens_page_with_error(state: &AppState, auth: &AuthContext, error: &str) -> 
     resp
 }
 
+/// Sign out everywhere: the third credential on this page, alongside
+/// API tokens and MCP grants. Self-service by nature — it can only
+/// ever affect the caller's own sessions — which is why it lives under
+/// `/ui/me/*` and not in the admin-gated `/ui/settings/*` subtree.
+///
+/// Bumps the caller's session epoch, invalidating every session they
+/// hold including this one, so the response also clears the cookie and
+/// lands on the login page.
+async fn revoke_all_sessions_form(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    axum::Form(_form): axum::Form<CsrfOnlyForm>,
+) -> Response {
+    if let Err(e) = state.auth().bump_session_epoch(&auth.user_id) {
+        return ui_error_500(&state, &auth, format!("revoke sessions: {e}"));
+    }
+    let mut resp: Response =
+        axum::response::Redirect::to("/auth/login?signed_out=1").into_response();
+    let clear = crate::auth_api::format_clear_cookie(state.secure_cookies());
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&clear).expect("ascii cookie header"),
+    );
+    resp
+}
+
 // -- Unmatched pages (slice 28) ---------------------------------------------
 //
 // The unmatched-request log surfaced at /ui/unmatched, plus a
@@ -4106,29 +4132,6 @@ async fn settings_delete_user(
         return ui_error_500(&state, &auth, format!("delete user: {e}"));
     }
     axum::response::Redirect::to("/ui/settings").into_response()
-}
-
-/// Sign out everywhere. Deliberately *not* admin-gated: it can only
-/// ever affect the caller's own sessions, and gating it would be a lie
-/// about its blast radius. Bumps the caller's session epoch, which
-/// invalidates every session they hold — including this one — so the
-/// response also clears the cookie and lands on the login page.
-async fn settings_revoke_all_sessions(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    axum::Form(_form): axum::Form<CsrfOnlyForm>,
-) -> Response {
-    if let Err(e) = state.auth().bump_session_epoch(&auth.user_id) {
-        return ui_error_500(&state, &auth, format!("revoke sessions: {e}"));
-    }
-    let mut resp: Response =
-        axum::response::Redirect::to("/auth/login?signed_out=1").into_response();
-    let clear = crate::auth_api::format_clear_cookie(state.secure_cookies());
-    resp.headers_mut().insert(
-        axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&clear).expect("ascii cookie header"),
-    );
-    resp
 }
 
 fn forbidden_page(state: &AppState, auth: &AuthContext) -> Response {
