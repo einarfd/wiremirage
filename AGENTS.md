@@ -98,7 +98,7 @@ The suite is a pyramid and each tier earns its keep:
 
 ## Where the design lives
 
-- **[docs/adr/](docs/adr/index.md)** — 37 ADRs, in the repo. Read the relevant
+- **[docs/adr/](docs/adr/index.md)** — 39 ADRs, in the repo. Read the relevant
   one before changing anything it covers.
 - The longer design docs (`route-model.md`, `storage-model.md`,
   `script-api-wit.md`, `rest-api.md`, `mcp-surface.md`, `cli-design.md`,
