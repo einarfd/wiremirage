@@ -42,6 +42,26 @@ they make the design better, and are called out here.
   mode. No migration: stored handler source is unchanged, and source that
   worked before still works.
 
+- **`wait_for_request` and `tail_journal` honour the timeout you asked for.**
+  Both rebuilt their timeout on every received event. The journal bus is
+  host-wide and filtering happens after the receive, so *any* event restarted
+  the clock — including events for groups the caller never asked about. A
+  caller asking for 30 seconds could block as long as somebody else's mock
+  stayed busy. `wait_for_request` now computes one deadline for the whole
+  call, and `tail_journal` resets its idle window only on a match. The tool
+  descriptions already promised this, and schemars publishes them verbatim as
+  the `tools/list` schema an agent reads before calling.
+
+- **Long MCP waits survive intermediaries.** `wait_for_request` and
+  `tail_journal` can block for up to 300 seconds and previously sent nothing
+  until they returned. A call that silent is indistinguishable from a hung
+  server to anything applying a read timeout — the client's own first-byte
+  and idle timers, a reverse proxy — so it got cut well short of the
+  requested bound. Both now emit a `notifications/progress` heartbeat
+  immediately and then every 15 seconds while waiting. Only when the caller
+  supplied a `progressToken`: without one, the response stays on the plain
+  JSON fast path exactly as before.
+
 - **`summarize_workspace` reports a real `recent_unmatched_count_5m`.** The
   field shipped hardcoded to `0` with a note that a follow-up would wire it;
   this is that follow-up. Scoped like the group list beside it — an admin
