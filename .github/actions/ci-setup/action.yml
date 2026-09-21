@@ -38,7 +38,7 @@ runs:
       # whatever a third party pushed, with the runner's token, on every
       # CI run. Dependabot can't help with a branch ref either — it only
       # bumps resolvable versions.
-      uses: jlumbroso/free-disk-space@v1.3.1
+      uses: jlumbroso/free-disk-space@v2.0.0
       with:
         tool-cache: true
         android: true
