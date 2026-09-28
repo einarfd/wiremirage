@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@bytecodealliance/componentize-js": "0.22.0"
+    "@bytecodealliance/componentize-js": "0.23.0"
   },
   "devDependencies": {
     "typescript": "7.0.2"
