@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, ClientInfo};
+use rmcp::model::{CallToolRequestParams, ClientConfig};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::json;
@@ -49,8 +49,8 @@ fn tool_refused<E: std::fmt::Debug>(result: &Result<rmcp::model::CallToolResult,
 #[derive(Debug, Clone, Default)]
 struct DummyClient;
 impl ClientHandler for DummyClient {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 }
 

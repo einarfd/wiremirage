@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use rmcp::model::ClientInfo;
+use rmcp::model::ClientConfig;
 use rmcp::{ClientHandler, ServiceExt};
 use wm_host::AppState;
 use wm_host::auth::Auth;
@@ -31,8 +31,8 @@ use wm_host::{Runtime, Storage};
 #[derive(Debug, Clone, Default)]
 struct DummyClient;
 impl ClientHandler for DummyClient {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 }
 
