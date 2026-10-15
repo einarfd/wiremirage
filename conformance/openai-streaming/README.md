@@ -35,6 +35,7 @@ the host.
 | 4 | Request-body parameterization via the SDK's own `extra_body=` (`mock_delay_ms`) |
 | 5 | An OpenAI-shaped error body surfaces as the right typed SDK exception (`RateLimitError`, 429) |
 | 6 | **Tool-call streaming** — argument deltas reassemble into one complete function call; `id`/`type`/`name` ride only the first delta and the last chunk carries `finish_reason == "tool_calls"` (the classic SSE accumulator break) |
+| 6b | The buffered tool-call response carries the same call — validated against the same pydantic models as the chunks |
 | 7 | Error shapes for 400/500 — typed exceptions (`BadRequestError`, `InternalServerError`), driven via `extra_headers={"x-mock-status": ...}` |
 
 ## Files

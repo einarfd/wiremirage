@@ -25,7 +25,7 @@ export function handle(req, _routeStore, _groupStore) {
   // a request flag so both modes stay assertable from one route.
   if (wantTools) {
     if (wantStream) return toolCallStream(body, model, id, created);
-    return toolCallBuffered(model, id, created);
+    return toolCallBuffered(lastUser, model, id, created);
   }
 
   if (!wantStream) {
@@ -120,10 +120,12 @@ function toolCallStream(body, model, id, created) {
   out.close();
 }
 
-function toolCallBuffered(model, id, created) {
+function toolCallBuffered(lastUser, model, id, created) {
   // Buffered tool-call answer: content null, finish_reason "tool_calls".
-  // The `openai` SDK validates this against the same pydantic models as
-  // the streaming chunks, so both halves of the shape get checked.
+  // Same call as the streamed mode (get_weather on the last user message)
+  // so the conformance test can assert both shapes carry identical
+  // payloads. The `openai` SDK validates this against the same pydantic
+  // models as the streaming chunks, so both halves of the shape get checked.
   return jsonResponse(200, {
     id,
     object: "chat.completion",
@@ -139,7 +141,7 @@ function toolCallBuffered(model, id, created) {
           type: "function",
           function: {
             name: "get_weather",
-            arguments: JSON.stringify({ city: "mock" }),
+            arguments: JSON.stringify({ city: lastUser }),
           },
         }],
       },

@@ -14,7 +14,8 @@ What it pins down:
   [5] error mapping — an OpenAI-shaped error body surfaces as the right typed
       SDK exception
   [6] tool-call streaming — argument deltas reassemble into a complete
-      function call (the classic SSE accumulator break)
+      function call (the classic SSE accumulator break); the buffered
+      tool-call shape is checked against the same payload
   [7] error shapes for 400/500 — typed exceptions, not just 429
 """
 
@@ -111,6 +112,22 @@ def main() -> int:
     assert json.loads(acc["arguments"]) == {"city": "Paris"}
     assert acc["id"], "tool_call id missing on first delta"
     assert last.choices[0].finish_reason == "tool_calls"
+
+    # [6b] buffered tool-call shape: the same call, non-streamed
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Paris"}],
+        extra_body={"mock_tool_call": True},
+    )
+    msg = r.choices[0].message
+    print(f"[6b] buffered tool_call: {msg.tool_calls[0].function.name}({msg.tool_calls[0].function.arguments})")
+    assert msg.content is None
+    assert r.choices[0].finish_reason == "tool_calls"
+    assert len(msg.tool_calls) == 1
+    tc = msg.tool_calls[0]
+    assert tc.type == "function" and tc.id
+    assert tc.function.name == "get_weather"
+    assert json.loads(tc.function.arguments) == {"city": "Paris"}
 
     # [7] error shapes: 400 -> BadRequestError, 500 -> InternalServerError
     try:
