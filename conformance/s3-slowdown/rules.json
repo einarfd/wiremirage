@@ -1,4 +1,5 @@
 [
   { "match": { "path_prefix": "/slowbucket/" }, "delay_ms": 800 },
-  { "match": { "path_prefix": "/throttlebucket/" }, "throttle_first": 2 }
+  { "match": { "path_prefix": "/throttlebucket/" }, "throttle_first": 2 },
+  { "match": { "path_prefix": "/missingbucket/" }, "missing": true }
 ]

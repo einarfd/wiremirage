@@ -6,13 +6,32 @@ name: Conformance
 # builds + boots the host and builds/pulls SDK images, so it's heavier than
 # the gating CI.
 #
-# Weekly + manual. The schedule exists because the lanes pin third-party SDKs
+# Weekly + manual + path-filtered PRs. The schedule exists because the lanes pin third-party SDKs
 # and base images: without it, a fidelity regression (ours or an SDK's) sits
 # undiscovered until someone remembers to press the button. Weekly bounds that
-# to seven days without gating anyone's PR. Trigger it by hand when touching
-# dispatch / streaming / the engine.
+# to seven days for everything not covered by the PR paths filter below.
+# Trigger it by hand for anything else.
 on:
   workflow_dispatch:
+  pull_request:
+    # Fidelity-critical paths only: the job builds + boots the host and
+    # builds SDK images, so it must not fire on unrelated churn. A
+    # regression in these paths shows up in the PR loop instead of up
+    # to a week later.
+    paths:
+      # Cargo.lock: a hyper/axum/wasmtime bump can change SSE framing or
+      # flushing without touching any of the source paths below.
+      # build.rs: builds the engine component the host embeds.
+      - "Cargo.lock"
+      - "compiler/js-engine/**"
+      - "crates/wm-host/build.rs"
+      - "crates/wm-host/src/runtime.rs"
+      - "crates/wm-host/src/host_state.rs"
+      - "crates/wm-host/src/server.rs"
+      - "crates/wm-host/src/route_table.rs"
+      - "crates/wm-transpile/**"
+      - "wit/**"
+      - "conformance/**"
   schedule:
     # Mondays, 05:17 UTC. Off the hour so it doesn't pile into the
     # top-of-hour runner crush.

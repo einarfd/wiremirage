@@ -34,11 +34,14 @@ the host.
 | 3 | **Incremental flush** — with 150 ms/token pacing, chunks arrive spread over time, proving ADR-0022 streaming reaches the client live, not buffered |
 | 4 | Request-body parameterization via the SDK's own `extra_body=` (`mock_delay_ms`) |
 | 5 | An OpenAI-shaped error body surfaces as the right typed SDK exception (`RateLimitError`, 429) |
+| 6 | **Tool-call streaming** — argument deltas reassemble into one complete function call; `id`/`type`/`name` ride only the first delta and the last chunk carries `finish_reason == "tool_calls"` (the classic SSE accumulator break) |
+| 6b | The buffered tool-call response carries the same call — validated against the same pydantic models as the chunks |
+| 7 | Error shapes for 400/500 — typed exceptions (`BadRequestError`, `InternalServerError`), driven via `extra_headers={"x-mock-status": ...}` |
 
 ## Files
 
-- `handler.ts` — the mock served at `/v1/chat/completions` (streaming + buffered, honors `mock_delay_ms`)
-- `error-handler.ts` — an OpenAI-shaped 429, served at `/v1-error/chat/completions` (check 5)
+- `handler.ts` — the mock served at `/v1/chat/completions` (streaming + buffered, honors `mock_delay_ms`; `mock_tool_call` switches it to a function-call answer — streamed deltas or buffered)
+- `error-handler.ts` — OpenAI-shaped error envelopes (429/400/500), served at `/v1-error/chat/completions`; the status is driven by the `x-mock-status` request header (checks 5 and 7)
 - `spec.json` — the group spec (group `openai` + which sources mount at which paths), imported by the shared runner
 - `conformance.py` — the client-side assertions (run inside the container against `WM_BASE`)
 - `Dockerfile` — the client image: Python + pinned `openai`

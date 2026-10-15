@@ -2,17 +2,21 @@
 // WireMirage S3 mock with a reusable latency/throttle-injection handler.
 //
 // Proves, from a real client's perspective:
-//   [1] a non-matching key is served fast (passthrough)
-//   [2] a "slow" key has injected latency (observably slower)
-//   [3] a "throttled" key (mock returns 503 SlowDown for the first 2 attempts)
-//       still SUCCEEDS — because the SDK auto-retries/backs off and recovers
-//   [4] the same throttled shape, with retries disabled, SURFACES the error —
-//       confirming it's the SDK's retry that recovers in [3], i.e. the mock is
-//       genuinely emulating a partial, recoverable slowdown
+//
+//	[1] a non-matching key is served fast (passthrough)
+//	[2] a "slow" key has injected latency (observably slower)
+//	[3] a "throttled" key (mock returns 503 SlowDown for the first 2 attempts)
+//	    still SUCCEEDS — because the SDK auto-retries/backs off and recovers
+//	[4] the same throttled shape, with retries disabled, SURFACES the error —
+//	    confirming it's the SDK's retry that recovers in [3], i.e. the mock is
+//	    genuinely emulating a partial, recoverable slowdown
+//	[5] a missing key surfaces as the typed NoSuchKey error — the SDK
+//	    deserializes the XML error body, so the typed code proves the shape
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +27,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 func base() string {
@@ -65,8 +71,8 @@ func get(c *s3.Client, bucket, key string) (string, time.Duration, error) {
 }
 
 func main() {
-	def := newClient(0)         // default retryer (recovers from throttling)
-	noRetry := newClient(1)     // retries disabled (control)
+	def := newClient(0)     // default retryer (recovers from throttling)
+	noRetry := newClient(1) // retries disabled (control)
 
 	// [1] fast passthrough
 	body, fastDur, err := get(def, "fastbucket", "obj.txt")
@@ -105,11 +111,27 @@ func main() {
 	if err == nil {
 		fatal("[4] expected SlowDown to surface with retries disabled, but it succeeded")
 	}
-	if !strings.Contains(err.Error(), "SlowDown") && !strings.Contains(err.Error(), "503") {
-		fatal("[4] error did not look like a throttle: %v", err)
+	// With retries disabled the SDK wraps the final attempt in a
+	// "exceeded maximum number of attempts" OperationError; the typed
+	// SlowDown classification (smithy.APIError with code SlowDown) is
+	// nested inside it, so unwrap rather than errors.As on the top level.
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) || apiErr.ErrorCode() != "SlowDown" {
+		fatal("[4] error was not the SDK's typed SlowDown classification: %v", err)
 	}
 	fmt.Printf("[4] no-retry control: error surfaced as expected (%s)\n",
 		firstLine(err.Error()))
+
+	// [5] missing key -> typed NoSuchKey (XML error body deserialization)
+	_, _, err = get(def, "missingbucket", "a.txt")
+	if err == nil {
+		fatal("[5] expected NoSuchKey, got a response")
+	}
+	var missing *types.NoSuchKey
+	if !errors.As(err, &missing) {
+		fatal("[5] error was not the SDK's typed NoSuchKey: %v", err)
+	}
+	fmt.Printf("[5] missing key: typed NoSuchKey surfaced as expected\n")
 
 	fmt.Println("\nALL CONFORMANCE CHECKS PASSED")
 }

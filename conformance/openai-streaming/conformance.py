@@ -13,8 +13,13 @@ What it pins down:
   [4] request-body parameterization via the client's own `extra_body=`
   [5] error mapping — an OpenAI-shaped error body surfaces as the right typed
       SDK exception
+  [6] tool-call streaming — argument deltas reassemble into a complete
+      function call (the classic SSE accumulator break); the buffered
+      tool-call shape is checked against the same payload
+  [7] error shapes for 400/500 — typed exceptions, not just 429
 """
 
+import json
 import os
 import sys
 import time
@@ -79,6 +84,70 @@ def main() -> int:
     except openai.RateLimitError as e:
         print(f"[5] error mapped -> {type(e).__name__} status={e.status_code} code={e.code!r}")
         assert e.status_code == 429 and e.code == "rate_limit_exceeded"
+
+    # [6] tool-call streaming: argument deltas accumulate into one call
+    stream = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Paris"}],
+        stream=True,
+        extra_body={"mock_tool_call": True},
+    )
+    calls = {}
+    last = None
+    for ch in stream:
+        last = ch
+        for tc in ch.choices[0].delta.tool_calls or []:
+            acc = calls.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+            if tc.id:
+                acc["id"] = tc.id
+            if tc.function:
+                if tc.function.name:
+                    acc["name"] += tc.function.name
+                if tc.function.arguments:
+                    acc["arguments"] += tc.function.arguments
+    assert len(calls) == 1, f"expected one tool call, got {len(calls)}"
+    acc = calls[0]
+    print(f"[6] tool_call assembled: {acc['name']}({acc['arguments']})")
+    assert acc["name"] == "get_weather"
+    assert json.loads(acc["arguments"]) == {"city": "Paris"}
+    assert acc["id"], "tool_call id missing on first delta"
+    assert last.choices[0].finish_reason == "tool_calls"
+
+    # [6b] buffered tool-call shape: the same call, non-streamed
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Paris"}],
+        extra_body={"mock_tool_call": True},
+    )
+    msg = r.choices[0].message
+    print(f"[6b] buffered tool_call: {msg.tool_calls[0].function.name}({msg.tool_calls[0].function.arguments})")
+    assert msg.content is None
+    assert r.choices[0].finish_reason == "tool_calls"
+    assert len(msg.tool_calls) == 1
+    tc = msg.tool_calls[0]
+    assert tc.type == "function" and tc.id
+    assert tc.function.name == "get_weather"
+    assert json.loads(tc.function.arguments) == {"city": "Paris"}
+
+    # [7] error shapes: 400 -> BadRequestError, 500 -> InternalServerError
+    try:
+        err_client.chat.completions.create(
+            model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}],
+            extra_headers={"x-mock-status": "400"},
+        )
+        raise AssertionError("expected an error, got a response")
+    except openai.BadRequestError as e:
+        assert e.status_code == 400
+        print(f"[7a] 400 mapped -> {type(e).__name__}")
+    try:
+        err_client.chat.completions.create(
+            model="gpt-4o-mini", messages=[{"role": "user", "content": "x"}],
+            extra_headers={"x-mock-status": "500"},
+        )
+        raise AssertionError("expected an error, got a response")
+    except openai.InternalServerError as e:
+        assert e.status_code == 500
+        print(f"[7b] 500 mapped -> {type(e).__name__}")
 
     print("\nALL CONFORMANCE CHECKS PASSED")
     return 0

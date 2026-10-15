@@ -17,8 +17,9 @@ Two things at once:
 | 2 | A "slow" key has injected latency (~800 ms) | latency injection works |
 | 3 | A "throttled" key (mock returns `503 SlowDown` for the first 2 attempts) still **succeeds** | the real SDK auto-retries/backs off and **recovers** — "slowdown" is an observable client behavior, not just a delay |
 | 4 | The same shape, with retries disabled, **surfaces the error** | confirms it's the SDK's retry that recovers in [3] |
+| 5 | A "missing" key returns S3's native 404 XML and the SDK deserializes it into the **typed** `types.NoSuchKey` | proves the error-**body** shape, not just the status code |
 
-Measured locally: [1] ~3 ms · [2] ~807 ms · [3] ~1.6 s (recovered after backoff) · [4] `503` surfaced.
+Measured locally: [1] ~3 ms · [2] ~807 ms · [3] ~1.6 s (recovered after backoff) · [4] `503` surfaced · [5] `NoSuchKey` (typed).
 
 ## The reusable engine
 
@@ -29,15 +30,18 @@ state** under `inject:rules`:
 ```jsonc
 [
   { "match": { "path_prefix": "/slowbucket/" }, "delay_ms": 800 },
-  { "match": { "path_prefix": "/throttlebucket/" }, "throttle_first": 2 }
+  { "match": { "path_prefix": "/throttlebucket/" }, "throttle_first": 2 },
+  { "match": { "path_prefix": "/missingbucket/" }, "missing": true }
 ]
 ```
 
 `match` also supports `method`, `query` (`{k:v}`), and `header` (`{k:v}`) — so
 the Vertex case is just `{ "match": { "path_prefix": "/v1/models/gemini-pro",
-"query": { "region": "us-central1" } }, "delay_ms": 3000 }`. To retarget the
-engine to another API you keep the core and swap the two API-specific functions
-at the bottom of `inject.ts` (`successResponse` / `throttleResponse`).
+"query": { "region": "us-central1" } }, "delay_ms": 3000 }`. `missing: true`
+makes the rule return the API's not-found shape (S3's 404 XML here). To
+retarget the engine to another API you keep the core and swap the three
+API-specific functions at the bottom of `inject.ts` (`successResponse` /
+`throttleResponse` / `missingResponse`).
 
 ## How config gets in
 

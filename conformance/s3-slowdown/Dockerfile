@@ -1,7 +1,7 @@
 # Conformance client: the real AWS Go SDK (aws-sdk-go-v2). Run by ../run.sh
 # against a wm-host on the host network (--network host), WM_BASE pointing at
 # it. Pinned base image + go.mod/go.sum so the lane is reproducible.
-FROM golang:1.27
+FROM golang:1.27@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8
 
 WORKDIR /app
 COPY go.mod go.sum ./
