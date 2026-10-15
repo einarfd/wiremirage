@@ -63,7 +63,18 @@ WM_STORAGE=memory WM_BOOTSTRAP_TOKEN="$TOKEN" \
 HOST_PID=$!
 tail -f "$HOST_LOG" 2>/dev/null &
 TAIL_PID=$!
-trap 'kill "$HOST_PID" "$TAIL_PID" 2>/dev/null || true; rm -f "$HOST_LOG"' EXIT
+# On failure keep the host log next to the run's other artifacts (the
+# client's own output is already in stdout); a red lane is exactly when
+# the host's side of the story matters, and rm-ing it made local
+# debugging needlessly blind. Success still cleans up.
+keep_log() {
+  if [ "$1" -ne 0 ]; then
+    cp "$HOST_LOG" "${TMPDIR:-/tmp}/wm-conformance-host-failed.log" 2>/dev/null \
+      && echo "host log preserved: ${TMPDIR:-/tmp}/wm-conformance-host-failed.log"
+  fi
+  rm -f "$HOST_LOG"
+}
+trap 'st=$?; kill "$HOST_PID" "$TAIL_PID" 2>/dev/null || true; keep_log "$st"' EXIT
 
 # Wait for the host to listen. On a cold machine first boot Cranelift-compiles
 # the ~12 MB StarlingMonkey engine component before binding (runtime.rs says

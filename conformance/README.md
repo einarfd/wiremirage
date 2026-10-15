@@ -7,7 +7,8 @@ function — like TinyGo for the WIT contract — that surfaces fidelity gaps (S
 framing, content-type, error-body shape) the Rust unit suite can't see.
 
 **Opt-in.** Not part of `just check`. Run them when touching dispatch /
-streaming / the engine, or on a schedule.
+streaming / the engine; CI runs them automatically on PRs that touch those
+paths (see below) and weekly.
 
 ## Run
 
@@ -34,10 +35,13 @@ inside the container — no DNS needed; the host derives the group from the `Hos
 header.
 
 CI: `.github/workflows/conformance.yml` — **weekly** (Mondays 05:17 UTC) plus
-`workflow_dispatch`. Not on PRs: it builds + boots the host and builds SDK
-images, so it's far heavier than the gating CI. The weekly run is what keeps a
-pinned-SDK regression from sitting undiscovered until someone remembers to
-press the button.
+`workflow_dispatch` plus **path-filtered `pull_request`** runs: PRs touching
+the fidelity-critical surfaces (js-engine, host dispatch/runtime/state,
+transpile, WIT, `Cargo.lock`, conformance itself) run the lanes in review, so a
+regression there shows up in the PR loop instead of up to a week later. Not on
+every PR: it builds + boots the host and builds SDK images, so it's far heavier
+than the gating CI. The weekly run is what keeps a pinned-SDK regression from
+sitting undiscovered for everything the paths filter doesn't cover.
 
 ## A lane
 

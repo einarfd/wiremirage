@@ -1,17 +1,18 @@
 // Reusable latency / fault INJECTION engine.
 //
 // The generic core — read rules, match a request, inject latency, throttle
-// with recovery — is API-agnostic. The only API-aware part is the two small
-// functions at the bottom (`successResponse` / `throttleResponse`) that shape
-// the bytes for the API being mocked; here, AWS S3. To reuse this for another
-// API (e.g. a Vertex `(model, region)` selective slowdown) you keep the core
-// and the rule format, and swap just those two functions + the rules.
+// with recovery — is API-agnostic. The only API-aware part is the three small
+// functions at the bottom (`successResponse` / `throttleResponse` /
+// `missingResponse`) that shape the bytes for the API being mocked; here, AWS
+// S3. To reuse this for another API (e.g. a Vertex `(model, region)` selective
+// slowdown) you keep the core and the rule format, and swap just those
+// functions + the rules.
 //
 // Rules live in GROUP state under "inject:rules", seeded via the writable-state
 // API (ADR-0025: `PUT /api/groups/{group}/state`). Each rule:
 //
 //   { "match": { "path_prefix"?, "method"?, "query"?: {k:v}, "header"?: {k:v} },
-//     "delay_ms"?: number, "throttle_first"?: number }
+//     "delay_ms"?: number, "throttle_first"?: number, "missing"?: true }
 //
 // First matching rule wins. `throttle_first: N` makes the first N requests for
 // a given resource return a throttling error, then it recovers — so it's the
@@ -22,6 +23,7 @@ export function handle(req, routeStore, groupStore) {
 
   if (rule && rule.delay_ms) host.sleep(rule.delay_ms);
 
+  if (rule && rule.missing) return missingResponse(req);
   if (rule && rule.throttle_first) {
     // Per-resource attempt counter (route-private state). Distinct keys get
     // independent budgets, so the Nth retry of one key recovers without
@@ -67,6 +69,32 @@ function pairsMatch(pairs, want, lowerKeys) {
 }
 
 // --- S3-specific shapes (the only API-aware part) ---
+
+// S3's 404: the SDK deserializes the XML error body into a typed
+// NoSuchKey error. A wrong shape here surfaces as a cryptic
+// deserialization failure rather than the typed error, so the client
+// asserting on the typed code is the fidelity check. `<Key>` holds the
+// object key (the path minus the `/{bucket}/` prefix), XML-escaped like
+// the real service.
+function missingResponse(req) {
+  const key = xmlEscape(String(req.path).replace(/^\/[^/]+\//, ""));
+  const xml =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    "<Error><Code>NoSuchKey</Code>" +
+    "<Message>The specified key does not exist.</Message>" +
+    "<Key>" + key + "</Key>" +
+    "<RequestId>wiremirage-mock</RequestId><HostId>wiremirage</HostId></Error>";
+  return {
+    status: 404,
+    headers: [["content-type", "application/xml"]],
+    body: new TextEncoder().encode(xml),
+  };
+}
+
+function xmlEscape(s) {
+  return String(s).replace(/[&<>]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+}
 
 function successResponse(req) {
   // GetObject success: the object bytes + an ETag. Deterministic so the
