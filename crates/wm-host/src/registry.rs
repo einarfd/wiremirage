@@ -48,6 +48,8 @@ pub enum RegistryError {
         "invalid group name `{0}`: must be a DNS label (lowercase a-z, 0-9, hyphen; 1-63 chars; no leading/trailing hyphen)"
     )]
     InvalidName(String),
+    #[error("invalid group ttl: {0}")]
+    InvalidTtl(String),
 }
 
 /// One stored route. Fields here mirror the REST `route record` shape from
@@ -1205,12 +1207,12 @@ fn strip_route_indexes(bucket: &mut Bucket, route: &Route) -> Result<(), Registr
 /// certainly a misuse).
 fn normalize_ttl(ttl_seconds: u64) -> Result<u64, RegistryError> {
     if ttl_seconds == 0 {
-        return Err(RegistryError::Malformed(
+        return Err(RegistryError::InvalidTtl(
             "ttl_seconds must be positive".into(),
         ));
     }
     if ttl_seconds > MAX_GROUP_TTL_SECONDS {
-        return Err(RegistryError::Malformed(format!(
+        return Err(RegistryError::InvalidTtl(format!(
             "ttl_seconds {ttl_seconds} exceeds max {MAX_GROUP_TTL_SECONDS}",
         )));
     }

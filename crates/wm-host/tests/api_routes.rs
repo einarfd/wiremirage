@@ -3125,7 +3125,24 @@ async fn create_group_rejects_excessive_ttl() {
         .send()
         .await
         .expect("post");
-    assert_eq!(resp.status().as_u16(), 500); // Malformed → internal in this build
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "validation_failed");
+}
+
+#[tokio::test]
+async fn create_group_rejects_zero_ttl() {
+    let h = Harness::start().await;
+    let resp = h
+        .client
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "zero", "ttl_seconds": 0 }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["code"], "validation_failed");
 }
 
 #[tokio::test]

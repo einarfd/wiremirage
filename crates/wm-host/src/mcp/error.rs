@@ -49,6 +49,7 @@ pub fn map_registry_error(err: RegistryError) -> ErrorData {
             "invalid group name `{n}`: must be a DNS label (lowercase a-z, 0-9, hyphen; \
              1-63 chars; no leading/trailing hyphen)"
         )),
+        RegistryError::InvalidTtl(msg) => validation(msg),
         RegistryError::Storage(e) => internal(format!("storage: {e}")),
         RegistryError::Malformed(msg) => internal(format!("malformed registry record: {msg}")),
     }

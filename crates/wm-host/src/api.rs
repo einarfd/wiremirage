@@ -523,6 +523,7 @@ impl From<RegistryError> for ApiError {
             RegistryError::InvalidName(n) => {
                 ApiError::validation(format!("invalid group name: {n}"))
             }
+            RegistryError::InvalidTtl(msg) => ApiError::validation(msg),
             RegistryError::Storage(e) => ApiError::internal(format!("storage: {e}")),
             RegistryError::Malformed(msg) => ApiError::internal(format!("malformed record: {msg}")),
         }
