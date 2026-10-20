@@ -2,6 +2,8 @@
 
 **Status:** Accepted
 
+- *2026-10-20 — the max-bound rule below gains one exception, per [0040-opt-in-non-expiring-groups.md](0040-opt-in-non-expiring-groups.md).* `ttl_seconds: 0` means "never expire": no TTL is armed on the group's keys, refresh is rejected, and the sliding flag is a stored no-op. Every rule in this ADR is unchanged for positive TTLs — default 24h, max 30d, sliding, refresh, the cascade.
+
 **Context:** A "group" appeared in early design as a way for related routes to share runtime state — the `group-store` in ../script-api-wit.md. As the design has matured, two more uses emerged:
 
 1. **Lifecycle.** A "Stripe API mock" is conceptually a set of routes (charges, refunds, customers, subscriptions, webhooks) that should be created together, expire together, be inspected together, and be deleted as a unit. Without grouping at this layer, you'd be deleting 12 routes one at a time and hoping you got them all.
