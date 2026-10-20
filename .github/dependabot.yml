@@ -17,6 +17,17 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    ignore:
+      # minijinja 2 -> 3 is deferred deliberately — see #75 for the
+      # measured scope and the triggers that reopen it (a 3.x feature
+      # we want, or a security/unmaintained event on 2.x, which the
+      # audit CI job fails on regardless of this rule). It is a real
+      # migration (v3's context! needs Serde wraps at ~29 call
+      # sites), not a version bump. Semver-major only, and the
+      # update-types shape is what keeps Dependabot security-update
+      # PRs flowing — don't widen it to a bare version range.
+      - dependency-name: "minijinja"
+        update-types: ["version-update:semver-major"]
     groups:
       cargo-compatible:
         update-types: [minor, patch]
