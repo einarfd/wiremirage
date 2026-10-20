@@ -36,14 +36,30 @@ updates:
         update-types: [minor, patch]
 
   - package-ecosystem: docker
+    # Release + conformance images follow whatever tag they use.
     directories:
       - "/"                            # release image
-      - "/compiler/js-engine"          # digest-pinned js-engine builder
       - "/conformance/openai-streaming"
       - "/conformance/s3-slowdown"
     schedule:
       interval: weekly
       day: monday
+
+  - package-ecosystem: docker
+    # The js-engine builder is digest-pinned on the Node LTS line
+    # (24-bookworm-slim). Node 25 is the non-LTS current line, and
+    # `npm ci` dies under it (exit 152), which breaks every cargo
+    # test via the build.rs engine build — see the #59 experiment.
+    # Take major bumps of this base image deliberately, once
+    # componentize-js supports them; minors and patches keep flowing
+    # (the LTS tag moves within 24).
+    directory: "/compiler/js-engine"
+    schedule:
+      interval: weekly
+      day: monday
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     # componentize-js + typescript, the js-engine build inputs.
