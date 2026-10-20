@@ -437,9 +437,13 @@ mod tests {
         assert_eq!(super::format_duration(120), "2m");
         assert_eq!(super::format_duration(0), "0s");
         // Round-trips back through parse_duration (export → import).
-        for secs in [1u64, 59, 60, 3_600, 5_400, 86_400, 172_800] {
+        // `0` is the never-expire sentinel (ADR-0040) — bare and with
+        // the unit — so an exported never-expiring group re-imports
+        // as one.
+        for secs in [0u64, 1, 59, 60, 3_600, 5_400, 86_400, 172_800] {
             assert_eq!(parse_duration(&super::format_duration(secs)).unwrap(), secs);
         }
+        assert_eq!(parse_duration("0").unwrap(), 0);
     }
 
     #[test]

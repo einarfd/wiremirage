@@ -1892,8 +1892,9 @@ struct CreateGroupBody {
     /// name (ADR-0030); an explicit name must be a valid DNS label.
     #[serde(default)]
     name: Option<String>,
-    /// Optional configured TTL. Omit to take the default; values are
-    /// validated against `MAX_GROUP_TTL_SECONDS`.
+    /// Optional configured TTL. Omit to take the default; `0` means
+    /// never expire (ADR-0040); positive values are validated
+    /// against `MAX_GROUP_TTL_SECONDS`.
     ttl_seconds: Option<u64>,
     /// Optional sliding-TTL flag. Omit to take the default (`true`).
     sliding_ttl: Option<bool>,

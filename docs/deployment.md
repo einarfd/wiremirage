@@ -156,10 +156,11 @@ Neither is recorded in metrics or traces (high frequency, low value).
 
 `WM_STORAGE=redis://valkey:6379` is the deployment shape. Everything
 WireMirage stores is **ephemeral by design** — routes and groups expire on
-their TTL, journal entries default to 1 h, and state dies with its group.
-There is nothing here to back up; users and tokens are the only durable
-records, and they are cheap to recreate. Plan for the Valkey instance to be
-disposable and you have the operational model right.
+their TTL (a group can opt out entirely with `ttl_seconds: 0`, ADR-0040;
+that one lives until deleted), journal entries default to 1 h, and state
+dies with its group. There is nothing here to back up; users and tokens
+are the only durable records, and they are cheap to recreate. Plan for the
+Valkey instance to be disposable and you have the operational model right.
 
 **Set `maxmemory`, and check `maxmemory-policy` is `noeviction`**
 ([ADR-0005](adr/0005-valkey-storage.md)). These are Valkey server settings —
@@ -185,10 +186,14 @@ through.
 
 Together the two settings keep that a capacity problem instead of a
 correctness one. Journal writes are best-effort, so a rejected one is logged
-and skipped and the mock keeps answering. An evicting policy could instead
-drop a `group:` record while its routes survived — group keys carry a TTL and
-route records do not — leaving the subdomain 404ing with its routes orphaned
-behind it, which is invisible until someone tries the mock.
+and skipped and the mock keeps answering. An evicting policy is the
+alternative that gets it wrong: it can drop a `group:` record while its
+routes survive — the subdomain 404s, and the lifecycle sweeper then
+cascade-deletes the orphaned routes on its next pass (default every 30s),
+silently deleting a working mock. A never-expiring group
+(`ttl_seconds: 0`, ADR-0040) changes the capacity side instead: its routes
+and state are never reclaimed by TTL, so they count against `maxmemory`
+until the group is deleted.
 
 ## Production hardening
 

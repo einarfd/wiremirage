@@ -3131,18 +3131,109 @@ async fn create_group_rejects_excessive_ttl() {
 }
 
 #[tokio::test]
-async fn create_group_rejects_zero_ttl() {
+async fn create_group_accepts_zero_ttl_as_never_expiring() {
+    // ADR-0040: ttl_seconds 0 means "never expire". Sliding stays a
+    // stored flag — it's inert while the TTL is 0, not rejected.
     let h = Harness::start().await;
     let resp = h
         .client
         .post(h.url("/api/groups"))
-        .json(&json!({ "name": "zero", "ttl_seconds": 0 }))
+        .json(&json!({ "name": "forever", "ttl_seconds": 0 }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status().as_u16(), 201);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["ttl_seconds"], 0);
+    assert_eq!(body["sliding_ttl"], true);
+}
+
+#[tokio::test]
+async fn patch_group_transitions_between_positive_and_zero_ttl() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "flip", "ttl_seconds": 3600 }))
+        .send()
+        .await
+        .expect("post");
+
+    // positive → 0: clears the armed TTL (PERSIST), not just skips it.
+    let resp = h
+        .client
+        .patch(h.url("/api/groups/flip"))
+        .json(&json!({ "ttl_seconds": 0 }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["ttl_seconds"], 0);
+
+    // 0 → positive: re-arms.
+    let resp = h
+        .client
+        .patch(h.url("/api/groups/flip"))
+        .json(&json!({ "ttl_seconds": 7200 }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["ttl_seconds"], 7200);
+}
+
+#[tokio::test]
+async fn refresh_group_rejected_on_never_expiring_group() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "eternal", "ttl_seconds": 0 }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .post(h.url("/api/groups/eternal/refresh"))
         .send()
         .await
         .expect("post");
     assert_eq!(resp.status().as_u16(), 400);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], "validation_failed");
+}
+
+#[tokio::test]
+async fn rename_group_keeps_never_expiring_ttl() {
+    let h = Harness::start().await;
+    h.client
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "old-name", "ttl_seconds": 0 }))
+        .send()
+        .await
+        .expect("post");
+    let resp = h
+        .client
+        .patch(h.url("/api/groups/old-name"))
+        .json(&json!({ "name": "new-name" }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["name"], "new-name");
+    assert_eq!(body["ttl_seconds"], 0);
+
+    // The renamed group resolves by its new name.
+    let resp = h
+        .client
+        .get(h.url("/api/groups/new-name"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["ttl_seconds"], 0);
 }
 
 #[tokio::test]

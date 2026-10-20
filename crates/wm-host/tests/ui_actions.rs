@@ -370,7 +370,7 @@ async fn clear_journal_redirects_to_group_detail() {
 }
 
 #[tokio::test]
-async fn edit_ttl_rejects_zero_or_garbage() {
+async fn edit_ttl_rejects_garbage() {
     let (h, _, _) = start_seeded().await;
     let client = no_redirect_client();
     let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
@@ -384,6 +384,89 @@ async fn edit_ttl_rejects_zero_or_garbage() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn edit_ttl_zero_marks_group_never_expiring() {
+    // ADR-0040: ttl_seconds 0 means never expire.
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+
+    let resp = client
+        .post(url(&h, "/ui/groups/stripe-mock/edit"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&ttl_seconds=0"))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+
+    let body = client
+        .get(url(&h, "/ui/groups/stripe-mock"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("never expires"), "detail shows never: {body}");
+    // Nothing to refresh on a never-expiring group; the button hides.
+    assert!(
+        !body.contains("Refresh TTL"),
+        "refresh button hidden: {body}"
+    );
+}
+
+#[tokio::test]
+async fn edit_never_expiring_group_back_to_positive_ttl() {
+    // The edit form has no separate "never" control — the field
+    // carries `0`. Setting a positive number on a never-expiring
+    // group must make it expire again.
+    let (h, _, _) = start_seeded().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+
+    let resp = client
+        .post(url(&h, "/ui/groups/stripe-mock/edit"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&ttl_seconds=0"))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+
+    let resp = client
+        .post(url(&h, "/ui/groups/stripe-mock/edit"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("_csrf={csrf}&ttl_seconds=7200"))
+        .send()
+        .await
+        .unwrap();
+    assert!((300..400).contains(&resp.status().as_u16()));
+
+    let body = client
+        .get(url(&h, "/ui/groups/stripe-mock"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("7200 s"), "positive TTL persists: {body}");
+    // The TTL row no longer renders "never expires" — the edit form's
+    // field hint does contain that phrase as static text, so the
+    // assertion targets the rendered metadata row.
+    assert!(
+        !body.contains("<dd>never expires"),
+        "TTL row no longer shows never: {body}"
+    );
+    assert!(body.contains("Refresh TTL"), "refresh button back: {body}");
 }
 
 #[tokio::test]

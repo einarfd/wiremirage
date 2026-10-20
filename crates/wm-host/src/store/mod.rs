@@ -332,6 +332,26 @@ impl Bucket {
         }
     }
 
+    /// Remove any TTL armed on `key`, making it persistent. Valkey runs
+    /// `PERSIST`; the in-memory backend never arms one, so it's a no-op
+    /// there. `PERSIST` on a key without a TTL returns 0 and is ignored
+    /// here. Used when a group's configured TTL becomes `0` — "never
+    /// expire" (ADR-0040): merely skipping the `EXPIRE` call is not
+    /// enough, the previous TTL is still armed and would fire.
+    pub fn clear_ttl(&mut self, key: &str) -> Result<(), StoreError> {
+        match self {
+            Bucket::InMemory { .. } => Ok(()),
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let _: i64 = redis::cmd("PERSIST")
+                    .arg(&fk)
+                    .query(conn)
+                    .map_err(|e| StoreError::Backend(format!("PERSIST: {e}")))?;
+                Ok(())
+            }
+        }
+    }
+
     /// Atomically set `key` to `value` only if it does not already
     /// exist. Returns whether this caller wrote it.
     ///
@@ -363,6 +383,30 @@ impl Bucket {
                     .query(conn)
                     .map_err(|e| StoreError::Backend(format!("SET NX: {e}")))?;
                 Ok(got.is_some())
+            }
+        }
+    }
+
+    /// Query the TTL armed on `key`, in seconds. `None` means no TTL
+    /// (the key is persistent); the query errors if the key is
+    /// missing. Valkey runs `TTL`; the in-memory backend never arms
+    /// one, so it always reports `None`. Used by the tier-3 suite to
+    /// pin ADR-0040's arm/clear semantics against real Valkey.
+    pub fn remaining_ttl(&mut self, key: &str) -> Result<Option<u64>, StoreError> {
+        match self {
+            Bucket::InMemory { .. } => Ok(None),
+            Bucket::Valkey { conn, prefix } => {
+                let fk = format!("{prefix}{key}");
+                let ttl: i64 = redis::cmd("TTL")
+                    .arg(&fk)
+                    .query(conn)
+                    .map_err(|e| StoreError::Backend(format!("TTL: {e}")))?;
+                match ttl {
+                    -1 => Ok(None),
+                    -2 => Err(StoreError::Backend(format!("TTL: key {key:?} missing"))),
+                    n if n >= 0 => Ok(Some(n as u64)),
+                    n => Err(StoreError::Backend(format!("TTL: unexpected {n}"))),
+                }
             }
         }
     }

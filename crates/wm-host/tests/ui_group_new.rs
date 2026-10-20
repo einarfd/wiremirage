@@ -157,6 +157,39 @@ async fn group_new_submit_creates_and_redirects() {
 }
 
 #[tokio::test]
+async fn group_new_submit_never_expires_creates_never_expiring_group() {
+    // ADR-0040: the "Never expires" checkbox sends ttl_seconds 0.
+    let h = start().await;
+    let client = no_redirect_client();
+    let (cookie, csrf) = login_cookie(&h, &client, "admin").await;
+    let resp = client
+        .post(url(&h, "/ui/groups/new"))
+        .header("cookie", &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "_csrf={csrf}&name=longterm&ttl_seconds=&never_expires=on&sliding_ttl=on"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 303, "303 on success");
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/ui/groups/longterm"
+    );
+
+    let detail = client
+        .get(url(&h, "/ui/groups/longterm"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(detail.status().as_u16(), 200);
+    let body = detail.text().await.unwrap();
+    assert!(body.contains("never expires"), "detail shows never: {body}");
+}
+
+#[tokio::test]
 async fn group_new_submit_auto_names_when_blank() {
     let h = start().await;
     let client = no_redirect_client();

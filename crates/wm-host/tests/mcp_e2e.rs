@@ -591,6 +591,86 @@ async fn delete_group_without_confirm_is_validation_error() {
 }
 
 #[tokio::test]
+async fn zero_ttl_group_never_expires_and_rejects_refresh() {
+    // ADR-0040: ttl_seconds 0 means never expire; sliding stays a
+    // stored (inert) flag; refresh is rejected with validation_failed.
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+
+    let created = client
+        .call_tool(
+            CallToolRequestParams::new("create_group").with_arguments(
+                serde_json::json!({ "name": "forever", "ttl_seconds": 0 })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("create_group");
+    let body = created.structured_content.expect("structured");
+    assert_eq!(body["ttl_seconds"], 0);
+    // Sliding is stored as configured (default true) — inert, not rejected.
+    assert_eq!(body["sliding_ttl"], true);
+
+    // update_group can patch back to a positive TTL.
+    let updated = client
+        .call_tool(
+            CallToolRequestParams::new("update_group").with_arguments(
+                serde_json::json!({ "group": "forever", "ttl_seconds": 7200 })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("update_group");
+    assert_eq!(
+        updated.structured_content.expect("structured")["ttl_seconds"],
+        7200
+    );
+
+    // And back to never-expiring.
+    client
+        .call_tool(
+            CallToolRequestParams::new("update_group").with_arguments(
+                serde_json::json!({ "group": "forever", "ttl_seconds": 0 })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("update_group");
+
+    // refresh on a never-expiring group → validation_failed. The
+    // assertion is the error code alone — the message itself
+    // contains "never expires", so matching on it would pass even if
+    // the code regressed to internal_error.
+    let err = client
+        .call_tool(
+            CallToolRequestParams::new("refresh_group_ttl").with_arguments(
+                serde_json::json!({ "group": "forever" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect_err("expected JSON-RPC error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("validation_failed"),
+        "expected validation_failed error code, got: {msg}"
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test]
 async fn update_group_changes_ttl_and_sliding_flag() {
     let h = start().await;
     let client = DummyClient

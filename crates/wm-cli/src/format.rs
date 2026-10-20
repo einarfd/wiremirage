@@ -57,7 +57,16 @@ pub fn render_group(g: &GroupRecord, format: Format) {
             println!("name:        {}", g.name);
             println!("id:          {}", g.id);
             println!("owner:       {}", g.owner_id);
-            println!("ttl_seconds: {}", g.ttl_seconds);
+            // 0 = never expires (ADR-0040); human output spells it,
+            // JSON stays the raw wire value.
+            println!(
+                "ttl_seconds: {}",
+                if g.ttl_seconds == 0 {
+                    "0 (never)".to_string()
+                } else {
+                    g.ttl_seconds.to_string()
+                }
+            );
             println!("sliding:     {}", g.sliding_ttl);
             println!("callout:     {}", g.callout_enabled);
             println!("implicit:    {}", g.implicit);
@@ -81,7 +90,11 @@ pub fn render_group_list(list: &ListGroupsResponse, format: Format) {
                 .map(|g| {
                     [
                         g.name.clone(),
-                        g.ttl_seconds.to_string(),
+                        if g.ttl_seconds == 0 {
+                            "0 (never)".to_string()
+                        } else {
+                            g.ttl_seconds.to_string()
+                        },
                         if g.implicit {
                             "yes".into()
                         } else {

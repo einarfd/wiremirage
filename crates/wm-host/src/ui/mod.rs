@@ -1045,7 +1045,9 @@ struct EditGroupForm {
     /// New name (DNS label). Empty/missing/unchanged leaves the name as-is;
     /// a change rewrites the group's subdomain (ADR-0030).
     name: Option<String>,
-    /// New TTL in seconds. Empty/missing leaves the existing value.
+    /// New TTL in seconds. Empty/missing leaves the existing value;
+    /// `0` means the group never expires (ADR-0040) — there is no
+    /// separate "never" control, the field carries it.
     ttl_seconds: Option<String>,
     /// "on" when checked; absent when unchecked (HTML form quirk).
     sliding_ttl: Option<String>,
@@ -1067,6 +1069,16 @@ async fn group_refresh_form(
         Err(resp) => return *resp,
     };
     if let Err(e) = state.routes().registry().refresh_group(&group.id) {
+        // Refresh on a never-expiring group is a validation error
+        // (ADR-0040), not a server fault — the button is hidden for
+        // those groups, but a stale tab can still submit.
+        if matches!(e, crate::registry::RegistryError::InvalidTtl(_)) {
+            return ui_error_400_text(
+                &state,
+                &auth,
+                "This group never expires; there is nothing to refresh.",
+            );
+        }
         return ui_error_500(&state, &auth, format!("refresh: {e}"));
     }
     axum::response::Redirect::to(&format!("/ui/groups/{}", group.name)).into_response()
@@ -1104,9 +1116,13 @@ async fn group_edit_form(
     let ttl_seconds = match form.ttl_seconds.as_deref().map(str::trim) {
         Some("") | None => None,
         Some(s) => match s.parse::<u64>() {
-            Ok(v) if v > 0 => Some(v),
+            Ok(v) => Some(v),
             _ => {
-                return ui_error_400_text(&state, &auth, "TTL seconds must be a positive integer.");
+                return ui_error_400_text(
+                    &state,
+                    &auth,
+                    "TTL seconds must be a whole number (0 = never expires).",
+                );
             }
         },
     };
@@ -3683,6 +3699,11 @@ struct UiGroupNewForm {
     name: String,
     #[serde(default)]
     ttl_seconds: String,
+    /// Checkbox: present (`on`) when checked, absent when not. Wins
+    /// over `ttl_seconds` — sends `ttl_seconds: 0` (never expire,
+    /// ADR-0040).
+    #[serde(default)]
+    never_expires: Option<String>,
     /// Checkbox: present (`on`) when checked, absent when not.
     #[serde(default)]
     sliding_ttl: Option<String>,
@@ -3692,6 +3713,7 @@ struct UiGroupNewForm {
 struct GroupNewFormState {
     name: String,
     ttl_seconds: String,
+    never_expires: bool,
     sliding_ttl: bool,
 }
 
@@ -3718,29 +3740,37 @@ async fn group_new_submit(
 ) -> Response {
     let _ = form._csrf; // already validated by csrf_middleware
     let sliding = form.sliding_ttl.is_some();
+    let never_expires = form.never_expires.is_some();
     let form_state = GroupNewFormState {
         name: form.name.clone(),
         ttl_seconds: form.ttl_seconds.clone(),
+        never_expires,
         sliding_ttl: sliding,
     };
 
-    let ttl_seconds = match form.ttl_seconds.trim() {
-        "" => None,
-        s => match s.parse::<u64>() {
-            Ok(n) => Some(n),
-            Err(_) => {
-                return render_group_new(
-                    &state,
-                    &auth,
-                    form_state,
-                    Some(GroupNewError {
-                        title: "Invalid TTL".into(),
-                        message: "TTL must be a whole number of seconds, or blank for the default."
-                            .into(),
-                    }),
-                );
-            }
-        },
+    // "Never expires" wins over the TTL field (ADR-0040): the group is
+    // created with ttl_seconds 0 and no expiry armed.
+    let ttl_seconds = if never_expires {
+        Some(0)
+    } else {
+        match form.ttl_seconds.trim() {
+            "" => None,
+            s => match s.parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    return render_group_new(
+                        &state,
+                        &auth,
+                        form_state,
+                        Some(GroupNewError {
+                            title: "Invalid TTL".into(),
+                            message: "TTL must be a whole number of seconds (0 = never expires), or blank for the default."
+                                .into(),
+                        }),
+                    );
+                }
+            },
+        }
     };
 
     match state

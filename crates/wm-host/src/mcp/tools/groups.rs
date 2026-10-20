@@ -94,10 +94,13 @@ pub struct CreateGroupArgs {
     /// hyphen). Optional — omit to be assigned a friendly name.
     /// Must be unique. Used in route slugs.
     pub name: Option<String>,
-    /// TTL in seconds. Defaults to 24h. Capped at 30d.
+    /// TTL in seconds. Defaults to 24h. `0` means never expire
+    /// (ADR-0040); positive values are capped at 30d.
     pub ttl_seconds: Option<u64>,
     /// When `true`, every successful route hit bumps the group's
-    /// expiry. Defaults to `true`.
+    /// expiry. Defaults to `true`. Stored but inert while
+    /// `ttl_seconds` is `0` — a never-expiring group has nothing to
+    /// bump.
     pub sliding_ttl: Option<bool>,
 }
 
@@ -316,7 +319,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "refresh_group_ttl",
-        description = "Bump a group's expiry forward by its configured TTL. Use when a non-sliding group is about to expire and you want to extend it without changing the TTL value."
+        description = "Bump a group's expiry forward by its configured TTL. Use when a non-sliding group is about to expire and you want to extend it without changing the TTL value. Rejected (validation_failed) on a group with ttl_seconds 0 — never-expiring groups have nothing to bump."
     )]
     pub async fn refresh_group_ttl(
         &self,
@@ -336,7 +339,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "update_group",
-        description = "Update a group's mutable fields by name or ULID: `name` (rename + subdomain change), `ttl_seconds` (re-arms the Valkey TTL), `sliding_ttl` (toggle the sliding-expiry flag), and/or `callout_enabled` (toggle outbound-callback opt-in). Owner-or-admin only. At least one field must be set. Owner-transfer isn't supported through this tool."
+        description = "Update a group's mutable fields by name or ULID: `name` (rename + subdomain change), `ttl_seconds` (re-arms the Valkey TTL; `0` means never expire and clears it, ADR-0040), `sliding_ttl` (toggle the sliding-expiry flag, inert while ttl_seconds is 0), and/or `callout_enabled` (toggle outbound-callback opt-in). Owner-or-admin only. At least one field must be set. Owner-transfer isn't supported through this tool."
     )]
     pub async fn update_group(
         &self,

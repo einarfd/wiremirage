@@ -64,11 +64,15 @@ Both are Valkey server settings, not chart values.
 `maxmemory` defaults to unlimited everywhere, and without it Valkey grows
 until the OS kills it. `maxmemory-policy` already defaults to `noeviction`
 self-hosted, but managed cache offerings commonly default to an LRU policy —
-worth checking rather than assuming, because eviction here is worse than a
-full store: dropping a `group:` record while its routes survive 404s a working
-subdomain and orphans the routes behind it, since route records carry no TTL
-of their own. Size for peak journal volume; every unmatched request is
-recorded.
+worth checking rather than assuming, because eviction is a correctness
+problem, not just a capacity one: an evicting policy can drop a `group:`
+record, which 404s the subdomain until the lifecycle sweeper
+cascade-deletes the orphaned routes on its next pass (default every 30s) —
+a working mock disappears silently. Never-expiring groups
+(`ttl_seconds: 0`, [ADR-0040](../../../docs/adr/0040-opt-in-non-expiring-groups.md))
+are the other reason to size deliberately: their routes and state are never
+reclaimed by TTL, so they count against `maxmemory` until deleted. Size for
+peak journal volume; every unmatched request is recorded.
 
 ## Secrets
 

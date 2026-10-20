@@ -73,7 +73,7 @@
         <td><a href="/ui/groups/{{ g.name }}">{{ g.name }}</a>{% if g.implicit %} <span class="badge">implicit</span>{% endif %}<br><code class="text-muted">{{ g.base_url }}</code></td>
         <td class="text-muted">{{ g.owner_name }}</td>
         <td>{{ g.route_count }}</td>
-        <td>{{ g.ttl_seconds }}</td>
+        <td>{% if g.ttl_seconds == 0 %}never{% else %}{{ g.ttl_seconds }}{% endif %}</td>
         <td class="text-muted">{{ g.created_at }}</td>
         <td class="text-muted">{% if g.last_activity_at %}{{ g.last_activity_at }}{% else %}never{% endif %}</td>
       </tr>

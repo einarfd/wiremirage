@@ -36,7 +36,13 @@
 
       <label for="group-ttl">TTL (seconds)</label>
       <input type="number" id="group-ttl" name="ttl_seconds" value="{{ form.ttl_seconds }}"
-             min="1" placeholder="(default)">
+             min="0" placeholder="(default)">
+
+      <label for="group-never">Never expires</label>
+      <span class="filter-checkbox">
+        <input type="checkbox" id="group-never" name="never_expires"{% if form.never_expires %} checked{% endif %}>
+        <label for="group-never">No TTL — the group lives until deleted (sends <code>ttl_seconds: 0</code>)</label>
+      </span>
 
       <label for="group-sliding">Sliding TTL</label>
       <span class="filter-checkbox">

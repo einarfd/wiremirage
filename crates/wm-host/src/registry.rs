@@ -98,10 +98,13 @@ pub struct Group {
     /// (PATCH/DELETE/refresh) require the caller to match this id or
     /// to be an admin.
     pub owner_id: String,
-    /// Configured TTL on the group record, in seconds. The actual
-    /// remaining lifetime tracks via the Valkey `EXPIRE` set on the
-    /// `group:{ulid}` hash key; this field is the *configured* value
-    /// (used to compute fresh expiries on refresh / sliding bumps).
+    /// Configured TTL on the group record, in seconds. `0` means
+    /// never expire — no TTL is armed (ADR-0040); nothing reaps the
+    /// group but an explicit delete or a patch back to a positive
+    /// value. For a positive value the actual remaining lifetime
+    /// tracks via the Valkey `EXPIRE` set on the `group:{ulid}` hash
+    /// key; this field is the *configured* value (used to compute
+    /// fresh expiries on refresh / sliding bumps).
     pub ttl_seconds: u64,
     /// When `true`, the group's TTL is bumped to `ttl_seconds` on
     /// every successful route match in dispatch. Implicit groups
@@ -310,8 +313,7 @@ impl Registry {
             last_activity_at: None,
         };
         write_group(&mut bucket, &group)?;
-        bucket.set_ttl(&format!("group:{}", group.id), group.ttl_seconds)?;
-        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
+        arm_group_ttls(&mut bucket, &group.id, &group.name, group.ttl_seconds)?;
         Ok(group)
     }
 
@@ -345,10 +347,12 @@ impl Registry {
     }
 
     /// Patch a subset of mutable group fields. `ttl_seconds = Some(s)`
-    /// validates against `MAX_GROUP_TTL_SECONDS` and re-arms the
-    /// Valkey TTL; `sliding_ttl = Some(b)` flips the flag;
-    /// `callout_enabled = Some(b)` flips outbound-callback opt-in (ADR-0034).
-    /// Rename and owner-transfer aren't supported in this slice.
+    /// validates (`0` = never expire, otherwise
+    /// `1..=MAX_GROUP_TTL_SECONDS`, ADR-0040) and re-arms the Valkey
+    /// TTL — arming `0` clears it; `sliding_ttl = Some(b)` flips the
+    /// flag; `callout_enabled = Some(b)` flips outbound-callback
+    /// opt-in (ADR-0034). Rename and owner-transfer aren't supported
+    /// in this slice.
     pub fn patch_group(
         &self,
         group_id: &str,
@@ -366,8 +370,7 @@ impl Registry {
                 "ttl_seconds",
                 ttl.to_string().into_bytes(),
             )?;
-            bucket.set_ttl(&format!("group:{group_id}"), ttl)?;
-            bucket.set_ttl(&format!("group:by-name:{}", group.name), ttl)?;
+            arm_group_ttls(&mut bucket, group_id, &group.name, ttl)?;
         }
         if let Some(flag) = sliding_ttl {
             group.sliding_ttl = flag;
@@ -425,7 +428,17 @@ impl Registry {
             &format!("group:by-name:{new_name}"),
             group_id.as_bytes().to_vec(),
         )?;
-        bucket.set_ttl(&format!("group:by-name:{new_name}"), group.ttl_seconds)?;
+        // Only the new by-name key gets armed here, from the
+        // configured value — the group record keeps its remaining
+        // TTL (so a rename doesn't extend a fixed-window group's
+        // lifetime; the by-name index may outlive the record, which is
+        // the pre-existing behavior). 0 = never expire: carry the
+        // no-expiry state to the new key (ADR-0040).
+        arm_group_ttl(
+            &mut bucket,
+            &format!("group:by-name:{new_name}"),
+            group.ttl_seconds,
+        )?;
         // Denormalized group_name on every route in the group.
         for route in self.list_routes_in_group(&mut bucket, &group_id)? {
             bucket.hash_set(
@@ -455,8 +468,12 @@ impl Registry {
         if !group.sliding_ttl {
             return Ok(false);
         }
-        bucket.set_ttl(&format!("group:{group_id}"), group.ttl_seconds)?;
-        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
+        // Sliding is a stored no-op on a never-expiring group
+        // (ADR-0040): there is no expiry to re-arm.
+        if group.ttl_seconds == 0 {
+            return Ok(false);
+        }
+        arm_group_ttls(&mut bucket, group_id, &group.name, group.ttl_seconds)?;
         Ok(true)
     }
 
@@ -489,12 +506,19 @@ impl Registry {
     }
 
     /// Reset the group's Valkey TTL to its configured `ttl_seconds`.
-    /// Cheap; used by the explicit refresh endpoint.
+    /// Cheap; used by the explicit refresh endpoint. Rejected on a
+    /// never-expiring group (`ttl_seconds: 0`, ADR-0040) — there is
+    /// nothing to bump, and a silent no-op would suggest the call did
+    /// something.
     pub fn refresh_group(&self, group_id: &str) -> Result<Group, RegistryError> {
         let mut bucket = self.bucket()?;
         let group = self.read_group(&mut bucket, group_id)?;
-        bucket.set_ttl(&format!("group:{group_id}"), group.ttl_seconds)?;
-        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
+        if group.ttl_seconds == 0 {
+            return Err(RegistryError::InvalidTtl(
+                "cannot refresh a group that never expires (ttl_seconds: 0)".into(),
+            ));
+        }
+        arm_group_ttls(&mut bucket, group_id, &group.name, group.ttl_seconds)?;
         Ok(group)
     }
 
@@ -707,8 +731,7 @@ impl Registry {
             last_activity_at: None,
         };
         write_group(bucket, &group)?;
-        bucket.set_ttl(&format!("group:{}", group.id), group.ttl_seconds)?;
-        bucket.set_ttl(&format!("group:by-name:{}", group.name), group.ttl_seconds)?;
+        arm_group_ttls(bucket, &group.id, &group.name, group.ttl_seconds)?;
         Ok(group)
     }
 
@@ -1202,21 +1225,45 @@ fn strip_route_indexes(bucket: &mut Bucket, route: &Route) -> Result<(), Registr
     Ok(())
 }
 
-/// Validate a configured TTL against the project-wide `MAX_GROUP_TTL_SECONDS`
-/// and reject zero (which would mean "expire immediately" — almost
-/// certainly a misuse).
+/// Validate a configured TTL. `0` means "never expire" — no TTL is
+/// armed at all (ADR-0040); any other value must fall in
+/// `1..=MAX_GROUP_TTL_SECONDS` per the storage-model bounds table.
 fn normalize_ttl(ttl_seconds: u64) -> Result<u64, RegistryError> {
-    if ttl_seconds == 0 {
-        return Err(RegistryError::InvalidTtl(
-            "ttl_seconds must be positive".into(),
-        ));
-    }
     if ttl_seconds > MAX_GROUP_TTL_SECONDS {
         return Err(RegistryError::InvalidTtl(format!(
             "ttl_seconds {ttl_seconds} exceeds max {MAX_GROUP_TTL_SECONDS}",
         )));
     }
     Ok(ttl_seconds)
+}
+
+/// Arm the group TTL on one key. Every group-TTL arming — create, both
+/// patch directions, rename, the sliding bump — routes through here
+/// (ADR-0040) so a stored `ttl_seconds == 0` can never reach
+/// `EXPIRE`: Valkey treats `EXPIRE key 0` as "delete the key now".
+/// The 0 case clears any armed TTL (`PERSIST`) instead of skipping
+/// the call — skipping would leave a previously armed TTL running and
+/// the group would still die on schedule.
+fn arm_group_ttl(bucket: &mut Bucket, key: &str, ttl_seconds: u64) -> Result<(), RegistryError> {
+    if ttl_seconds == 0 {
+        bucket.clear_ttl(key)?;
+    } else {
+        bucket.set_ttl(key, ttl_seconds)?;
+    }
+    Ok(())
+}
+
+/// Arm the TTL on both keys that carry a group's expiry: the record
+/// and the by-name index.
+fn arm_group_ttls(
+    bucket: &mut Bucket,
+    group_id: &str,
+    name: &str,
+    ttl_seconds: u64,
+) -> Result<(), RegistryError> {
+    arm_group_ttl(bucket, &format!("group:{group_id}"), ttl_seconds)?;
+    arm_group_ttl(bucket, &format!("group:by-name:{name}"), ttl_seconds)?;
+    Ok(())
 }
 
 fn write_route(bucket: &mut Bucket, route: &Route) -> Result<(), RegistryError> {

@@ -189,7 +189,8 @@ pub struct CreateGroupArgs {
     #[arg(long, value_enum, default_value = "yaml")]
     pub format: SpecFormatArg,
     /// TTL in seconds. Default is the host's `default_group_ttl`
-    /// (24h). Must not exceed the configured maximum (30d).
+    /// (24h). `0` means the group never expires; positive values
+    /// must not exceed the configured maximum (30d).
     /// Ignored when `--from-file` is supplied — the spec's `ttl`
     /// field wins there.
     #[arg(long)]
@@ -243,7 +244,8 @@ pub struct UpdateGroupArgs {
     /// must be a valid DNS label — and renaming changes the served base URL.
     #[arg(long)]
     pub rename: Option<String>,
-    /// New TTL in seconds. The Valkey TTL is reset to this on update.
+    /// New TTL in seconds. The Valkey TTL is reset to this on update;
+    /// `0` means the group never expires.
     #[arg(long)]
     pub ttl_seconds: Option<u64>,
     /// Enable sliding TTL.

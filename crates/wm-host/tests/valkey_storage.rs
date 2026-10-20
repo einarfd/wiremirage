@@ -96,6 +96,76 @@ macro_rules! decl_cases {
 
 wm_host::storage_cases!(decl_cases);
 
+// -- ADR-0040: ttl_seconds 0 arms no expiry, and patching to 0 clears it --
+
+#[test]
+fn zero_ttl_group_arms_no_expiry_and_patch_to_zero_clears_armed_ttl() {
+    // ADR-0040, the storage-semantics half that only a real Valkey can
+    // prove, asserted by reading the armed TTL directly:
+    //   (a) create with ttl_seconds 0 → no TTL on either group key;
+    //   (b) create with a positive TTL, patch to 0 → the armed TTL is
+    //       *cleared* (PERSIST) on both keys, not merely left alone;
+    //   (c) rename of a 0-TTL group → the new by-name key carries the
+    //       no-expiry state.
+    let storage = Storage::valkey(&shared().url).expect("connect to valkey");
+    let registry = Registry::new(storage.clone());
+    let mut bucket = storage.admin_bucket().expect("admin bucket");
+    let name = format!("never-{}", ulid::Ulid::generate()).to_lowercase();
+
+    // (a) create with 0 — neither key may carry a TTL.
+    let group = registry
+        .create_group(wm_host::registry::NewGroup {
+            name: name.clone(),
+            owner_id: "owner".into(),
+            ttl_seconds: Some(0),
+            sliding_ttl: None,
+        })
+        .expect("create never-expiring group");
+    let record_key = format!("group:{}", group.id);
+    assert_eq!(bucket.remaining_ttl(&record_key).unwrap(), None);
+    assert_eq!(
+        bucket
+            .remaining_ttl(&format!("group:by-name:{name}"))
+            .unwrap(),
+        None
+    );
+
+    // (b) patch 0 → positive arms both keys, positive → 0 clears both.
+    registry
+        .patch_group(&group.id, Some(3600), None, None)
+        .expect("patch to positive");
+    assert!(bucket.remaining_ttl(&record_key).unwrap().is_some());
+    assert!(
+        bucket
+            .remaining_ttl(&format!("group:by-name:{name}"))
+            .unwrap()
+            .is_some()
+    );
+    registry
+        .patch_group(&group.id, Some(0), None, None)
+        .expect("patch to zero");
+    assert_eq!(bucket.remaining_ttl(&record_key).unwrap(), None);
+    assert_eq!(
+        bucket
+            .remaining_ttl(&format!("group:by-name:{name}"))
+            .unwrap(),
+        None
+    );
+
+    // (c) rename carries the no-expiry state to the new by-name key.
+    let new_name = format!("{}-renamed", name);
+    registry
+        .rename_group(&name, &new_name)
+        .expect("rename never-expiring group");
+    assert_eq!(bucket.remaining_ttl(&record_key).unwrap(), None);
+    assert_eq!(
+        bucket
+            .remaining_ttl(&format!("group:by-name:{new_name}"))
+            .unwrap(),
+        None
+    );
+}
+
 // -- End-to-end smoke: state persists across requests over HTTP -------------
 
 #[tokio::test]
