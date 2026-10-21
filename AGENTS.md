@@ -127,6 +127,13 @@ The suite is a pyramid and each tier earns its keep:
   surface in the same change.
 - No silent fallbacks in configuration. Missing required config fails fast at
   startup with a message naming what to set.
+- Deferred dependency majors live in the `.github/dependabot.yml` ignore
+  rules, each with a comment saying why and what would clear it. Before
+  taking a major bump — yours or an agent's idea — check there first:
+  e.g. minijinja stays on 2.x (3.x is a migration tracked in issue #75),
+  and the js-engine builder stays on the Node LTS line. The `audit`
+  CI job fails on any advisory or unmaintained workspace dep, so a
+  deferred major can never silently become a security problem.
 - Apache-2.0. New files need no license header.
 
 ### Two rules that keep the surfaces honest
