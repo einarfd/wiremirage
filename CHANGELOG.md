@@ -9,6 +9,40 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-10-23
+
+### Added
+
+- **Non-expiring groups, opt-in: `--ttl-seconds 0` / `ttl_seconds: 0`** —
+  [ADR-0040](docs/adr/0040-opt-in-non-expiring-groups.md). A group with a TTL of `0`
+  never expires. Sliding TTL only keeps an *in-use* group alive, and
+  `refresh` re-arms against the configured TTL — before this, an idle group
+  past 30d died and the only workaround was a cron job calling refresh. `0`
+  is accepted on `wm groups create/update --ttl-seconds 0`, the group-spec
+  `ttl_seconds` field (exports round-trip: a never-expiring group re-imports
+  as one), and the MCP group tools. Ephemerality stays the default.
+
+### Fixed
+
+- Invalid group TTLs are reported as validation errors (REST 4xx, MCP tool
+  errors) rather than 500s.
+- Dependency bumps for RustSec advisories: wasmtime 48.0.7 and
+  rustls-webpki 0.103.16; ctutils 0.4.5 (timing side channel).
+
+### Operations
+
+- **CI asserts the published image's OS trust-store floor.** Outbound TLS
+  (OIDC token exchange, GitHub OAuth, handler callbacks) validates against
+  the image's `ca-certificates` package, and rustls checks neither OCSP nor
+  CRLs — the store *is* the revocation story. Publishing now fails unless
+  the built image carries `ca-certificates >= 20250419~deb12u2` (Debian
+  DLA-4845-1, which removed the two roots cross-signing the compromised
+  eMudhra intermediates), which also catches the GHA layer cache re-shipping
+  a stale apt layer. Docs gained an
+  [Outbound TLS trust](docs/configuration.md#outbound-tls-trust) section:
+  the `SSL_CERT_FILE` / `SSL_CERT_DIR` escape hatch for private-CA IdPs, and
+  the no-revocation-checking caveat.
+
 ## [0.1.3] — 2026-09-03
 
 ### Changed
@@ -328,7 +362,8 @@ First public release.
 - Configuration fails fast at startup with a message naming what to set,
   rather than falling back silently.
 
-[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/einarfd/wiremirage/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/einarfd/wiremirage/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/einarfd/wiremirage/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/einarfd/wiremirage/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/einarfd/wiremirage/compare/v0.1.0...v0.1.1
