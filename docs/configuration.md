@@ -292,6 +292,29 @@ On top of the host capability, **each group opts in** via its
 the **resolved IP**, redirects aren't followed, and delivery is single-attempt
 best-effort. Outcomes land in a per-group callback journal.
 
+## Outbound TLS trust
+
+The host makes a small set of outbound HTTPS calls — OIDC discovery and token
+exchange, the GitHub OAuth token exchange, MCP OAuth registration, and handler
+callbacks (above). All of them validate certificates against the **system
+trust store**, not a root list bundled with the binary. Two consequences:
+
+- **No revocation checking.** rustls consults neither OCSP nor CRLs, so a
+  compromised or distrusted CA stays trusted until its root is removed from
+  the OS store. In the container image that store is Debian's
+  `ca-certificates` package, which does ship root removals — but released
+  image tags are immutable, so when a CA distrust event lands, deployments
+  pinned to an old tag must move to `:main` or the next release to pick it up.
+- **Custom CA.** If your IdP (or a callback target) presents a certificate
+  from a CA that isn't in the system store, point the process at a bundle
+  containing it: `SSL_CERT_FILE=/path/to/ca-bundle.pem` (or
+  `SSL_CERT_DIR=/path/to/certs.d`). These are read by the Linux trust
+  backend and **replace** the system store, so the bundle must carry the
+  public roots as well — start from the image's
+  `/etc/ssl/certs/ca-certificates.crt` and append. This is the only trust
+  knob; there is no per-provider CA setting. The `wm` CLI validates with the
+  same stack on your machine, so the same variables apply to it.
+
 ## Behind a reverse proxy
 
 - `WM_TRUSTED_PROXY=<hostname>` (comma-separated for several) — declares that

@@ -289,5 +289,27 @@ jobs:
         env:
           DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
 
+      # The image's OS trust store is the entire revocation story for
+      # outbound TLS (OIDC token exchange, GitHub OAuth, handler callouts):
+      # rustls checks neither OCSP nor CRLs, so a distrusted CA stays
+      # trusted until its root is gone from the store. The GHA layer cache
+      # can serve a stale `apt-get install ca-certificates` layer across
+      # builds, which would re-ship the pre-DLA-4845-1 store after a
+      # Debian root removal — a security regression, not staleness. Assert
+      # the floor: bookworm's eMudhra-removal update. The compare is `ge`,
+      # so newer packages pass; raise the floor when a removal that matters
+      # lands in Debian.
+      - name: Assert CA store floor (DLA-4845-1)
+        run: |
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          docker pull "$image"
+          installed="$(docker run --rm --entrypoint dpkg-query "$image" \
+            -W -f='${Version}' ca-certificates)"
+          echo "ca-certificates: $installed"
+          dpkg --compare-versions "$installed" ge 20250419~deb12u2 || {
+            echo "::error::ca-certificates $installed predates 20250419~deb12u2 (DLA-4845-1, eMudhra root removal) — the apt layer likely came from the GHA cache"
+            exit 1
+          }
+
       - name: Inspect published image
         run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}

@@ -227,6 +227,13 @@ Then the first-deploy checklist:
   want handlers to be able to call back into your systems, and keep the
   special-use default-deny in place (see
   [configuration](configuration.md#outbound-callbacks--egress)).
+- **Keep the image's CA store current.** Outbound TLS (OIDC token exchange,
+  GitHub OAuth, handler callbacks) validates against the image's OS trust
+  store with no revocation checking — see
+  [configuration](configuration.md#outbound-tls-trust). When a CA is
+  distrusted, the fix is a `ca-certificates` update *in the image*, and
+  released tags are immutable: move to the new release (or `:main`) rather
+  than staying pinned to an old tag.
 - **Think about who can log in.** Mock traffic is unauthenticated by design,
   so anything registered on this instance is world-reachable at its subdomain.
   Don't mock anything whose *responses* are sensitive, and don't put secrets
