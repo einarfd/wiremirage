@@ -4,7 +4,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
@@ -1013,7 +1013,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                     // (see `spawn_streaming_journal`).
                     span.record("outcome", "streaming");
                     let status = head.status;
-                    let headers = head.headers.clone();
+                    // Filter the handler-controlled head headers once:
+                    // the wire gets the sanitized set, the journal
+                    // records the same set plus the dropped names.
+                    let filtered = filter_handler_headers(&head.headers);
                     // ADR-0024: TTFB and the dispatch-metric record
                     // both stamp NOW (head delivery is the dispatch
                     // boundary for streaming; the chunk pump that
@@ -1031,7 +1034,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                     // closes on the streaming path.
                     span.record("streaming.head_latency_ms", head_latency_ms);
                     let head_delivered_at = std::time::Instant::now();
-                    let resp = build_streaming_response(head, chunk_rx, &trace_id);
+                    let resp = build_streaming_response(head, &filtered, chunk_rx, &trace_id);
                     // Hand the in-flight slot off to the streaming
                     // task — `wm.dispatch.active_requests` should
                     // count this dispatch for as long as the stream
@@ -1050,7 +1053,8 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                             started,
                             head_delivered_at,
                             status,
-                            headers,
+                            headers: filtered.sent,
+                            dropped_headers: filtered.dropped,
                             in_flight,
                         },
                     );
@@ -1081,13 +1085,14 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     let (response_envelope, dropped_response_headers, axum_response, error_msg, outcome_label) =
         match &call_result {
             Ok(wit_response) => {
-                let (envelope, dropped) = summarize_response(
-                    wit_response.status,
-                    &wit_response.headers,
-                    &wit_response.body,
-                );
-                let axum = build_axum_response_owned(wit_response);
-                (envelope, dropped, axum, None, "ok")
+                // Filter the handler-controlled headers once: the wire
+                // response and the journal envelope both come from the
+                // same pass, so the journal shows what was sent.
+                let filtered = filter_handler_headers(&wit_response.headers);
+                let envelope =
+                    summarize_response(wit_response.status, &filtered, &wit_response.body);
+                let axum = build_axum_response_owned(wit_response, &filtered);
+                (envelope, filtered.dropped, axum, None, "ok")
             }
             Err(e) => {
                 let msg = friendly_handler_error(e);
@@ -1306,35 +1311,18 @@ fn build_request_envelope(
     }
 }
 
-/// Decide which response headers the host will *send* (the journal
-/// records the same set the SUT sees) and which it will *drop* (per
-/// `reserved_response_header`). Returns the journal envelope and the
-/// list of dropped header names.
-fn summarize_response(
-    status: u16,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> (ResponseEnvelope, Vec<String>) {
-    let mut kept = Vec::with_capacity(headers.len());
-    let mut dropped = Vec::new();
-    for (name, value) in headers {
-        if reserved_response_header(name) {
-            dropped.push(name.clone());
-        } else {
-            kept.push((name.clone(), value.clone()));
-        }
-    }
+/// Build the journal envelope for a handled dispatch. `filtered` comes
+/// from `filter_handler_headers`, so the journal records exactly the
+/// headers the client received — the same set the SUT sees.
+fn summarize_response(status: u16, filtered: &FilteredHeaders, body: &[u8]) -> ResponseEnvelope {
     let (body_bytes, original_size, truncated) = truncate_body(body.to_vec(), HANDLED_BODY_LIMIT);
-    (
-        ResponseEnvelope {
-            status,
-            headers: kept,
-            body: body_bytes,
-            body_truncated: truncated,
-            original_body_size: original_size,
-        },
-        dropped,
-    )
+    ResponseEnvelope {
+        status,
+        headers: filtered.sent.clone(),
+        body: body_bytes,
+        body_truncated: truncated,
+        original_body_size: original_size,
+    }
 }
 
 /// Maximum size of a mock-dispatch request body. Per storage-model.md's
@@ -1420,27 +1408,123 @@ fn form_decode(s: &str) -> String {
         .unwrap_or(plus_decoded)
 }
 
-fn build_axum_response_owned(resp: &WitResponse) -> Response {
+fn build_axum_response_owned(resp: &WitResponse, filtered: &FilteredHeaders) -> Response {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = Bytes::copy_from_slice(&resp.body);
 
-    let mut builder = Response::builder().status(status);
-    for (name, value) in &resp.headers {
-        if reserved_response_header(name) {
-            continue;
-        }
-        builder = builder.header(name, value);
-    }
-    builder = builder.header(header::CONTENT_LENGTH, body.len());
-    builder
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_LENGTH, body.len())
         .body(Body::from(body))
-        .expect("response build should not fail")
+        .expect("response build should not fail");
+    apply_wire_headers(response.headers_mut(), &filtered.wire);
+    response
 }
 
-fn reserved_response_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+/// Handler-controlled response headers after one filtering pass, shared
+/// by the wire response and the journal so the two can't drift. Header
+/// names and values are handler-controlled and mock traffic is
+/// unauthenticated, so a handler echoing request data into a header
+/// must not fail the response build — the buffered path used to panic
+/// the request task on exactly that.
+struct FilteredHeaders {
+    /// Wire-ready headers: reserved names dropped, unrepresentable
+    /// names dropped, values sanitized, repeats preserved (the WIT
+    /// contract presents multi-valued headers as multiple entries, and
+    /// `set-cookie`/`Link`/`Vary`/`WWW-Authenticate` rely on it).
+    wire: HeaderMap,
+    /// The pairs actually sent (parsed lowercase name, sanitized
+    /// value) — what the journal records.
+    sent: Vec<(String, String)>,
+    /// Names dropped (reserved or unrepresentable), for the journal's
+    /// `dropped_response_headers`.
+    dropped: Vec<String>,
+}
+
+/// Filter handler-controlled response headers once, for both the wire
+/// and the journal. Reserved headers are dropped; unrepresentable
+/// names are dropped with a warning; values carrying control bytes are
+/// sanitized (with a warning); values that still won't parse are
+/// dropped with a warning.
+fn filter_handler_headers(pairs: &[(String, String)]) -> FilteredHeaders {
+    let mut wire = HeaderMap::with_capacity(pairs.len());
+    let mut sent = Vec::with_capacity(pairs.len());
+    let mut dropped = Vec::new();
+    for (name, value) in pairs {
+        // Parse first: a parsed `HeaderName` is normalized lowercase, so
+        // the reserved check below needs no extra allocation.
+        let Ok(name) = HeaderName::try_from(name.as_str()) else {
+            tracing::warn!(header = %name, "handler set a response header with an invalid name; dropping it");
+            dropped.push(name.clone());
+            continue;
+        };
+        if reserved_response_header(&name) {
+            dropped.push(name.as_str().to_string());
+            continue;
+        }
+        // Fast path: most values parse as-is, no allocation. Only
+        // sanitize when `HeaderValue` rejects the value.
+        let sent_value = match HeaderValue::from_str(value) {
+            Ok(v) => {
+                wire.append(&name, v);
+                value.clone()
+            }
+            Err(_) => {
+                let cleaned = sanitize_header_text(value);
+                match cleaned.parse::<HeaderValue>() {
+                    Ok(v) => {
+                        tracing::warn!(header = %name, "handler set a response header value with control bytes; sanitized it");
+                        wire.append(&name, v);
+                        cleaned
+                    }
+                    Err(_) => {
+                        tracing::warn!(header = %name, "handler set a response header value that is not representable even after sanitizing; dropping it");
+                        dropped.push(name.as_str().to_string());
+                        continue;
+                    }
+                }
+            }
+        };
+        sent.push((name.as_str().to_string(), sent_value));
+    }
+    FilteredHeaders {
+        wire,
+        sent,
+        dropped,
+    }
+}
+
+/// Append a filtered wire `HeaderMap` onto a response. `append` (not
+/// `insert`) so a multi-valued header keeps every value.
+fn apply_wire_headers(headers: &mut HeaderMap, wire: &HeaderMap) {
+    for (name, value) in wire.iter() {
+        headers.append(name, value.clone());
+    }
+}
+
+/// Reduce a handler-controlled string to a value the `http` crate will
+/// accept as a header value: `HeaderValue` rejects control bytes
+/// (< 0x20, except tab) and DEL (0x7f), so those are replaced with a
+/// space — a space keeps words apart ("foo\rbar" must not become
+/// "foobar") and is itself valid in a header value. Printable ASCII,
+/// tab, and non-ASCII UTF-8 (obs-text) pass through, matching
+/// `HeaderValue`'s own validity table.
+fn sanitize_header_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c == '\t' || (c as u32 >= 32 && c as u32 != 127) {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+fn reserved_response_header(name: &HeaderName) -> bool {
     matches!(
-        lower.as_str(),
+        name.as_str(),
         "content-length" | "transfer-encoding" | "connection"
     )
 }
@@ -1449,11 +1533,14 @@ fn reserved_response_header(name: &str) -> bool {
 /// (status + headers) is committed; the body is a stream fed by the
 /// handler's `write-chunk` calls over `chunk_rx`. No `Content-Length`
 /// is set, so hyper uses chunked transfer-encoding and the chunks reach
-/// the client incrementally. Reserved headers are dropped as for
-/// buffered responses; the client-disconnect signal travels back the
-/// other way (dropping `chunk_rx` makes `write-chunk` return false).
+/// the client incrementally. Head headers are handler-controlled and
+/// arrive pre-filtered (`filter_handler_headers`), same as the buffered
+/// path — one unrepresentable header must not fail the whole streamed
+/// response. The client-disconnect signal travels back the other way
+/// (dropping `chunk_rx` makes `write-chunk` return false).
 fn build_streaming_response(
     head: StreamHead,
+    filtered: &FilteredHeaders,
     chunk_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     trace_id: &Option<String>,
 ) -> Response {
@@ -1461,20 +1548,11 @@ fn build_streaming_response(
     let body_stream = ReceiverStream::new(chunk_rx)
         .map(|chunk| Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)));
 
-    let mut builder = Response::builder().status(status);
-    for (name, value) in &head.headers {
-        if reserved_response_header(name) {
-            continue;
-        }
-        builder = builder.header(name, value);
-    }
-    let mut resp = match builder.body(Body::from_stream(body_stream)) {
-        Ok(r) => r,
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("invalid streaming response head: {e}"),
-        ),
-    };
+    let mut resp = Response::builder()
+        .status(status)
+        .body(Body::from_stream(body_stream))
+        .expect("streaming response build should not fail");
+    apply_wire_headers(resp.headers_mut(), &filtered.wire);
     inject_response_trace_id(trace_id, resp.headers_mut());
     resp
 }
@@ -1492,7 +1570,11 @@ struct StreamingJournalCtx {
     /// `wm.streaming.head_latency_ms`. ADR-0024.
     head_delivered_at: std::time::Instant,
     status: u16,
+    /// The response headers actually sent (from `filter_handler_headers`),
+    /// so the journal records the same set the SUT saw.
     headers: Vec<(String, String)>,
+    /// Header names dropped by the filter (reserved or unrepresentable).
+    dropped_headers: Vec<String>,
     /// In-flight slot owned by the streaming dispatch. Dropped when
     /// the streaming-journal task finishes so `wm.dispatch.active_requests`
     /// tracks the live stream, not just the time to head delivery.
@@ -1522,6 +1604,7 @@ fn spawn_streaming_journal(
             head_delivered_at,
             status,
             headers,
+            dropped_headers,
             in_flight,
         } = ctx;
         let _in_flight = in_flight;
@@ -1609,7 +1692,7 @@ fn spawn_streaming_journal(
             duration_ms,
             resources,
             error: error_msg,
-            dropped_response_headers: vec![],
+            dropped_response_headers: dropped_headers,
         };
         if let Err(e) = state.journal().record_handled(entry) {
             tracing::warn!(error = %e, "failed to record streaming journal entry");
@@ -1659,19 +1742,29 @@ fn not_found_response(reason: &str) -> Response {
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response {
+    // The first line rides in the `x-wiremirage-error` header. Handler
+    // error text is attacker-influenced (a handler can throw an error
+    // echoing request data), so clean anything `HeaderValue` rejects
+    // rather than letting the response build fail. The body keeps the
+    // message verbatim.
+    let header_msg = sanitize_header_text(msg.lines().next().unwrap_or(msg));
     Response::builder()
         .status(status)
-        .header(
-            HeaderName::from_static("x-wiremirage-error"),
-            msg.lines().next().unwrap_or(msg),
-        )
+        .header(HeaderName::from_static("x-wiremirage-error"), header_msg)
         .body(Body::from(msg.to_string()))
         .expect("error response build should not fail")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::friendly_handler_error;
+    use axum::http::StatusCode;
+
+    use super::{
+        build_axum_response_owned, build_streaming_response, error_response,
+        filter_handler_headers, friendly_handler_error, sanitize_header_text,
+    };
+    use crate::bindings::wiremirage::handler::http::Response as WitResponse;
+    use crate::host_state::StreamHead;
 
     #[test]
     fn clean_js_error_passes_through() {
@@ -1708,5 +1801,143 @@ mod tests {
             friendly_handler_error(&e),
             "handler exceeded its time budget (epoch deadline)"
         );
+    }
+
+    #[test]
+    fn sanitize_header_text_replaces_control_bytes_with_spaces() {
+        // Replacing (not deleting) keeps words apart: "foo\rbar" must
+        // not collapse into "foobar".
+        assert_eq!(sanitize_header_text("foo\rbar"), "foo bar");
+        assert_eq!(sanitize_header_text("a\x00b\x0bc\x7fd"), "a b c d");
+        assert_eq!(sanitize_header_text("tab\there"), "tab\there");
+        assert_eq!(sanitize_header_text("héllo"), "héllo");
+        assert_eq!(sanitize_header_text(""), "");
+    }
+
+    #[test]
+    fn error_response_survives_control_characters_in_message() {
+        // A handler throwing an error that echoes request data can put
+        // control bytes into the message; the first line rides in the
+        // `x-wiremirage-error` header and must not panic the build.
+        let resp = error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "handler exploded: \x00\x0b\x7f\nsecond line",
+        );
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            resp.headers()["x-wiremirage-error"].to_str().unwrap(),
+            "handler exploded:    "
+        );
+    }
+
+    #[tokio::test]
+    async fn error_response_body_keeps_message_verbatim() {
+        let resp = error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "handler exploded: \x00\x0b\x7f\nsecond line",
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"handler exploded: \x00\x0b\x7f\nsecond line");
+    }
+
+    #[tokio::test]
+    async fn owned_response_drops_invalid_header_names_and_sanitizes_values() {
+        let wit = WitResponse {
+            status: 418,
+            headers: vec![
+                ("x-good".to_string(), "fine".to_string()),
+                ("bad name".to_string(), "dropped".to_string()),
+                ("x-tainted".to_string(), "a\x00b".to_string()),
+            ],
+            body: b"teapot".to_vec(),
+        };
+        let filtered = filter_handler_headers(&wit.headers);
+        let resp = build_axum_response_owned(&wit, &filtered);
+        assert_eq!(resp.status().as_u16(), 418);
+        assert_eq!(resp.headers()["x-good"], "fine");
+        assert!(!resp.headers().contains_key("bad name"));
+        assert_eq!(resp.headers()["x-tainted"], "a b");
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"teapot");
+    }
+
+    #[tokio::test]
+    async fn owned_response_preserves_repeated_headers() {
+        // The WIT contract presents multi-valued headers as multiple
+        // entries; the wire must keep every value, not collapse to the
+        // last one (`insert` would). `set-cookie` is the canonical case.
+        let wit = WitResponse {
+            status: 200,
+            headers: vec![
+                ("set-cookie".to_string(), "a=1".to_string()),
+                ("set-cookie".to_string(), "b=2".to_string()),
+            ],
+            body: Vec::new(),
+        };
+        let filtered = filter_handler_headers(&wit.headers);
+        let resp = build_axum_response_owned(&wit, &filtered);
+        let values: Vec<_> = resp
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(values, ["a=1", "b=2"]);
+        // The journal records both entries too.
+        assert_eq!(
+            filtered.sent,
+            vec![
+                ("set-cookie".to_string(), "a=1".to_string()),
+                ("set-cookie".to_string(), "b=2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_handler_headers_records_what_was_sent() {
+        // The journal must show what the client got: sanitized values,
+        // parsed lowercase names, and every dropped name (reserved and
+        // invalid alike) in `dropped`.
+        let pairs = vec![
+            ("X-Good".to_string(), "fine".to_string()),
+            ("content-length".to_string(), "999".to_string()),
+            ("bad name".to_string(), "dropped".to_string()),
+            ("x-tainted".to_string(), "a\x00b".to_string()),
+        ];
+        let filtered = filter_handler_headers(&pairs);
+        assert_eq!(
+            filtered.sent,
+            vec![
+                ("x-good".to_string(), "fine".to_string()),
+                ("x-tainted".to_string(), "a b".to_string()),
+            ]
+        );
+        assert_eq!(filtered.dropped, vec!["content-length", "bad name"]);
+        assert_eq!(filtered.wire["x-good"], "fine");
+        assert_eq!(filtered.wire["x-tainted"], "a b");
+        assert!(!filtered.wire.contains_key("content-length"));
+        assert!(!filtered.wire.contains_key("bad name"));
+    }
+
+    #[tokio::test]
+    async fn streaming_response_drops_invalid_header_names_and_sanitizes_values() {
+        // The streaming head is as handler-controlled as the buffered
+        // response; one bad header must not fail the whole stream.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        let head = StreamHead {
+            status: 200,
+            headers: vec![
+                ("x-good".to_string(), "fine".to_string()),
+                ("bad name".to_string(), "dropped".to_string()),
+                ("x-tainted".to_string(), "a\x00b".to_string()),
+            ],
+        };
+        let filtered = filter_handler_headers(&head.headers);
+        let resp = build_streaming_response(head, &filtered, rx, &None);
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-good"], "fine");
+        assert!(!resp.headers().contains_key("bad name"));
+        assert_eq!(resp.headers()["x-tainted"], "a b");
     }
 }

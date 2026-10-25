@@ -103,7 +103,7 @@ wm journal list <group> --limit 5
 wm journal show <group>/<n>
 ```
 
-The `error` field is non-empty when the handler trapped or threw; it includes the trap reason. The `handler_logs` array has anything the handler emitted via the host's `log` interface up to the point of failure. The `response` field shows what the host actually sent — useful when the handler succeeded but the headers/body don't match what the SUT expected.
+The `error` field is non-empty when the handler trapped or threw; it includes the trap reason. The `handler_logs` array has anything the handler emitted via the host's `log` interface up to the point of failure. The `response` field shows what the host actually sent — useful when the handler succeeded but the headers/body don't match what the SUT expected. If a header you set is missing from `response.headers`, check the entry's `dropped_response_headers`: reserved headers and names the HTTP layer can't represent are dropped there, and values with control bytes are cleaned before sending.
 
 For dry-run-shaped debugging without involving the SUT or polluting the journal, `wm routes test <group>/<n>` invokes the handler against a synthetic request. State reads see a point-in-time snapshot; state writes land in the snapshot and are discarded after the call:
 

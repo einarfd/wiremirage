@@ -256,9 +256,14 @@ value dropped:
 - `Connection` — managed by the host.
 - `Date` — auto-set if you didn't provide one.
 
-Everything else passes through verbatim, including malformed values
-and non-standard headers — mocks need to be able to simulate real
-APIs' quirks.
+Everything else passes through, including non-standard headers — mocks
+need to be able to simulate real APIs' quirks. Two exceptions, because
+mock traffic is unauthenticated and a handler can echo request data
+into a header: a name the HTTP layer can't represent is dropped (it
+lands in the journal entry's `dropped_response_headers`), and a value
+containing control bytes has them replaced with a space before
+sending. Repeated headers are all sent, and the journal records the
+headers as sent (names lowercased, values cleaned).
 "#;
 
 const STORE: &str = r#"# Store
