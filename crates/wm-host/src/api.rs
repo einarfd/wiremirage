@@ -870,7 +870,7 @@ pub(crate) fn slice_for_page<T: Clone>(
 
 async fn get_route(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     headers: HeaderMap,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<RouteResponse>, ApiError> {
@@ -878,6 +878,11 @@ async fn get_route(
         .routes()
         .registry()
         .get_route_by_slug(&group, number)?;
+    if route.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may read it",
+        ));
+    }
     Ok(Json(RouteResponse::build(
         &route,
         &headers,
