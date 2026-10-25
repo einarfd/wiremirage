@@ -86,9 +86,11 @@ pub fn router() -> Router<AppState> {
         // when ?group= is set, admin-only otherwise (matches the
         // host-wide unmatched read).
         .route("/api/journal/tail", get(tail_journal))
-        // Match probe — read-only diagnostic. Any authenticated user.
+        // Match probe — read-only diagnostic. Owner-or-admin of the
+        // group being probed (probing reveals routes).
         .route("/api/match", get(match_probe))
-        // Unmatched — admin-only (host-wide and may include probing traffic).
+        // Unmatched — non-admins see their own groups' entries; admins
+        // see all (host-wide, may include probing traffic).
         .route("/api/unmatched", get(list_unmatched))
         .route("/api/unmatched/{number}", get(get_unmatched_entry))
         // Groups — owner-or-admin for cross-cutting actions; the
@@ -870,7 +872,7 @@ pub(crate) fn slice_for_page<T: Clone>(
 
 async fn get_route(
     State(state): State<AppState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     headers: HeaderMap,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<RouteResponse>, ApiError> {
@@ -878,6 +880,11 @@ async fn get_route(
         .routes()
         .registry()
         .get_route_by_slug(&group, number)?;
+    if route.owner_id != auth.user_id && !auth.is_admin {
+        return Err(ApiError::forbidden(
+            "only the route's owner or an admin may read it",
+        ));
+    }
     Ok(Json(RouteResponse::build(
         &route,
         &headers,

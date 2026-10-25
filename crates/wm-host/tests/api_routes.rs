@@ -853,6 +853,65 @@ async fn source_endpoint_returns_404_for_unknown_route() {
     assert_eq!(resp.status().as_u16(), 404);
 }
 
+#[tokio::test]
+async fn get_route_is_owner_or_admin() {
+    // Security regression: GET /api/routes/{group}/{number} was the one
+    // route operation without the owner-or-admin gate its siblings
+    // (source, state, patch, delete, dry-run) all enforce — any
+    // authenticated user could read another tenant's route metadata.
+    let h = Harness::start().await;
+    let created: serde_json::Value = h
+        .create_route_body(json!({
+            "methods": ["GET"],
+            "path": "/v1/locked",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await
+        .json()
+        .await
+        .expect("json");
+    let group = created["group"]["name"].as_str().unwrap();
+    let number = created["number"].as_u64().unwrap();
+    let path = format!("/api/routes/{group}/{number}");
+
+    // The owner (the bootstrap admin that created it) can read it.
+    let resp = h.client.get(h.url(&path)).send().await.expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // A non-owner cannot.
+    let (_id, nosey) = h.provision_user("nosey", false);
+    let resp = nosey.get(h.url(&path)).send().await.expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+
+    // An admin can.
+    let (_id, bigboss) = h.provision_user("bigboss", true);
+    let resp = bigboss.get(h.url(&path)).send().await.expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // An unknown route 404s for a non-owner too — the lookup runs
+    // before the gate, so a non-owner can tell existing (403) from
+    // missing (404). ADR-0041 accepts that by design: group names
+    // are observable via mock traffic on subdomains, and 403 is the
+    // actionable answer. Uniform across surfaces (lookup, then gate).
+    let resp = nosey
+        .get(h.url("/api/routes/nope/99"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+
+    // A missing route in an existing group also 404s for a non-owner:
+    // the lookup runs before the gate, so 404 means "no such route"
+    // regardless of who owns the group (ADR-0041).
+    let resp = nosey
+        .get(h.url(&format!("/api/routes/{group}/99")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
 // -- Auth -------------------------------------------------------------------
 
 #[tokio::test]

@@ -1,6 +1,8 @@
 # ADR-0011: Route ownership and authorization policy
 
-**Status:** Accepted
+**Status:** Accepted. Read policy superseded by [0041-owner-or-admin-reads.md](0041-owner-or-admin-reads.md); owner-write still stands.
+
+> *2026-10-25:* the read half of this decision (others-read) was replaced by [0041-owner-or-admin-reads.md](0041-owner-or-admin-reads.md) after [0030-virtual-host-routing.md](0030-virtual-host-routing.md) made the host multi-tenant. Reads are now owner-or-admin. The text below is the original record and is left as written.
 
 **Context:** With multiple authenticated users sharing a WireMirage instance ([0010-oauth-oidc.md](0010-oauth-oidc.md)), we need a policy for who can do what to whose routes and groups. The policy options form a spectrum:
 
