@@ -568,11 +568,9 @@ pub(crate) async fn create_route_core(
     // Tenancy gate (ADR-0030): a route may only be added to an *existing*
     // group you own (or as admin). The group is the tenancy boundary, so
     // without this any authed user could inject a route into another tenant's
-    // group — it would serve on that group's subdomain, stay invisible to the
-    // owner (route lists are owner-scoped), and grant the injector read access
-    // to the group's whole journal (journal read is "admin or owns a route in
-    // the group"). Creating a brand-new named group or an implicit one (group
-    // omitted) stays open to everyone.
+    // group — it would serve on that group's subdomain and stay invisible to
+    // the owner (route lists are owner-scoped). Creating a brand-new named
+    // group or an implicit one (group omitted) stays open to everyone.
     //
     // A group you don't own returns the SAME `not_found` as a missing one
     // (per rest-api.md `POST /api/routes`): group names are a global
@@ -1587,22 +1585,12 @@ struct ListUnmatchedResponse {
     next_before: Option<u64>,
 }
 
-/// `true` if the caller is admin or owns at least one route in
-/// `group_id`. Non-admin members of a group can read its journal —
-/// admin-only would lock out the very users who created the routes.
-fn caller_can_read_journal(
-    state: &AppState,
-    auth: &AuthContext,
-    group_id: &str,
-) -> Result<bool, ApiError> {
-    if auth.is_admin {
-        return Ok(true);
-    }
-    let owned = state
-        .routes()
-        .registry()
-        .list_routes_by_owner(&auth.user_id)?;
-    Ok(owned.iter().any(|r| r.group_id == group_id))
+/// `true` if the caller is admin or owns `group`. ADR-0041: group-scoped
+/// reads — journal, callbacks, live tail — check the group's owner, not
+/// route ownership, so a group owner who deleted all their routes can
+/// still read the group's remaining journal entries.
+fn caller_can_read_journal(auth: &AuthContext, group: &Group) -> bool {
+    auth.is_admin || group.owner_id == auth.user_id
 }
 
 /// Groups whose unmatched records the caller may see (ADR-0030 SemFLIP).
@@ -1654,9 +1642,9 @@ async fn list_journal(
         .registry()
         .read_group_by_ref(&group)
         .map_err(|_| ApiError::not_found())?;
-    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+    if !caller_can_read_journal(&auth, &group_record) {
         return Err(ApiError::forbidden(
-            "must be an admin or own a route in this group to read its journal",
+            "must be the group's owner or an admin to read its journal",
         ));
     }
     let filter = build_journal_filter_from_query(
@@ -1754,9 +1742,9 @@ async fn get_journal_entry(
         .registry()
         .read_group_by_ref(&group)
         .map_err(|_| ApiError::not_found())?;
-    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+    if !caller_can_read_journal(&auth, &group_record) {
         return Err(ApiError::forbidden(
-            "must be an admin or own a route in this group to read its journal",
+            "must be the group's owner or an admin to read its journal",
         ));
     }
     let entry = state.journal().get(&group_record.id, number)?;
@@ -1790,10 +1778,10 @@ async fn list_callbacks(
         .registry()
         .read_group_by_ref(&group)
         .map_err(|_| ApiError::not_found())?;
-    // Same gate as the request journal: admin or owns a route in the group.
-    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+    // Same gate as the request journal: group owner or admin (ADR-0041).
+    if !caller_can_read_journal(&auth, &group_record) {
         return Err(ApiError::forbidden(
-            "must be an admin or own a route in this group to read its callbacks",
+            "must be the group's owner or an admin to read its callbacks",
         ));
     }
     let cursor = ListCursor {
@@ -1820,9 +1808,9 @@ async fn get_callback_entry(
         .registry()
         .read_group_by_ref(&group)
         .map_err(|_| ApiError::not_found())?;
-    if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+    if !caller_can_read_journal(&auth, &group_record) {
         return Err(ApiError::forbidden(
-            "must be an admin or own a route in this group to read its callbacks",
+            "must be the group's owner or an admin to read its callbacks",
         ));
     }
     let entry = state.journal().get_callback(&group_record.id, number)?;
@@ -2480,9 +2468,9 @@ async fn tail_journal(
             .registry()
             .read_group_by_ref(group_ref)
             .map_err(|_| ApiError::not_found())?;
-        if !caller_can_read_journal(&state, &auth, &group_record.id)? {
+        if !caller_can_read_journal(&auth, &group_record) {
             return Err(ApiError::forbidden(
-                "must be an admin or own a route in this group to tail its journal",
+                "must be the group's owner or an admin to tail its journal",
             ));
         }
     } else if !auth.is_admin {
