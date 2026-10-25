@@ -38,6 +38,7 @@ const SECRET: &[u8; 32] = b"this-is-a-thirty-two-byte-secret";
 struct Harness {
     addr: String,
     server: tokio::task::JoinHandle<()>,
+    storage: Storage,
     _mock_github: MockGithub,
 }
 
@@ -135,7 +136,7 @@ async fn start(allow_users: Vec<String>, admin_users: Vec<String>) -> Harness {
     };
 
     let state = AppState::new(runtime, routes, auth, journal)
-        .with_sessions(SessionStore::new(storage, SECRET).expect("session store"))
+        .with_sessions(SessionStore::new(storage.clone(), SECRET).expect("session store"))
         .with_github_oauth(github);
     let app = router(state);
 
@@ -149,6 +150,7 @@ async fn start(allow_users: Vec<String>, admin_users: Vec<String>) -> Harness {
     Harness {
         addr,
         server,
+        storage,
         _mock_github: mock_github,
     }
 }
@@ -266,6 +268,63 @@ async fn full_callback_flow_mints_session_and_creates_user() {
     assert!(
         !cookie.is_empty(),
         "session cookie carries a non-empty value"
+    );
+}
+
+#[tokio::test]
+async fn callback_with_poisoned_state_record_falls_back_to_safe_next() {
+    // Defense in depth: `start_github` sanitizes `next` at entry, but
+    // `consume_oauth_state` re-validates whatever the state record
+    // actually holds before redirecting. Poison the record directly —
+    // the way a stale record, a storage-layer write, or a future
+    // regression could — and the callback must still refuse to send
+    // the user off-host.
+    let h = start(vec![MOCK_LOGIN.to_string()], vec![]).await;
+    let client = no_redirect_client();
+
+    let start_resp = client
+        .get(url(&h, "/auth/start/github?next=/ui/groups"))
+        .send()
+        .await
+        .expect("send start");
+    assert_eq!(start_resp.status(), 303);
+    let location = start_resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let state = reqwest::Url::parse(location)
+        .unwrap()
+        .query_pairs()
+        .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+        .expect("state in authorize URL");
+
+    // Overwrite the server-side state record with an unsafe target.
+    let mut bucket = h.storage.admin_bucket().expect("admin bucket");
+    bucket
+        .set(&format!("oauth_state:{state}"), b"/\\evil.com".to_vec())
+        .expect("poison state record");
+
+    let cb = client
+        .get(url(
+            &h,
+            &format!("/auth/callback?code=fakecode&state={state}"),
+        ))
+        .send()
+        .await
+        .expect("send callback");
+    assert_eq!(
+        cb.status(),
+        303,
+        "callback should 303 on success; got {} body: {}",
+        cb.status(),
+        cb.text().await.unwrap_or_default()
+    );
+    assert_eq!(
+        cb.headers().get("location").unwrap().to_str().unwrap(),
+        "/ui/",
+        "a poisoned next in the state record falls back to /ui/"
     );
 }
 

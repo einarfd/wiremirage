@@ -70,9 +70,11 @@ const DEFAULT_POST_LOGIN_PATH: &str = "/ui/";
 /// - must not contain a backslash anywhere — browsers treat `\` as `/`
 ///   for special schemes (WHATWG URL), so a target like `/\evil.com`
 ///   would otherwise become the protocol-relative `//evil.com`;
-/// - must be printable ASCII only — control characters would make the
-///   `Location` header invalid, and `axum::response::Redirect` builds a
-///   `HeaderValue` from the target.
+/// - must be printable ASCII only (bytes 0x20–0x7E), full stop.
+///   `axum::response::Redirect` builds a `HeaderValue` from the
+///   target and control bytes would make it invalid; rather than
+///   reason about which other bytes are safe, the allowlist rejects
+///   everything outside printable ASCII.
 ///
 /// Anything else is rejected (callers fall back to
 /// [`DEFAULT_POST_LOGIN_PATH`]).
@@ -88,8 +90,9 @@ fn sanitize_next(next: Option<&str>) -> Option<&str> {
 #[derive(Debug, Deserialize)]
 struct LoginPageQuery {
     /// Post-login redirect target carried through from the original
-    /// `/ui/*` navigation. Validated as host-relative when the
-    /// form posts (see `password_login`).
+    /// `/ui/*` navigation. Validated as host-relative both when the
+    /// page renders (see `login_page`) and when the form posts (see
+    /// `password_login`).
     next: Option<String>,
     /// Set by the logout redirect; renders a "signed out" notice.
     signed_out: Option<String>,
@@ -924,11 +927,13 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_next_rejects_control_characters() {
+    fn sanitize_next_rejects_non_printable_ascii() {
         // Control bytes would make the Location header invalid.
         assert_eq!(sanitize_next(Some("/\nevil")), None);
         assert_eq!(sanitize_next(Some("/\x00")), None);
         assert_eq!(sanitize_next(Some("/\x7fevil")), None);
+        // Non-ASCII (é) is rejected by the same printable-ASCII
+        // allowlist, not because it is a control character.
         assert_eq!(sanitize_next(Some("/ui/\u{e9}")), None);
     }
 }
