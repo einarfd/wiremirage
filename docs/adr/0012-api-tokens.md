@@ -2,6 +2,8 @@
 
 **Status:** Accepted
 
+> *2026-10-25:* the "token compromise is bounded by user permissions" consequence below assumes [0011-route-ownership.md](0011-route-ownership.md)'s others-read policy. Under [0041-owner-or-admin-reads.md](0041-owner-or-admin-reads.md), a leaked token reaches only the user's own groups and routes. The text below is the original record and is left as written.
+
 **Context:** Authentication via OAuth ([0010-oauth-oidc.md](0010-oauth-oidc.md)) gives logged-in users a session cookie that authenticates UI requests. That cookie is appropriate for a browser session — short-lived, refreshed on activity, scoped to the device that logged in.
 
 It's the wrong shape for programmatic access:
