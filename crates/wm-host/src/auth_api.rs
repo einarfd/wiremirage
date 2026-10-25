@@ -60,11 +60,39 @@ pub fn router(state: AppState) -> Router<AppState> {
         ))
 }
 
+/// Where a successful login lands when `next` is absent or unsafe.
+const DEFAULT_POST_LOGIN_PATH: &str = "/ui/";
+
+/// Validate a caller-supplied post-login redirect target, returning it
+/// only when it is a safe host-relative path:
+///
+/// - must start with `/` and must not start with `//` (protocol-relative);
+/// - must not contain a backslash anywhere — browsers treat `\` as `/`
+///   for special schemes (WHATWG URL), so a target like `/\evil.com`
+///   would otherwise become the protocol-relative `//evil.com`;
+/// - must be printable ASCII only (bytes 0x20–0x7E), full stop.
+///   `axum::response::Redirect` builds a `HeaderValue` from the
+///   target and control bytes would make it invalid; rather than
+///   reason about which other bytes are safe, the allowlist rejects
+///   everything outside printable ASCII.
+///
+/// Anything else is rejected (callers fall back to
+/// [`DEFAULT_POST_LOGIN_PATH`]).
+fn sanitize_next(next: Option<&str>) -> Option<&str> {
+    next.filter(|n| {
+        n.starts_with('/')
+            && !n.starts_with("//")
+            && !n.contains('\\')
+            && n.bytes().all(|b| (32..=126).contains(&b))
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginPageQuery {
     /// Post-login redirect target carried through from the original
-    /// `/ui/*` navigation. Validated as host-relative when the
-    /// form posts (see `password_login`).
+    /// `/ui/*` navigation. Validated as host-relative both when the
+    /// page renders (see `login_page`) and when the form posts (see
+    /// `password_login`).
     next: Option<String>,
     /// Set by the logout redirect; renders a "signed out" notice.
     signed_out: Option<String>,
@@ -83,9 +111,7 @@ async fn login_page(State(state): State<AppState>, Query(q): Query<LoginPageQuer
         .oidc()
         .map(|p| p.config.display_name.clone())
         .unwrap_or_default();
-    let next = q
-        .next
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"));
+    let next = sanitize_next(q.next.as_deref()).map(str::to_string);
     let signed_out = q.signed_out.is_some();
     crate::ui::render(
         &state,
@@ -200,11 +226,7 @@ async fn password_login(
             }
         };
 
-    let next = form
-        .next
-        .as_deref()
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-        .unwrap_or("/ui/");
+    let next = sanitize_next(form.next.as_deref()).unwrap_or(DEFAULT_POST_LOGIN_PATH);
 
     let mut redirect: Response = Redirect::to(next).into_response();
     redirect.headers_mut().append(
@@ -343,11 +365,8 @@ async fn start_github(
             .into_response();
     };
 
-    let next = q
-        .next
-        .as_deref()
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-        .unwrap_or("/ui/")
+    let next = sanitize_next(q.next.as_deref())
+        .unwrap_or(DEFAULT_POST_LOGIN_PATH)
         .to_string();
 
     // 32 random bytes encoded urlsafe-base64 ≈ 43 chars; collision-safe.
@@ -580,11 +599,8 @@ async fn start_oidc(
             .into_response();
     };
 
-    let next = q
-        .next
-        .as_deref()
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
-        .unwrap_or("/ui/")
+    let next = sanitize_next(q.next.as_deref())
+        .unwrap_or(DEFAULT_POST_LOGIN_PATH)
         .to_string();
 
     use base64::Engine as _;
@@ -787,9 +803,9 @@ fn consume_oidc_state(state: &AppState, nonce: &str) -> Result<OidcStateRecord, 
     let mut record: OidcStateRecord =
         serde_json::from_slice(&bytes).map_err(|_| StateError::NotFound)?;
     // Re-validate `next` the same way `start_oidc` did.
-    if !record.next.starts_with('/') || record.next.starts_with("//") {
-        record.next = "/ui/".to_string();
-    }
+    record.next = sanitize_next(Some(&record.next))
+        .unwrap_or(DEFAULT_POST_LOGIN_PATH)
+        .to_string();
     Ok(record)
 }
 
@@ -820,11 +836,9 @@ fn consume_oauth_state(state: &AppState, nonce: &str) -> Result<String, StateErr
     // attempt with the same state can't ride along.
     let _ = bucket.delete(&key);
     // Re-validate the `next` path the same way `start_github` did.
-    let safe_next = if next.starts_with('/') && !next.starts_with("//") {
-        next
-    } else {
-        "/ui/".to_string()
-    };
+    let safe_next = sanitize_next(Some(&next))
+        .unwrap_or(DEFAULT_POST_LOGIN_PATH)
+        .to_string();
     Ok(safe_next)
 }
 
@@ -875,4 +889,51 @@ fn derive_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
         "{}/auth/callback",
         public_base_url(headers, trust_forwarded)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_next;
+
+    #[test]
+    fn sanitize_next_accepts_host_relative_paths() {
+        assert_eq!(sanitize_next(Some("/ui/")), Some("/ui/"));
+        assert_eq!(
+            sanitize_next(Some("/ui/routes?page=2")),
+            Some("/ui/routes?page=2")
+        );
+        // Percent-encoded slashes stay on the same host.
+        assert_eq!(
+            sanitize_next(Some("/%2F%2Fevil.com")),
+            Some("/%2F%2Fevil.com")
+        );
+    }
+
+    #[test]
+    fn sanitize_next_rejects_absolute_and_protocol_relative() {
+        assert_eq!(sanitize_next(Some("https://evil.com")), None);
+        assert_eq!(sanitize_next(Some("//evil.com")), None);
+        assert_eq!(sanitize_next(Some("ui/")), None);
+        assert_eq!(sanitize_next(Some("")), None);
+        assert_eq!(sanitize_next(None), None);
+    }
+
+    #[test]
+    fn sanitize_next_rejects_backslash_bypass() {
+        // Browsers normalize `\` to `/` for special schemes, so
+        // `/\evil.com` is a protocol-relative redirect to evil.com.
+        assert_eq!(sanitize_next(Some("/\\evil.com")), None);
+        assert_eq!(sanitize_next(Some("/ui/\\..\\evil.com")), None);
+    }
+
+    #[test]
+    fn sanitize_next_rejects_non_printable_ascii() {
+        // Control bytes would make the Location header invalid.
+        assert_eq!(sanitize_next(Some("/\nevil")), None);
+        assert_eq!(sanitize_next(Some("/\x00")), None);
+        assert_eq!(sanitize_next(Some("/\x7fevil")), None);
+        // Non-ASCII (é) is rejected by the same printable-ASCII
+        // allowlist, not because it is a control character.
+        assert_eq!(sanitize_next(Some("/ui/\u{e9}")), None);
+    }
 }

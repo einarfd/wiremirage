@@ -105,6 +105,41 @@ async fn post_login(
         .expect("post login")
 }
 
+/// As `post_login`, but with a caller-supplied `next` form field so the
+/// post-login redirect target can be exercised.
+async fn post_login_with_next(
+    h: &Harness,
+    client: &Client,
+    email: &str,
+    password: &str,
+    next: &str,
+) -> reqwest::Response {
+    let get = client
+        .get(url(h, "/auth/login"))
+        .send()
+        .await
+        .expect("get login");
+    let csrf_cookie = pick_csrf_set_cookie(&get).expect("csrf set-cookie");
+    let page = get.text().await.unwrap();
+    let csrf_value = extract_csrf_form_value(&page).expect("csrf form value");
+
+    let body = format!(
+        "_csrf={}&email={}&password={}&next={}",
+        urlencode(&csrf_value),
+        urlencode(email),
+        urlencode(password),
+        urlencode(next)
+    );
+    client
+        .post(url(h, "/auth/login/password"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("wm_csrf={csrf_cookie}"))
+        .body(body)
+        .send()
+        .await
+        .expect("post login")
+}
+
 fn pick_csrf_set_cookie(resp: &reqwest::Response) -> Option<String> {
     for v in resp.headers().get_all("set-cookie").iter() {
         let raw = v.to_str().ok()?;
@@ -171,6 +206,40 @@ async fn login_with_valid_password_sets_signed_cookie() {
         "cookie should set SameSite=Lax"
     );
     assert!(cookie.contains("Path=/"), "cookie should scope Path=/");
+}
+
+#[tokio::test]
+async fn login_redirect_target_must_be_host_relative() {
+    // Security regression: the post-login `next` target is attacker-
+    // controlled (login link or form field). Browsers treat `\` as `/`
+    // for special schemes, so `/\evil.com` would otherwise become the
+    // protocol-relative `//evil.com` — an open redirect off the host.
+    // Unsafe targets must fall back to /ui/; a safe one passes through.
+    let h = start("alice@test.example:hunter2").await;
+    let client = no_redirect_client();
+
+    for next in ["/\\evil.com", "//evil.com", "https://evil.com", "/\nevil"] {
+        let resp = post_login_with_next(&h, &client, "alice@test.example", "hunter2", next).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            303,
+            "login should succeed for next={next:?}"
+        );
+        assert_eq!(
+            resp.headers()["location"].to_str().unwrap(),
+            "/ui/",
+            "unsafe next={next:?} must fall back to /ui/"
+        );
+    }
+
+    let resp =
+        post_login_with_next(&h, &client, "alice@test.example", "hunter2", "/ui/groups").await;
+    assert_eq!(resp.status().as_u16(), 303);
+    assert_eq!(
+        resp.headers()["location"].to_str().unwrap(),
+        "/ui/groups",
+        "a safe next passes through unchanged"
+    );
 }
 
 #[tokio::test]
