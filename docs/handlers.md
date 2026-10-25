@@ -249,6 +249,19 @@ transfer-encoding). Setting them from a handler is ignored, and the journal
 entry shows which ones were dropped. `wm capabilities response` lists the
 current set.
 
+Because mock traffic is unauthenticated, the host filters handler-set
+headers before they reach the wire:
+
+- A name the HTTP layer can't represent (a space, a control byte, …) is
+  dropped and listed in the journal entry's `dropped_response_headers`,
+  alongside the reserved ones.
+- A value containing control bytes has them replaced with a space before
+  sending.
+- Repeated headers are all sent — `set-cookie` and friends rely on it.
+
+The journal records the headers as sent (names lowercased, values cleaned),
+so what you read there is what the client actually received.
+
 ## Testing a handler without a SUT
 
 `wm routes test <group>/<n>` (REST `POST /api/routes/{group}/{n}/dry-run`, MCP

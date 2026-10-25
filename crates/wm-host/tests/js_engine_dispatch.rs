@@ -214,6 +214,123 @@ async fn javascript_route_handler_error_surfaces_as_500_with_message() {
     server.abort();
 }
 
+#[tokio::test]
+async fn handler_error_with_control_chars_returns_500_and_survives() {
+    // A handler can throw an error whose message carries control bytes
+    // (e.g. echoing request data). The engine surfaces it as a 500 with
+    // the message in the body; the request must complete and the server
+    // must keep serving. (The host-side sanitization of
+    // handler-controlled header/error text is pinned by the
+    // `server::tests` unit tests and by
+    // `handler_response_with_unsafe_headers_still_serves`.)
+    let source = r#"
+        function handle(req, route, group) {
+          throw new Error("boom\x00\x0b\x7f");
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    for attempt in 1..=2 {
+        let resp = client
+            .post(format!("http://{addr}/v1/echo"))
+            .header(reqwest::header::HOST, format!("{group}.localhost"))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 500, "attempt {attempt}");
+        // Note: this 500 is built by the engine itself, which catches
+        // handler throws and puts the message in the *body* — the host's
+        // `error_response` (and its `x-wiremirage-error` header) is not
+        // involved on this path. The host error path is exercised by
+        // `non_streaming_handler_still_traps_at_the_epoch`, which pins
+        // the header; the host-side sanitization itself is pinned by the
+        // `server::tests` unit tests.
+        let body = resp.text().await.expect("body");
+        assert!(body.contains("boom"), "body was: {body:?}");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn handler_response_with_unsafe_headers_still_serves() {
+    // Security regression: response header names and values are
+    // handler-controlled and mock traffic is unauthenticated. An
+    // invalid header name or a value carrying control bytes used to
+    // panic the response build; now the bad name is dropped and the
+    // value is sanitized.
+    let source = r#"
+        function handle(req, route, group) {
+          return {
+            status: 200,
+            headers: [
+              ["x-tainted", "a\x00b"],
+              ["bad name", "dropped"],
+            ],
+            body: new TextEncoder().encode("ok"),
+          };
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-tainted").unwrap(), "a b");
+    assert!(!resp.headers().contains_key("bad name"));
+    let body = resp.text().await.expect("body");
+    assert_eq!(body, "ok");
+    server.abort();
+}
+
+#[tokio::test]
+async fn handler_response_with_repeated_headers_sends_every_value() {
+    // The WIT contract presents multi-valued headers as multiple
+    // entries, and `set-cookie` is the canonical case. The host must
+    // send both values, not collapse to the last one.
+    let source = r#"
+        function handle(req, route, group) {
+          return {
+            status: 200,
+            headers: [
+              ["set-cookie", "a=1"],
+              ["set-cookie", "b=2"],
+            ],
+            body: new TextEncoder().encode("ok"),
+          };
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let values: Vec<_> = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(values, ["a=1", "b=2"], "repeated header collapsed");
+    let body = resp.text().await.expect("body");
+    assert_eq!(body, "ok");
+    server.abort();
+}
+
 // -- ADR-0021: clock primitives ---------------------------------------------
 
 #[tokio::test]
@@ -463,6 +580,46 @@ async fn javascript_route_streams_chunks_incrementally_over_time() {
     server.abort();
 }
 
+#[tokio::test]
+async fn streaming_response_with_unsafe_headers_still_streams() {
+    // Security regression, streaming twin of
+    // `handler_response_with_unsafe_headers_still_serves`: the
+    // response-stream head's headers are handler-controlled and mock
+    // traffic is unauthenticated. An invalid header name or a value
+    // carrying control bytes used to fail the head build, replacing the
+    // whole streamed response with a 500; now the bad name is dropped
+    // and the value is sanitized.
+    let source = r#"
+        function handle(req, route, group) {
+          const out = host.responseStream({
+            status: 200,
+            headers: [
+              ["x-tainted", "a\x00b"],
+              ["bad name", "dropped"],
+            ],
+          });
+          out.write("ok");
+          out.close();
+        }
+    "#;
+    let Some((addr, group, server)) = start_with_js_route(source).await else {
+        return;
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/echo"))
+        .header(reqwest::header::HOST, format!("{group}.localhost"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-tainted").unwrap(), "a b");
+    assert!(!resp.headers().contains_key("bad name"));
+    let body = resp.text().await.expect("body");
+    assert_eq!(body, "ok");
+    server.abort();
+}
+
 // -- ADR-0022 slice 2: streaming budget ------------------------------------
 
 #[tokio::test]
@@ -537,6 +694,22 @@ async fn non_streaming_handler_still_traps_at_the_epoch() {
         resp.status(),
         500,
         "non-streaming handler over the epoch budget should trap"
+    );
+    // An epoch trap surfaces through the host's error path, which puts
+    // the first line of the message in the `x-wiremirage-error` header.
+    // The header must be present, readable text, and carry no control
+    // bytes (the host sanitizes it before the response build).
+    let header = resp
+        .headers()
+        .get("x-wiremirage-error")
+        .expect("x-wiremirage-error header present on the host error path");
+    let header = header.to_str().expect("header value must be valid text");
+    assert_eq!(header, "handler exceeded its time budget (epoch deadline)");
+    assert!(
+        !header
+            .chars()
+            .any(|c| (c as u32) < 32 && c != '\t' || c as u32 == 127),
+        "header carries control bytes: {header:?}"
     );
     server.abort();
 }
