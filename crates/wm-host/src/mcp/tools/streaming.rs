@@ -152,17 +152,10 @@ fn ensure_streaming_authorized(
             .registry()
             .read_group_by_ref(group_ref)
             .map_err(|_| crate::mcp::error::not_found("group not found"))?;
-        if !auth.is_admin {
-            let owned = state
-                .routes()
-                .registry()
-                .list_routes_by_owner(&auth.user_id)
-                .map_err(crate::mcp::error::map_registry_error)?;
-            if !owned.iter().any(|r| r.group_id == group.id) {
-                return Err(forbidden(
-                    "must be admin or own a route in this group to stream its journal",
-                ));
-            }
+        if !auth.is_admin && group.owner_id != auth.user_id {
+            return Err(forbidden(
+                "must be the group's owner or an admin to stream its journal",
+            ));
         }
         Ok(())
     } else if !auth.is_admin {

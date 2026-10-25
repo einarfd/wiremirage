@@ -2313,6 +2313,97 @@ async fn show_callback_forbidden_for_non_owner_non_admin() {
     alice_client.cancel().await.expect("alice cancel");
 }
 
+#[tokio::test]
+async fn journal_tools_allow_group_owner_without_routes() {
+    // ADR-0041: group-scoped reads check the group's owner, not route
+    // ownership. Alice owns the group but no routes in it — the old
+    // rule (admin or owns a route in the group) refused her.
+    let h = start().await;
+    let alice = h
+        .state
+        .auth()
+        .create_user("alice", false)
+        .expect("alice user");
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "alice-empty".into(),
+            owner_id: alice.id.clone(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("create group");
+    let group = h
+        .state
+        .routes()
+        .registry()
+        .read_group_by_ref("alice-empty")
+        .unwrap();
+    h.state
+        .journal()
+        .record_handled(sample_handled(&group.id, "alice-empty", 200))
+        .unwrap();
+
+    let (_token, alice_plain) = h
+        .state
+        .auth()
+        .create_token(&alice.id, "default", None)
+        .expect("alice token");
+    let alice_client = DummyClient
+        .serve(transport(&h.base_url, Some(&alice_plain)))
+        .await
+        .expect("alice connect");
+
+    // list_journal: allowed, and returns the seeded entry.
+    let result = alice_client
+        .call_tool(
+            CallToolRequestParams::new("list_journal").with_arguments(
+                json!({ "group": "alice-empty" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    assert!(
+        !tool_refused(&result),
+        "group owner can list the journal without owning a route"
+    );
+    let entries = result
+        .expect("list_journal")
+        .structured_content
+        .expect("structured")
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .expect("entries");
+    assert_eq!(entries.len(), 1);
+
+    // tail_journal with a group filter: allowed too (streams until the
+    // idle timeout, then returns).
+    let result = alice_client
+        .call_tool(
+            CallToolRequestParams::new("tail_journal").with_arguments(
+                json!({
+                    "group": "alice-empty",
+                    "max_entries": 100,
+                    "idle_timeout_seconds": 1,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await;
+    assert!(
+        !tool_refused(&result),
+        "group owner can tail the journal without owning a route"
+    );
+
+    alice_client.cancel().await.expect("alice cancel");
+}
+
 /// The journal bus is host-wide and filtering happens after receive, so
 /// a timeout rebuilt per received event is restarted by traffic the
 /// caller filtered out. `timeout_seconds` is published to agents as a
