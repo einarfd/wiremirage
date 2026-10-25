@@ -1558,7 +1558,7 @@ fn ui_not_found(state: &AppState, auth: &AuthContext, what: &str) -> Response {
 // and append to a list."
 //
 // Auth: same rule as the SSE endpoint underneath. With ?group=, the
-// caller must be admin or own a route in that group (403 otherwise).
+// caller must be admin or own that group (403 otherwise, ADR-0041).
 // Without ?group=, admin-only (host-wide tail). Non-admin without
 // ?group= sees the picker but no tail.
 
@@ -1610,11 +1610,11 @@ async fn live_journal_page(
     let group_param = nonempty(q.group.as_deref());
 
     // Authorization for tailing this scope. Mirrors `tail_journal`:
-    //   * group set → caller must be admin or own a route in the group
+    //   * group set → caller must be admin or own the group (ADR-0041)
     //   * group unset → admin-only (host-wide tail)
     let (scope, can_tail, resolved_group_id): (&str, bool, Option<String>) = match &group_param {
         Some(name) => match registry.read_group_by_ref(name) {
-            Ok(g) => match caller_can_view_group(&state, &auth, &g.id) {
+            Ok(g) => match caller_can_view_group(&auth, &g) {
                 true => ("group", true, Some(g.id)),
                 false => return forbidden_page(&state, &auth),
             },
@@ -1734,16 +1734,11 @@ fn fetch_recent_host_wide(
     all
 }
 
-fn caller_can_view_group(state: &AppState, auth: &AuthContext, group_id: &str) -> bool {
-    if auth.is_admin {
-        return true;
-    }
-    state
-        .routes()
-        .registry()
-        .list_routes_by_owner(&auth.user_id)
-        .map(|routes| routes.iter().any(|r| r.group_id == group_id))
-        .unwrap_or(false)
+/// ADR-0041: group-scoped UI reads check the group's owner, not route
+/// ownership. Takes the resolved group so a registry error can't be
+/// silently flattened into "forbidden" here.
+fn caller_can_view_group(auth: &AuthContext, group: &Group) -> bool {
+    auth.is_admin || group.owner_id == auth.user_id
 }
 
 fn status_matches(actual: u16, pattern: &str) -> bool {
@@ -1866,7 +1861,7 @@ async fn journal_entry_page(
         Ok(g) => g,
         Err(_) => return ui_not_found(&state, &auth, &format!("Group {group_ref}")),
     };
-    if !caller_can_view_group(&state, &auth, &group.id) {
+    if !caller_can_view_group(&auth, &group) {
         return forbidden_page(&state, &auth);
     }
     let entry = match state.journal().get(&group.id, number) {

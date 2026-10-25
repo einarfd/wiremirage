@@ -11,7 +11,7 @@ use reqwest::Client;
 use serde_json::json;
 use wm_host::auth::Auth;
 use wm_host::journal::Journal;
-use wm_host::registry::{NewRoute, Registry};
+use wm_host::registry::{NewGroup, NewRoute, Registry};
 use wm_host::route_table::RouteTable;
 use wm_host::{AppState, Runtime, Storage, router};
 
@@ -3091,6 +3091,104 @@ async fn group_owner_can_read_journal_admin_can_too() {
     let (_bob_id, bob) = h.provision_user("bob", false);
     let resp = bob
         .get(h.url(&format!("/api/journal/{group}")))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 403);
+}
+
+#[tokio::test]
+async fn group_owner_without_routes_can_still_read_journal() {
+    // ADR-0041: group-scoped reads check the group's owner, not route
+    // ownership. A group owner who deleted all their routes can still
+    // read the group's remaining journal entries — the old rule (admin
+    // or owns a route in the group) 403'd them.
+    let h = Harness::start().await;
+    let (alice_id, alice) = h.provision_user("alice", false);
+    h.state
+        .routes()
+        .registry()
+        .create_group(NewGroup {
+            name: "alice-only".into(),
+            owner_id: alice_id.clone(),
+            ttl_seconds: None,
+            sliding_ttl: None,
+        })
+        .expect("group");
+    let route = h
+        .state
+        .routes()
+        .registry()
+        .create_route(NewRoute {
+            group: Some("alice-only".into()),
+            methods: vec!["POST".into()],
+            path: "/v1/alice-thing".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: echo_wasm(),
+            source: None,
+            owner_id: alice_id.clone(),
+        })
+        .expect("route");
+    h.state.routes().refresh_after_create(route.clone());
+    let number = route.number;
+
+    // One journal entry while the route exists.
+    let resp = Client::new()
+        .post(h.url("/v1/alice-thing"))
+        .header(reqwest::header::HOST, "alice-only.localhost")
+        .send()
+        .await
+        .expect("mock");
+    assert_eq!(resp.status().as_u16(), 200);
+    poll_first_journal_entry(&h, "alice-only").await;
+
+    // Delete the only route: the group stays, owned by alice, with
+    // zero routes.
+    let resp = alice
+        .delete(h.url(&format!("/api/routes/alice-only/{number}")))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(resp.status().as_u16(), 204);
+
+    // Alice owns no routes in the group any more — but owns the group,
+    // so journal list, entry, callbacks, and tail are all readable.
+    let resp = alice
+        .get(h.url("/api/journal/alice-only"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+
+    let resp = alice
+        .get(h.url("/api/journal/alice-only/1"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let resp = alice
+        .get(h.url("/api/groups/alice-only/callbacks"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let resp = alice
+        .get(h.url("/api/journal/tail?group=alice-only"))
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .expect("tail");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // A non-owner is still 403 even though the group has zero routes.
+    let (_bob_id, bob) = h.provision_user("bob", false);
+    let resp = bob
+        .get(h.url("/api/journal/alice-only"))
         .send()
         .await
         .expect("get");
