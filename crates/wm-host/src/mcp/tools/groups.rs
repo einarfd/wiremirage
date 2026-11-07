@@ -14,7 +14,7 @@ use crate::api::{
     group_matches_since_until, parse_group_sort, parse_pagination, slice_for_page, sort_groups,
 };
 use crate::api_filters::{FilterParseError, SortDir, parse_since};
-use crate::mcp::context::{auth_from, ensure_group_owner_or_admin};
+use crate::mcp::context::auth_from;
 use crate::mcp::error::{map_filter_error, map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
 use crate::registry::{Group, NewGroup};
@@ -259,7 +259,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<ShowGroupArgs>,
     ) -> Result<Json<GroupRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(GroupRecord::from(&group)))
     }
 
@@ -303,7 +304,8 @@ impl WmMcpServer {
             ));
         }
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         let routes_deleted = self
             .state
             .routes()
@@ -327,7 +329,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<RefreshGroupArgs>,
     ) -> Result<Json<GroupRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         let refreshed = self
             .state
             .routes()
@@ -347,7 +350,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<UpdateGroupArgs>,
     ) -> Result<Json<GroupRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         if args.name.is_none()
             && args.ttl_seconds.is_none()
             && args.sliding_ttl.is_none()
@@ -409,7 +413,8 @@ impl WmMcpServer {
             ));
         }
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         self.state
             .routes()
             .registry()

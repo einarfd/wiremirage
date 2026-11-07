@@ -28,7 +28,10 @@ use minijinja::context;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::{GroupsListQuery, RoutesListQuery, list_groups_core, list_routes_core};
+use crate::api::{
+    GroupsListQuery, RoutesListQuery, is_group_owner_or_admin, is_route_owner_or_admin,
+    list_groups_core, list_routes_core,
+};
 use crate::api_filters::validate_method;
 use crate::auth::AuthContext;
 use crate::journal::UnmatchedCursor;
@@ -939,7 +942,7 @@ async fn group_detail_page(
         Ok(g) => g,
         Err(_) => return ui_not_found(&state, &auth, &format!("Group {group_ref}")),
     };
-    if !auth.is_admin && group.owner_id != auth.user_id {
+    if !is_group_owner_or_admin(&auth, &group) {
         return forbidden_page(&state, &auth);
     }
 
@@ -1353,7 +1356,7 @@ fn resolve_owned_group(
         .registry()
         .read_group_by_ref(group_ref)
         .map_err(|_| Box::new(ui_not_found(state, auth, &format!("Group {group_ref}"))))?;
-    if !auth.is_admin && group.owner_id != auth.user_id {
+    if !is_group_owner_or_admin(auth, &group) {
         return Err(Box::new(forbidden_page(state, auth)));
     }
     Ok(group)
@@ -1396,7 +1399,7 @@ async fn route_detail_page(
             return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
         }
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
 
@@ -1614,7 +1617,7 @@ async fn live_journal_page(
     //   * group unset → admin-only (host-wide tail)
     let (scope, can_tail, resolved_group_id): (&str, bool, Option<String>) = match &group_param {
         Some(name) => match registry.read_group_by_ref(name) {
-            Ok(g) => match caller_can_view_group(&auth, &g) {
+            Ok(g) => match is_group_owner_or_admin(&auth, &g) {
                 true => ("group", true, Some(g.id)),
                 false => return forbidden_page(&state, &auth),
             },
@@ -1732,13 +1735,6 @@ fn fetch_recent_host_wide(
     all.sort_by_key(|p| std::cmp::Reverse(p.0.created_at));
     all.truncate(limit);
     all
-}
-
-/// ADR-0041: group-scoped UI reads check the group's owner, not route
-/// ownership. Takes the resolved group so a registry error can't be
-/// silently flattened into "forbidden" here.
-fn caller_can_view_group(auth: &AuthContext, group: &Group) -> bool {
-    auth.is_admin || group.owner_id == auth.user_id
 }
 
 fn status_matches(actual: u16, pattern: &str) -> bool {
@@ -1861,7 +1857,7 @@ async fn journal_entry_page(
         Ok(g) => g,
         Err(_) => return ui_not_found(&state, &auth, &format!("Group {group_ref}")),
     };
-    if !caller_can_view_group(&auth, &group) {
+    if !is_group_owner_or_admin(&auth, &group) {
         return forbidden_page(&state, &auth);
     }
     let entry = match state.journal().get(&group.id, number) {
@@ -2125,7 +2121,7 @@ async fn route_state_page(
             return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
         }
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
     let entries = match state
@@ -2168,7 +2164,7 @@ async fn route_state_clear_form(
             return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
         }
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
     if let Err(e) = state
@@ -2253,7 +2249,7 @@ async fn route_state_set_form(
         Ok(r) => r,
         Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
     let entries = match parse_state_kv_lines(&form.keys) {
@@ -2333,7 +2329,7 @@ async fn route_dry_run_page(
         Ok(r) => r,
         Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
     let form = DryRunFormState {
@@ -2364,7 +2360,7 @@ async fn route_dry_run_submit(
         Ok(r) => r,
         Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
 
@@ -2579,7 +2575,7 @@ async fn route_source_edit_page(
         Ok(r) => r,
         Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
     let Some(current) = route.source.clone() else {
@@ -2607,7 +2603,7 @@ async fn route_source_edit_submit(
         Ok(r) => r,
         Err(_) => return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}")),
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
     if route.source.is_none() {
@@ -2789,7 +2785,7 @@ async fn route_delete_form(
             return ui_not_found(&state, &auth, &format!("Route {group_ref}/{number}"));
         }
     };
-    if !auth.is_admin && route.owner_id != auth.user_id {
+    if !is_route_owner_or_admin(&auth, &route) {
         return forbidden_page(&state, &auth);
     }
     if let Err(e) = state.routes().registry().delete_route(&group_ref, number) {
@@ -3350,10 +3346,12 @@ async fn unmatched_detail_page(
         Err(_) => return ui_not_found(&state, &auth, &format!("Unmatched #{number}")),
     };
     // ADR-0030 SemFLIP: owner-or-admin of the group it was addressed to.
+    // Admin short-circuits before the lookup so a record whose group is
+    // gone stays readable by admins.
     let owns = auth.is_admin
         || matches!(
             state.routes().registry().read_group_by_ref(&record.group_id),
-            Ok(g) if g.owner_id == auth.user_id
+            Ok(g) if is_group_owner_or_admin(&auth, &g)
         );
     if !owns {
         return forbidden_page(&state, &auth);

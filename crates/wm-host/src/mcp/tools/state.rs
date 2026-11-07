@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::dry_run::{DryRunRequest, dry_run};
-use crate::mcp::context::{auth_from, ensure_group_owner_or_admin, ensure_route_owner_or_admin};
+use crate::mcp::context::auth_from;
 use crate::mcp::error::{map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
 use crate::wire::{WireBytes, decode_entries};
@@ -182,7 +182,8 @@ impl WmMcpServer {
             ));
         }
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         self.state
             .routes()
             .registry()
@@ -201,7 +202,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<ShowGroupStateArgs>,
     ) -> Result<Json<ShowGroupStateResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         let entries = self
             .state
             .routes()
@@ -233,7 +235,14 @@ impl WmMcpServer {
     ) -> Result<Json<ShowRouteStateResult>, ErrorData> {
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_route_slug(&args.route)?;
-        let _route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        let _route = crate::api::ensure_route_owner_or_admin(
+            &self.state,
+            &auth,
+            &group_ref,
+            number,
+            "read its state",
+        )
+        .map_err(crate::mcp::error::map_api_error)?;
         let entries = self
             .state
             .routes()
@@ -265,7 +274,14 @@ impl WmMcpServer {
     ) -> Result<Json<SetStateResult>, ErrorData> {
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_route_slug(&args.route)?;
-        let _route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        let _route = crate::api::ensure_route_owner_or_admin(
+            &self.state,
+            &auth,
+            &group_ref,
+            number,
+            "write its state",
+        )
+        .map_err(crate::mcp::error::map_api_error)?;
         let entries = decode_entries(args.entries).map_err(validation)?;
         let written = entries.len() as u64;
         self.state
@@ -286,7 +302,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<SetGroupStateArgs>,
     ) -> Result<Json<SetStateResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         let entries = decode_entries(args.entries).map_err(validation)?;
         let written = entries.len() as u64;
         self.state
@@ -313,7 +330,14 @@ impl WmMcpServer {
         }
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_route_slug(&args.route)?;
-        let _route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        let _route = crate::api::ensure_route_owner_or_admin(
+            &self.state,
+            &auth,
+            &group_ref,
+            number,
+            "clear its state",
+        )
+        .map_err(crate::mcp::error::map_api_error)?;
         let cleared = self
             .state
             .routes()
@@ -334,7 +358,14 @@ impl WmMcpServer {
     ) -> Result<Json<DryRunRouteResult>, ErrorData> {
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_route_slug(&args.route)?;
-        let route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        let route = crate::api::ensure_route_owner_or_admin(
+            &self.state,
+            &auth,
+            &group_ref,
+            number,
+            "dry-run it",
+        )
+        .map_err(crate::mcp::error::map_api_error)?;
 
         let path = args.path.unwrap_or_else(|| route.path.clone());
         if !path.starts_with('/') {
