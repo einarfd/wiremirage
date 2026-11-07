@@ -448,6 +448,53 @@ async fn journal_entry_403_for_non_owner() {
 }
 
 #[tokio::test]
+async fn journal_pages_200_for_group_owner_without_routes() {
+    // ADR-0041: the UI journal views gate on the group's owner, not on
+    // route ownership. Alice owns the alice-only group; once her only
+    // route is deleted she still owns the group — and its journal. The
+    // old rule (admin or owns a route in the group) 403'd her here.
+    let h = start_with_traffic().await;
+    let client = no_redirect_client();
+    let cookie = login_cookie(&h, &client, "alice").await;
+
+    // One handled entry in alice's group while her route still exists.
+    let resp = client
+        .get(url(&h, "/secret"))
+        .header(reqwest::header::HOST, "alice-only.localhost")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Delete her only route via REST (the API accepts the session cookie).
+    let resp = client
+        .delete(url(&h, "/api/routes/alice-only/1"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204);
+
+    // Live tail page scoped to her group: 200.
+    let resp = client
+        .get(url(&h, "/ui/journal/live?group=alice-only"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Entry page for the surviving journal entry: 200 as well.
+    let resp = client
+        .get(url(&h, "/ui/journal/alice-only/1"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[tokio::test]
 async fn journal_entry_404_when_unknown_number() {
     let h = start_with_traffic().await;
     let client = no_redirect_client();
