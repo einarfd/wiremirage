@@ -321,10 +321,16 @@ impl ApiError {
     }
 
     fn not_found() -> Self {
+        Self::not_found_with("no such route")
+    }
+
+    /// 404 with a record-specific message: group lookups say "no such
+    /// group" rather than the route-flavored default (issue #85).
+    fn not_found_with(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             code: "not_found",
-            message: "no such route".into(),
+            message: msg.into(),
             diagnostics: Vec::new(),
         }
     }
@@ -581,7 +587,7 @@ pub(crate) async fn create_route_core(
         match state.routes().registry().read_group_by_ref(reference) {
             Ok(group) if is_group_owner_or_admin(auth, &group) => {}
             // Not yours, or doesn't exist → indistinguishable not_found.
-            _ => return Err(ApiError::not_found()),
+            _ => return Err(ApiError::not_found_with("no such group")),
         }
     }
 
@@ -1896,7 +1902,7 @@ pub(crate) fn ensure_group_owner_or_admin(
         .routes()
         .registry()
         .read_group_by_ref(group_ref)
-        .map_err(|_| ApiError::not_found())?;
+        .map_err(|_| ApiError::not_found_with("no such group"))?;
     if !is_group_owner_or_admin(auth, &group) {
         return Err(ApiError::forbidden("must be the group's owner or an admin"));
     }

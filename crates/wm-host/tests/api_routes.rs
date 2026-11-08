@@ -912,6 +912,54 @@ async fn get_route_is_owner_or_admin() {
     assert_eq!(resp.status().as_u16(), 404);
 }
 
+#[tokio::test]
+async fn missing_group_404_says_no_such_group() {
+    // Issue #85: ApiError::not_found() defaults to "no such route", and
+    // group lookups used to inherit it — a missing group 404'd with a
+    // route-flavored message on REST and (since #84) on MCP too.
+    let h = Harness::start().await;
+
+    // Group-scoped reads 404 with "no such group".
+    for path in [
+        "/api/groups/nope",
+        "/api/groups/nope/state",
+        "/api/journal/nope",
+        "/api/groups/nope/callbacks",
+    ] {
+        let resp = h.client.get(h.url(path)).send().await.expect("get");
+        assert_eq!(resp.status().as_u16(), 404, "{path}");
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["error"]["code"], "not_found", "{path}: {body}");
+        assert_eq!(body["error"]["message"], "no such group", "{path}: {body}");
+    }
+
+    // Creating a route in a missing group deliberately 404s the same way
+    // (indistinguishable from a group owned by someone else).
+    let resp = h
+        .create_route_body(json!({
+            "group": "nope",
+            "methods": ["GET"],
+            "path": "/v1/x",
+            "language": "javascript",
+            "source": echo_source(),
+        }))
+        .await;
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["message"], "no such group", "{body}");
+
+    // Route-addressed lookups keep the route-flavored message.
+    let resp = h
+        .client
+        .get(h.url("/api/routes/nope/99"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["message"], "no such route", "{body}");
+}
+
 // -- Auth -------------------------------------------------------------------
 
 #[tokio::test]
