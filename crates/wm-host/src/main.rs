@@ -127,6 +127,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(apex = %apex, "apex host set (mock traffic served on group subdomains; ADR-0030)");
     state = state.with_apex_host(apex);
 
+    // Security-audit finding #4: `POST /auth/oauth/register` (DCR) is
+    // unauthenticated and each attempt costs an argon2id hash, so the
+    // endpoint is rate-limited per IP and capped host-wide. The cap is
+    // configurable; 0 disables registration entirely.
+    let max_oauth_clients = match env::var("WM_OAUTH_MAX_CLIENTS") {
+        Ok(raw) => raw.parse::<usize>().map_err(|_| {
+            anyhow!("WM_OAUTH_MAX_CLIENTS: expected a non-negative integer, got {raw:?}")
+        })?,
+        Err(_) => wm_host::mcp_oauth::DEFAULT_MAX_OAUTH_CLIENTS,
+    };
+    state = state.with_max_oauth_clients(max_oauth_clients);
+
     if let Some(hosts) = trusted {
         tracing::info!(
             hosts = ?hosts,

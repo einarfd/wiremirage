@@ -12,6 +12,7 @@ startup instead of on the first failed request.
   - [Browser login — OIDC](#browser-login--oidc-any-standards-compliant-idp)
   - [Browser login — GitHub OAuth](#browser-login--github-oauth)
   - [Browser login — local passwords](#browser-login--local-passwords-testing--trusted-networks-only)
+- [MCP client registration (DCR)](#mcp-client-registration-dcr)
 - [Outbound callbacks / egress](#outbound-callbacks--egress)
 - [Behind a reverse proxy](#behind-a-reverse-proxy)
 - [Observability](#observability)
@@ -268,6 +269,29 @@ the button. GitHub logins also require a verified email on the account
 This mode exists for testing and trusted-network deployments — passwords in
 env vars aren't OAuth-grade. Don't expose a host with `WM_LOCAL_AUTH` set to
 the public internet without a TLS edge **and** an IP allow-list at the proxy.
+
+## MCP client registration (DCR)
+
+`POST /auth/oauth/register` (RFC 7591 dynamic client registration, used by
+native MCP clients against `/api/mcp`) is unauthenticated by design, so it
+carries two exhaustion guards: a per-IP rate limit (5 attempts per 60 s,
+then a 60 s lockout — same shape as the login throttle) and a host-wide cap
+on registered clients.
+
+- `WM_OAUTH_MAX_CLIENTS` — maximum number of registered OAuth clients.
+  Default `1000`; `0` disables registration entirely (every attempt gets
+  `429 registration_limit_reached`). Revoked clients count toward the cap
+  until their record is deleted. The count is taken per registration and is
+  not atomic with the write, so a burst of concurrent registrations can
+  overshoot the cap slightly; the per-IP rate limit bounds how far.
+
+The rate limit keys off `X-Forwarded-For` only when `WM_TRUSTED_PROXY` is
+set. On a directly exposed host (no trusted proxy) every caller shares one
+placeholder bucket, so the limit is effectively global — 5 registrations
+per 60 s for the whole host, and an attacker can keep DCR locked out for
+everyone. That is the same trade the login throttle makes (see
+[Behind a reverse proxy](#behind-a-reverse-proxy)); public deployments
+should set `WM_TRUSTED_PROXY` so each client gets its own budget.
 
 ## Outbound callbacks / egress
 

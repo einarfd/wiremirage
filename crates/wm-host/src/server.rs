@@ -142,6 +142,14 @@ pub struct AppState {
     /// In-process per-IP throttle for the password login endpoint.
     /// Lives behind an `Arc` so cloning `AppState` shares the counters.
     login_throttle: Arc<crate::login_throttle::LoginThrottle>,
+    /// Per-IP throttle for `POST /auth/oauth/register` (DCR) — the other
+    /// unauthenticated, expensive endpoint (security-audit finding #4).
+    register_throttle: Arc<crate::login_throttle::RegisterThrottle>,
+    /// Cap on registered MCP OAuth clients. The register endpoint is
+    /// unauthenticated, so an unbounded client table is a
+    /// storage-exhaustion vector. Set from `WM_OAUTH_MAX_CLIENTS`;
+    /// 0 disables registration entirely.
+    max_oauth_clients: usize,
     /// minijinja environment + helpers for the web UI (slice 21).
     /// Built once at startup; cheap to clone (inner Arc).
     ui_templates: crate::ui::UiTemplates,
@@ -206,6 +214,8 @@ impl AppState {
         // borrows the runtime's handle before the runtime moves into
         // the struct.
         let throttle = crate::login_throttle::LoginThrottle::new(runtime.storage().clone());
+        let register_throttle =
+            crate::login_throttle::RegisterThrottle::new(runtime.storage().clone());
         Self {
             runtime,
             routes,
@@ -214,6 +224,8 @@ impl AppState {
             local_auth: Arc::new(crate::local_auth::LocalAuth::empty()),
             sessions: None,
             login_throttle: Arc::new(throttle),
+            register_throttle: Arc::new(register_throttle),
+            max_oauth_clients: crate::mcp_oauth::DEFAULT_MAX_OAUTH_CLIENTS,
             ui_templates: crate::ui::UiTemplates::new(),
             shutdown: None,
             secure_cookies: false,
@@ -245,6 +257,17 @@ impl AppState {
     pub fn with_trust_forwarded_headers(mut self, trust: bool) -> Self {
         self.trust_forwarded_headers = trust;
         self
+    }
+
+    /// Set the registered-client cap for DCR (security-audit finding #4).
+    /// Wired from `WM_OAUTH_MAX_CLIENTS` in `main.rs`.
+    pub fn with_max_oauth_clients(mut self, max: usize) -> Self {
+        self.max_oauth_clients = max;
+        self
+    }
+
+    pub fn max_oauth_clients(&self) -> usize {
+        self.max_oauth_clients
     }
 
     /// Public hostname(s) added to the MCP `Host`-header allowlist
@@ -343,6 +366,10 @@ impl AppState {
 
     pub fn login_throttle(&self) -> &crate::login_throttle::LoginThrottle {
         &self.login_throttle
+    }
+
+    pub fn register_throttle(&self) -> &crate::login_throttle::RegisterThrottle {
+        &self.register_throttle
     }
 
     pub fn ui_templates(&self) -> &crate::ui::UiTemplates {
