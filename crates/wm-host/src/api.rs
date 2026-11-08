@@ -496,7 +496,7 @@ fn extract_session_cookie(parts: &Parts) -> Option<String> {
 impl From<AuthError> for ApiError {
     fn from(err: AuthError) -> Self {
         match err {
-            AuthError::NotFound => ApiError::not_found(),
+            AuthError::NotFound => ApiError::not_found_with("no such token or user"),
             AuthError::NameTaken(name) => {
                 ApiError::conflict(format!("name {name:?} is already in use"))
             }
@@ -1252,7 +1252,7 @@ async fn delete_token(
 ) -> Result<StatusCode, ApiError> {
     let revoked = state.auth().revoke_token_by_name(&auth.user_id, &name)?;
     if !revoked {
-        return Err(ApiError::not_found());
+        return Err(ApiError::not_found_with("no such token"));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1684,7 +1684,13 @@ async fn get_journal_entry(
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<JournalRecord>, ApiError> {
     let group_record = ensure_group_owner_or_admin(&state, &auth, &group)?;
-    let entry = state.journal().get(&group_record.id, number)?;
+    let entry = state
+        .journal()
+        .get(&group_record.id, number)
+        .map_err(|e| match e {
+            JournalError::NotFound => ApiError::not_found_with("no such journal entry"),
+            other => other.into(),
+        })?;
     Ok(Json(entry))
 }
 
@@ -1732,7 +1738,13 @@ async fn get_callback_entry(
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<CallbackRecord>, ApiError> {
     let group_record = ensure_group_owner_or_admin(&state, &auth, &group)?;
-    let entry = state.journal().get_callback(&group_record.id, number)?;
+    let entry = state
+        .journal()
+        .get_callback(&group_record.id, number)
+        .map_err(|e| match e {
+            JournalError::NotFound => ApiError::not_found_with("no such callback"),
+            other => other.into(),
+        })?;
     Ok(Json(entry))
 }
 
@@ -1783,7 +1795,10 @@ async fn get_unmatched_entry(
     auth: AuthContext,
     Path(number): Path<u64>,
 ) -> Result<Json<UnmatchedRecord>, ApiError> {
-    let entry = state.journal().get_unmatched(number)?;
+    let entry = state.journal().get_unmatched(number).map_err(|e| match e {
+        JournalError::NotFound => ApiError::not_found_with("no such unmatched request"),
+        other => other.into(),
+    })?;
     if !caller_owns_unmatched(&state, &auth, &entry.group_id) {
         return Err(ApiError::forbidden(
             "must be an admin or own this group to read its unmatched requests",
@@ -2147,7 +2162,11 @@ async fn patch_group(
         )?
     } else {
         // Rename-only: re-read so the response reflects the new name.
-        state.routes().registry().read_group_by_ref(&group.id)?
+        state
+            .routes()
+            .registry()
+            .read_group_by_ref(&group.id)
+            .map_err(|_| ApiError::not_found_with("no such group"))?
     };
     Ok(Json(GroupResponse::from(&updated)))
 }
