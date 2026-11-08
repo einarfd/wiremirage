@@ -960,6 +960,46 @@ async fn missing_group_404_says_no_such_group() {
     assert_eq!(body["error"]["message"], "no such route", "{body}");
 }
 
+#[tokio::test]
+async fn record_specific_404_messages() {
+    // Follow-up to #85/#87: the remaining not_found() sites named records
+    // other than routes/groups but still said "no such route".
+    let h = Harness::start().await;
+
+    // A group, so group-scoped lookups pass the gate and reach the
+    // record lookup.
+    let resp = h
+        .client
+        .post(h.url("/api/groups"))
+        .json(&json!({ "name": "g1" }))
+        .send()
+        .await
+        .expect("create group");
+    assert_eq!(resp.status().as_u16(), 201);
+
+    for (path, msg) in [
+        ("/api/journal/g1/999", "no such journal entry"),
+        ("/api/groups/g1/callbacks/999", "no such callback"),
+        ("/api/unmatched/999", "no such unmatched request"),
+    ] {
+        let resp = h.client.get(h.url(path)).send().await.expect("get");
+        assert_eq!(resp.status().as_u16(), 404, "{path}");
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["error"]["code"], "not_found", "{path}: {body}");
+        assert_eq!(body["error"]["message"], msg, "{path}: {body}");
+    }
+
+    let resp = h
+        .client
+        .delete(h.url("/api/tokens/nope"))
+        .send()
+        .await
+        .expect("delete token");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["message"], "no such token", "{body}");
+}
+
 // -- Auth -------------------------------------------------------------------
 
 #[tokio::test]
