@@ -2034,6 +2034,28 @@ async fn show_unmatched_returns_full_request_envelope() {
 }
 
 #[tokio::test]
+async fn journal_tool_on_missing_group_says_no_such_group() {
+    // Issue #85: MCP tools call the shared REST gate and translate via
+    // map_api_error, so a missing group must surface "no such group",
+    // not the route-flavored default.
+    let h = start().await;
+    let client = DummyClient
+        .serve(transport(&h.base_url, Some(BOOTSTRAP_TOKEN)))
+        .await
+        .expect("connect");
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("list_journal")
+                .with_arguments(json!({ "group": "nope" }).as_object().unwrap().clone()),
+        )
+        .await;
+    let err = result.expect_err("missing group must error");
+    let msg = format!("{err}");
+    assert!(msg.contains("no such group"), "message: {msg}");
+    assert!(!msg.contains("no such route"), "message: {msg}");
+}
+
+#[tokio::test]
 async fn list_journal_returns_stored_entries_with_filter() {
     // First-user friction #3: journal access was live-only. list_journal
     // pulls completed entries after the fact, with the same filter
