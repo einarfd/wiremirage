@@ -364,3 +364,30 @@ async fn login_page_shows_github_button_when_configured() {
         "GitHub button links to start endpoint"
     );
 }
+
+#[tokio::test]
+async fn login_page_urlencodes_next_in_oauth_start_link() {
+    // `next` used to be interpolated raw into the start URL, so an `&`
+    // in it would inject extra query params on /auth/start/github. It
+    // must be percent-encoded as a single param value.
+    let h = start(vec![MOCK_LOGIN.to_string()], vec![]).await;
+    let client = no_redirect_client();
+    // Query parser decodes %26/%3D, so the page sees next = "/ui/&evil=1"
+    // (passes sanitize_next: printable ASCII, host-relative).
+    let resp = client
+        .get(url(&h, "/auth/login?next=/ui/%26evil%3D1"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    let snippet = &body[..body.len().min(800)];
+    assert!(
+        body.contains("/auth/start/github?next=%2Fui%2F%26evil%3D1"),
+        "next is urlencoded in the GitHub start link: {snippet}"
+    );
+    assert!(
+        !body.contains("next=/ui/&"),
+        "no raw & left in the next param: {snippet}"
+    );
+}

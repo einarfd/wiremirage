@@ -58,6 +58,13 @@ impl UiTemplates {
         // `base.html`'s footer is the only consumer today.
         env.add_global("host_version", crate::HOST_VERSION);
         env.add_global("build_sha", crate::BUILD_SHA);
+        // Percent-encode a value for embedding in a URL query string.
+        // `login.html` interpolates `next` into the OAuth start links;
+        // without encoding, an `&` in `next` would split into extra
+        // query params on `/auth/start/*`.
+        env.add_filter("urlencode", |s: String| {
+            urlencoding::encode(&s).into_owned()
+        });
         // One `add_template` call per file. Macro-driven so a new
         // template is one line at the call site — easy to keep in
         // sync as new screens land in subsequent slices.
