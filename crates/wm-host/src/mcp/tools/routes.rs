@@ -15,8 +15,8 @@ use crate::api::{
     sort_routes,
 };
 use crate::api_filters::{FilterParseError, SortDir, glob_match, parse_since, validate_method};
-use crate::mcp::context::{auth_from, ensure_route_owner_or_admin};
-use crate::mcp::error::{forbidden, map_registry_error, validation};
+use crate::mcp::context::auth_from;
+use crate::mcp::error::{map_registry_error, validation};
 use crate::mcp::server::WmMcpServer;
 use crate::registry::{Route, render_slug};
 
@@ -315,7 +315,14 @@ impl WmMcpServer {
     ) -> Result<Json<RouteRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_slug(&args.route)?;
-        let route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        let route = crate::api::ensure_route_owner_or_admin(
+            &self.state,
+            &auth,
+            &group_ref,
+            number,
+            "read it",
+        )
+        .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(RouteRecord::build(
             &route,
             &parts.headers,
@@ -334,7 +341,14 @@ impl WmMcpServer {
     ) -> Result<Json<ShowRouteSourceResult>, ErrorData> {
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_slug(&args.route)?;
-        let route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
+        let route = crate::api::ensure_route_owner_or_admin(
+            &self.state,
+            &auth,
+            &group_ref,
+            number,
+            "read its source",
+        )
+        .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(ShowRouteSourceResult {
             slug: render_slug(&route.group_name, route.number),
             language: route.language,
@@ -412,12 +426,14 @@ impl WmMcpServer {
         }
         let auth = auth_from(&parts)?;
         let (group_ref, number) = parse_slug(&args.route)?;
-        let route = ensure_route_owner_or_admin(&self.state, &auth, &group_ref, number)?;
-        if !auth.is_admin && route.owner_id != auth.user_id {
-            // Defensive: ensure_route_owner_or_admin already checks
-            // this, but the explicit guard documents intent.
-            return Err(forbidden("must be the route's owner or an admin"));
-        }
+        let route = crate::api::ensure_route_owner_or_admin(
+            &self.state,
+            &auth,
+            &group_ref,
+            number,
+            "delete it",
+        )
+        .map_err(crate::mcp::error::map_api_error)?;
         self.state
             .routes()
             .registry()

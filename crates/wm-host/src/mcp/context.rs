@@ -1,14 +1,17 @@
 //! Shared helpers for tools: pulling AuthContext out of the HTTP
-//! request parts that rmcp's streamable-HTTP transport injects, and
-//! the standard owner-or-admin guard for per-group operations.
+//! request parts that rmcp's streamable-HTTP transport injects.
+//!
+//! The owner-or-admin gates themselves live in `crate::api`
+//! (`ensure_group_owner_or_admin`, `ensure_route_owner_or_admin`,
+//! `is_group_owner_or_admin`, `is_route_owner_or_admin`) so REST, MCP
+//! and UI share one implementation; tools call them and translate the
+//! `ApiError` via `super::error::map_api_error`.
 
 use rmcp::ErrorData;
 
-use crate::AppState;
 use crate::auth::AuthContext;
-use crate::registry::Group;
 
-use super::error::{forbidden, internal, map_registry_error, not_found};
+use super::error::internal;
 
 /// Pull the AuthContext that the bearer-token middleware inserted
 /// into the original axum request's extensions. The streamable-HTTP
@@ -21,66 +24,4 @@ pub fn auth_from(parts: &http::request::Parts) -> Result<AuthContext, ErrorData>
         .get::<AuthContext>()
         .cloned()
         .ok_or_else(|| internal("auth context missing — middleware not applied?"))
-}
-
-/// Resolve a group reference (name or ULID) to its full record,
-/// returning `forbidden` for non-admin callers that don't own it.
-/// Mirrors `api::ensure_group_owner_or_admin`.
-pub fn ensure_group_owner_or_admin(
-    state: &AppState,
-    auth: &AuthContext,
-    group_ref: &str,
-) -> Result<Group, ErrorData> {
-    let group = state
-        .routes()
-        .registry()
-        .read_group_by_ref(group_ref)
-        .map_err(|_| not_found("group not found"))?;
-    if !auth.is_admin && group.owner_id != auth.user_id {
-        return Err(forbidden("must be the group's owner or an admin"));
-    }
-    Ok(group)
-}
-
-/// Resolve a group reference and gate it with the journal-reader
-/// semantics used by `list_journal`, `list_callbacks`, and
-/// `show_callback`: admin passes; a non-admin must own the group
-/// (ADR-0041 — the same gate as the REST journal/callback endpoints,
-/// which check the group's owner, not route ownership). Returns the
-/// resolved group so callers don't need a second lookup.
-pub fn ensure_journal_reader(
-    state: &AppState,
-    auth: &AuthContext,
-    group_ref: &str,
-) -> Result<Group, ErrorData> {
-    let group = state
-        .routes()
-        .registry()
-        .read_group_by_ref(group_ref)
-        .map_err(|_| not_found("group not found"))?;
-    if !auth.is_admin && group.owner_id != auth.user_id {
-        return Err(forbidden(
-            "must be the group's owner or an admin to read its journal",
-        ));
-    }
-    Ok(group)
-}
-
-/// Resolve a route slug `{group}/{n}` to its full record, returning
-/// `forbidden` for non-admin callers that don't own it.
-pub fn ensure_route_owner_or_admin(
-    state: &AppState,
-    auth: &AuthContext,
-    group_ref: &str,
-    number: u32,
-) -> Result<crate::registry::Route, ErrorData> {
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(group_ref, number)
-        .map_err(map_registry_error)?;
-    if !auth.is_admin && route.owner_id != auth.user_id {
-        return Err(forbidden("must be the route's owner or an admin"));
-    }
-    Ok(route)
 }

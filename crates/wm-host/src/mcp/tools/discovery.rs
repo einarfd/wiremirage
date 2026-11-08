@@ -439,7 +439,7 @@ impl WmMcpServer {
         let owns = auth.is_admin
             || matches!(
                 self.state.routes().registry().read_group_by_ref(&record.group_id),
-                Ok(g) if g.owner_id == auth.user_id
+                Ok(g) if crate::api::is_group_owner_or_admin(&auth, &g)
             );
         if !owns {
             return Err(forbidden(
@@ -459,7 +459,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListJournalArgs>,
     ) -> Result<Json<ListJournalResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
 
         let now = chrono::Utc::now();
         let route = args
@@ -545,7 +546,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<ListCallbacksArgs>,
     ) -> Result<Json<ListCallbacksResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         let cursor = ListCursor {
             before: args.before,
             limit: args.limit.unwrap_or(50).clamp(1, 200) as usize,
@@ -572,7 +574,8 @@ impl WmMcpServer {
         Parameters(args): Parameters<ShowCallbackArgs>,
     ) -> Result<Json<CallbackRecord>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let group = crate::mcp::context::ensure_journal_reader(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
         let record = self
             .state
             .journal()
@@ -593,8 +596,8 @@ impl WmMcpServer {
         // Probing reveals a group's routes, so it's owner-or-admin of the
         // group being probed (ADR-0030) — not any authenticated user.
         let auth = auth_from(&parts)?;
-        let group =
-            crate::mcp::context::ensure_group_owner_or_admin(&self.state, &auth, &args.group)?;
+        let group = crate::api::ensure_group_owner_or_admin(&self.state, &auth, &args.group)
+            .map_err(crate::mcp::error::map_api_error)?;
 
         if args.method.is_empty()
             || !args

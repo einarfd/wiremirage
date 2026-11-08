@@ -152,7 +152,7 @@ fn ensure_streaming_authorized(
             .registry()
             .read_group_by_ref(group_ref)
             .map_err(|_| crate::mcp::error::not_found("group not found"))?;
-        if !auth.is_admin && group.owner_id != auth.user_id {
+        if !crate::api::is_group_owner_or_admin(auth, &group) {
             return Err(forbidden(
                 "must be the group's owner or an admin to stream its journal",
             ));

@@ -579,7 +579,7 @@ pub(crate) async fn create_route_core(
     // on a slug you already had to know.)
     if let Some(reference) = body.group.as_deref() {
         match state.routes().registry().read_group_by_ref(reference) {
-            Ok(group) if group.owner_id == auth.user_id || auth.is_admin => {}
+            Ok(group) if is_group_owner_or_admin(auth, &group) => {}
             // Not yours, or doesn't exist → indistinguishable not_found.
             _ => return Err(ApiError::not_found()),
         }
@@ -874,15 +874,7 @@ async fn get_route(
     headers: HeaderMap,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<RouteResponse>, ApiError> {
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
-    if route.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may read it",
-        ));
-    }
+    let route = ensure_route_owner_or_admin(&state, &auth, &group, number, "read it")?;
     Ok(Json(RouteResponse::build(
         &route,
         &headers,
@@ -918,12 +910,7 @@ pub(crate) async fn patch_route_core(
 ) -> Result<crate::registry::Route, ApiError> {
     // Existence + ownership gate. Mirrors the DELETE handler — owner-
     // or-admin per ADR-0014.
-    let existing = state.routes().registry().get_route_by_slug(group, number)?;
-    if existing.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may update it",
-        ));
-    }
+    ensure_route_owner_or_admin(state, auth, group, number, "update it")?;
 
     let any_field = body.methods.is_some()
         || body.path.is_some()
@@ -1013,15 +1000,7 @@ async fn delete_route(
     // Look up first so we can (a) check ownership and (b) invalidate the
     // route table after deletion. Per ADR-0014: a route is deletable by
     // its creator, plus by any admin.
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
-    if route.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may delete it",
-        ));
-    }
+    let route = ensure_route_owner_or_admin(&state, &auth, &group, number, "delete it")?;
     state.routes().registry().delete_route(&group, number)?;
     state
         .routes()
@@ -1086,15 +1065,7 @@ async fn get_route_state(
     Path((group, number)): Path<(String, u32)>,
     Query(q): Query<StateQuery>,
 ) -> Result<Response, ApiError> {
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
-    if route.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may read its state",
-        ));
-    }
+    ensure_route_owner_or_admin(&state, &auth, &group, number, "read its state")?;
     let entries = state.routes().registry().list_route_state(&group, number)?;
     Ok(render_state(entries, &q))
 }
@@ -1105,15 +1076,7 @@ async fn set_route_state(
     Path((group, number)): Path<(String, u32)>,
     Json(body): Json<SetStateBody>,
 ) -> Result<StatusCode, ApiError> {
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
-    if route.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may write its state",
-        ));
-    }
+    ensure_route_owner_or_admin(&state, &auth, &group, number, "write its state")?;
     let entries = decode_state_entries(body.entries)?;
     state
         .routes()
@@ -1127,15 +1090,7 @@ async fn delete_route_state(
     auth: AuthContext,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<StatusCode, ApiError> {
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
-    if route.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may clear its state",
-        ));
-    }
+    ensure_route_owner_or_admin(&state, &auth, &group, number, "clear its state")?;
     state
         .routes()
         .registry()
@@ -1163,15 +1118,7 @@ async fn get_route_source(
     auth: AuthContext,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<RouteSourceResponse>, ApiError> {
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
-    if route.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may read its source",
-        ));
-    }
+    let route = ensure_route_owner_or_admin(&state, &auth, &group, number, "read its source")?;
     Ok(Json(RouteSourceResponse {
         slug: render_slug(&route.group_name, route.number),
         language: route.language,
@@ -1187,15 +1134,7 @@ async fn dry_run_route(
     Path((group, number)): Path<(String, u32)>,
     Json(body): Json<crate::dry_run::DryRunRequest>,
 ) -> Result<Json<crate::dry_run::DryRunResponse>, ApiError> {
-    let route = state
-        .routes()
-        .registry()
-        .get_route_by_slug(&group, number)?;
-    if route.owner_id != auth.user_id && !auth.is_admin {
-        return Err(ApiError::forbidden(
-            "only the route's owner or an admin may dry-run it",
-        ));
-    }
+    let route = ensure_route_owner_or_admin(&state, &auth, &group, number, "dry-run it")?;
     if !body.path.starts_with('/') {
         return Err(ApiError::validation("dry-run path must start with /"));
     }
@@ -1586,12 +1525,20 @@ struct ListUnmatchedResponse {
     next_before: Option<u64>,
 }
 
-/// `true` if the caller is admin or owns `group`. ADR-0041: group-scoped
-/// reads — journal, callbacks, live tail — check the group's owner, not
-/// route ownership, so a group owner who deleted all their routes can
-/// still read the group's remaining journal entries.
-fn caller_can_read_journal(auth: &AuthContext, group: &Group) -> bool {
+/// ADR-0041's ownership predicate, group scope: admin, or the caller owns
+/// the group. Group-scoped reads — journal, callbacks, live tail — check
+/// the group's owner, not route ownership, so a group owner who deleted
+/// all their routes can still read the group's remaining journal entries.
+/// Every surface (REST, MCP, UI) goes through this one predicate so the
+/// rule can't drift between them.
+pub(crate) fn is_group_owner_or_admin(auth: &AuthContext, group: &Group) -> bool {
     auth.is_admin || group.owner_id == auth.user_id
+}
+
+/// ADR-0041's ownership predicate, route scope: admin, or the caller owns
+/// the route.
+pub(crate) fn is_route_owner_or_admin(auth: &AuthContext, route: &Route) -> bool {
+    auth.is_admin || route.owner_id == auth.user_id
 }
 
 /// Groups whose unmatched records the caller may see (ADR-0030 SemFLIP).
@@ -1625,7 +1572,7 @@ fn caller_owns_unmatched(state: &AppState, auth: &AuthContext, group_id: &str) -
     }
     matches!(
         state.routes().registry().read_group_by_ref(group_id),
-        Ok(g) if g.owner_id == auth.user_id
+        Ok(g) if is_group_owner_or_admin(auth, &g)
     )
 }
 
@@ -1635,19 +1582,11 @@ async fn list_journal(
     Path(group): Path<String>,
     Query(q): Query<JournalListQuery>,
 ) -> Result<Json<ListJournalResponse>, ApiError> {
-    // Resolve the group reference (name or ULID) to its ULID; 404 if
-    // the group doesn't exist so callers can't probe for groups they
-    // don't own without a matching ownership check.
-    let group_record = state
-        .routes()
-        .registry()
-        .read_group_by_ref(&group)
-        .map_err(|_| ApiError::not_found())?;
-    if !caller_can_read_journal(&auth, &group_record) {
-        return Err(ApiError::forbidden(
-            "must be the group's owner or an admin to read its journal",
-        ));
-    }
+    // Resolve the group reference (name or ULID) and gate on it: 404 if
+    // the group doesn't exist, 403 if the caller isn't owner-or-admin —
+    // lookup first, then gate, so callers can't probe for groups they
+    // don't own without a matching ownership check (ADR-0041).
+    let group_record = ensure_group_owner_or_admin(&state, &auth, &group)?;
     let filter = build_journal_filter_from_query(
         Some(&group_record.name),
         q.route.as_deref(),
@@ -1738,16 +1677,7 @@ async fn get_journal_entry(
     auth: AuthContext,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<JournalRecord>, ApiError> {
-    let group_record = state
-        .routes()
-        .registry()
-        .read_group_by_ref(&group)
-        .map_err(|_| ApiError::not_found())?;
-    if !caller_can_read_journal(&auth, &group_record) {
-        return Err(ApiError::forbidden(
-            "must be the group's owner or an admin to read its journal",
-        ));
-    }
+    let group_record = ensure_group_owner_or_admin(&state, &auth, &group)?;
     let entry = state.journal().get(&group_record.id, number)?;
     Ok(Json(entry))
 }
@@ -1774,17 +1704,8 @@ async fn list_callbacks(
     Path(group): Path<String>,
     Query(q): Query<CallbackListQuery>,
 ) -> Result<Json<ListCallbacksResponse>, ApiError> {
-    let group_record = state
-        .routes()
-        .registry()
-        .read_group_by_ref(&group)
-        .map_err(|_| ApiError::not_found())?;
     // Same gate as the request journal: group owner or admin (ADR-0041).
-    if !caller_can_read_journal(&auth, &group_record) {
-        return Err(ApiError::forbidden(
-            "must be the group's owner or an admin to read its callbacks",
-        ));
-    }
+    let group_record = ensure_group_owner_or_admin(&state, &auth, &group)?;
     let cursor = ListCursor {
         before: q.before,
         limit: q.limit.unwrap_or(100),
@@ -1804,16 +1725,7 @@ async fn get_callback_entry(
     auth: AuthContext,
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<CallbackRecord>, ApiError> {
-    let group_record = state
-        .routes()
-        .registry()
-        .read_group_by_ref(&group)
-        .map_err(|_| ApiError::not_found())?;
-    if !caller_can_read_journal(&auth, &group_record) {
-        return Err(ApiError::forbidden(
-            "must be the group's owner or an admin to read its callbacks",
-        ));
-    }
+    let group_record = ensure_group_owner_or_admin(&state, &auth, &group)?;
     let entry = state.journal().get_callback(&group_record.id, number)?;
     Ok(Json(entry))
 }
@@ -1970,10 +1882,12 @@ pub(crate) struct GroupsListQuery {
     pub(crate) limit: Option<u64>,
 }
 
-/// Fetch a group by reference (name or ULID), and require the caller
-/// to be admin or the group's owner. Used by every per-group
-/// lifecycle endpoint.
-fn ensure_group_owner_or_admin(
+/// Fetch a group by reference (name or ULID), and require the caller to be
+/// admin or the group's owner. Used by every per-group lifecycle endpoint
+/// and — as `pub(crate)` — by the MCP and UI surfaces, so the gate lives in
+/// exactly one place. Lookup first, then gate (ADR-0041): a missing group
+/// is 404, an existing one the caller can't read is 403.
+pub(crate) fn ensure_group_owner_or_admin(
     state: &AppState,
     auth: &AuthContext,
     group_ref: &str,
@@ -1983,10 +1897,30 @@ fn ensure_group_owner_or_admin(
         .registry()
         .read_group_by_ref(group_ref)
         .map_err(|_| ApiError::not_found())?;
-    if !auth.is_admin && group.owner_id != auth.user_id {
+    if !is_group_owner_or_admin(auth, &group) {
         return Err(ApiError::forbidden("must be the group's owner or an admin"));
     }
     Ok(group)
+}
+
+/// Fetch a route by `{group}/{number}` slug, and require the caller to be
+/// admin or the route's owner. Shared by REST, MCP and UI like the group
+/// helper above. `action` only feeds the 403 message ("read it",
+/// "delete it", …).
+pub(crate) fn ensure_route_owner_or_admin(
+    state: &AppState,
+    auth: &AuthContext,
+    group: &str,
+    number: u32,
+    action: &str,
+) -> Result<Route, ApiError> {
+    let route = state.routes().registry().get_route_by_slug(group, number)?;
+    if !is_route_owner_or_admin(auth, &route) {
+        return Err(ApiError::forbidden(format!(
+            "only the route's owner or an admin may {action}"
+        )));
+    }
+    Ok(route)
 }
 
 async fn create_group(
@@ -2469,16 +2403,7 @@ async fn tail_journal(
         .as_deref()
         .or_else(|| filter.route.as_ref().map(|r| r.group_ref.as_str()));
     if let Some(group_ref) = group_ref {
-        let group_record = state
-            .routes()
-            .registry()
-            .read_group_by_ref(group_ref)
-            .map_err(|_| ApiError::not_found())?;
-        if !caller_can_read_journal(&auth, &group_record) {
-            return Err(ApiError::forbidden(
-                "must be the group's owner or an admin to tail its journal",
-            ));
-        }
+        ensure_group_owner_or_admin(&state, &auth, group_ref)?;
     } else if !auth.is_admin {
         return Err(ApiError::forbidden(
             "host-wide journal tail is admin-only; supply ?group= or ?route= to scope it",
@@ -2620,14 +2545,7 @@ async fn match_probe(
     // Resolve + gate on the group: probing reveals routes, so it's
     // owner-or-admin of the group being probed (ADR-0030).
     let group_ref = q.group.as_deref().unwrap_or_default();
-    let group = state
-        .routes()
-        .registry()
-        .read_group_by_ref(group_ref)
-        .map_err(|_| ApiError::not_found())?;
-    if !auth.is_admin && group.owner_id != auth.user_id {
-        return Err(ApiError::forbidden("must be the group's owner or an admin"));
-    }
+    let group = ensure_group_owner_or_admin(&state, &auth, group_ref)?;
 
     match state
         .routes()
