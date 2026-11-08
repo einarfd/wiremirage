@@ -16,14 +16,14 @@
 
 {% if oidc_enabled %}
 <a class="btn btn--primary auth-oauth-btn"
-   href="/auth/start/oidc{% if next %}?next={{ next }}{% endif %}">
+   href="/auth/start/oidc{% if next %}?next={{ next | urlencode }}{% endif %}">
   Continue with {{ oidc_display_name }}
 </a>
 {%- endif %}
 
 {% if github_enabled %}
 <a class="btn btn--primary auth-oauth-btn"
-   href="/auth/start/github{% if next %}?next={{ next }}{% endif %}">
+   href="/auth/start/github{% if next %}?next={{ next | urlencode }}{% endif %}">
   Continue with GitHub
 </a>
 {%- endif %}

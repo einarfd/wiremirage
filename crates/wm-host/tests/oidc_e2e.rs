@@ -737,3 +737,27 @@ async fn login_page_shows_oidc_button_when_configured() {
         "OIDC button links to start endpoint"
     );
 }
+
+#[tokio::test]
+async fn login_page_urlencodes_next_in_oidc_start_link() {
+    // Same as the GitHub button: `next` must be percent-encoded in the
+    // /auth/start/oidc href so an `&` in it can't inject query params.
+    let h = start(einar_claims()).await;
+    let client = no_redirect_client();
+    let resp = client
+        .get(url(&h, "/auth/login?next=/ui/%26evil%3D1"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    let snippet = &body[..body.len().min(800)];
+    assert!(
+        body.contains("/auth/start/oidc?next=%2Fui%2F%26evil%3D1"),
+        "next is urlencoded in the OIDC start link: {snippet}"
+    );
+    assert!(
+        !body.contains("next=/ui/&"),
+        "no raw & left in the next param: {snippet}"
+    );
+}
