@@ -289,7 +289,7 @@ fn parse_session_cookie(headers: &HeaderMap) -> Option<String> {
 /// first hop in `X-Forwarded-For`; when false, ignore the header
 /// (which can be set by any caller) and return the loopback
 /// placeholder so the throttle still has *something* to key on.
-fn client_ip(headers: &HeaderMap, trust_forwarded: bool) -> IpAddr {
+pub(crate) fn client_ip(headers: &HeaderMap, trust_forwarded: bool) -> IpAddr {
     if trust_forwarded
         && let Some(v) = headers.get("x-forwarded-for")
         && let Ok(raw) = v.to_str()

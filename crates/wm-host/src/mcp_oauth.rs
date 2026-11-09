@@ -562,8 +562,11 @@ pub fn revoke_grants_for_client(
 
 // -- Key helpers --------------------------------------------------------------
 
+/// Key prefix for registered-client records in the admin bucket.
+const CLIENT_KEY_PREFIX: &str = "oauth:client:";
+
 fn client_key(client_id: &str) -> String {
-    format!("oauth:client:{client_id}")
+    format!("{CLIENT_KEY_PREFIX}{client_id}")
 }
 
 fn pending_key(state: &str) -> String {
@@ -721,6 +724,16 @@ fn loopback_normalize(uri: &str) -> Option<String> {
 }
 
 // -- DCR: POST /auth/oauth/register -----------------------------------------
+//
+// Unauthenticated per RFC 7591, so the endpoint carries two exhaustion
+// guards (security-audit finding #4): a per-IP throttle
+// ([`crate::login_throttle::RegisterThrottle`] — every attempt costs an
+// argon2id hash) and a host-wide cap on registered clients
+// (`WM_OAUTH_MAX_CLIENTS`, 0 disables registration).
+
+/// Default cap on registered OAuth clients when `WM_OAUTH_MAX_CLIENTS`
+/// is unset.
+pub const DEFAULT_MAX_OAUTH_CLIENTS: usize = 1000;
 
 #[derive(Debug, Deserialize)]
 struct RegisterBody {
@@ -743,7 +756,27 @@ struct RegisterResponse {
     client_id_issued_at: i64,
 }
 
-async fn register(State(state): State<AppState>, Json(body): Json<RegisterBody>) -> Response {
+async fn register(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterBody>,
+) -> Response {
+    // Security-audit finding #4: this endpoint is unauthenticated and
+    // every attempt costs an argon2id hash, so throttle per source IP
+    // before doing any work. `client_ip` honors X-Forwarded-For only
+    // when WM_TRUSTED_PROXY is set, same as the login throttle.
+    let ip = crate::auth_api::client_ip(&headers, state.trust_forwarded_headers());
+    if state.register_throttle().is_locked_out(ip) {
+        return oauth_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "too many registration attempts from this address; retry later",
+        );
+    }
+    if state.register_throttle().record_attempt(ip) {
+        tracing::warn!(%ip, "dcr throttle: ip locked out");
+    }
+
     if body.redirect_uris.is_empty() {
         return oauth_error(
             StatusCode::BAD_REQUEST,
@@ -754,6 +787,41 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterBody>)
     for uri in &body.redirect_uris {
         if let Err(msg) = validate_redirect_uri_at_registration(uri) {
             return oauth_error(StatusCode::BAD_REQUEST, "invalid_redirect_uri", &msg);
+        }
+    }
+
+    let mut bucket = match state.auth().storage().admin_bucket() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "open admin bucket");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error",
+            );
+        }
+    };
+    // Cap the total number of registered clients so the endpoint can't
+    // be used to fill storage (finding #4). Counted from the keyspace
+    // rather than kept as a counter, so deleted clients free a slot.
+    // Checked before the argon2id hash so a capped host doesn't burn
+    // CPU on requests it will reject anyway. A cap of 0 disables DCR.
+    match bucket.list_keys(Some(CLIENT_KEY_PREFIX)) {
+        Ok(keys) if keys.len() >= state.max_oauth_clients() => {
+            return oauth_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "registration_limit_reached",
+                "this host has reached its registered-client cap (WM_OAUTH_MAX_CLIENTS); contact the administrator",
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "count oauth clients");
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal error",
+            );
         }
     }
 
@@ -794,17 +862,6 @@ async fn register(State(state): State<AppState>, Json(body): Json<RegisterBody>)
         revoked_at: None,
     };
 
-    let mut bucket = match state.auth().storage().admin_bucket() {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(error = %e, "open admin bucket");
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "internal error",
-            );
-        }
-    };
     if let Err(e) = save_client(&mut bucket, &client) {
         tracing::error!(error = %e, "save oauth client");
         return oauth_error(
