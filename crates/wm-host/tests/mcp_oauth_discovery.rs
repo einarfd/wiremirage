@@ -27,14 +27,19 @@ impl Drop for Harness {
 }
 
 async fn start(trust_forwarded: bool) -> Harness {
+    start_with(trust_forwarded, None).await
+}
+
+async fn start_with(trust_forwarded: bool, pinned_base: Option<&str>) -> Harness {
     let storage = Storage::in_memory();
     let auth = Auth::new(storage.clone());
     let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
     let registry = Arc::new(Registry::new(storage.clone()));
     let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
     let journal = Journal::new(storage);
-    let state =
-        AppState::new(runtime, routes, auth, journal).with_trust_forwarded_headers(trust_forwarded);
+    let state = AppState::new(runtime, routes, auth, journal)
+        .with_trust_forwarded_headers(trust_forwarded)
+        .with_public_base_url(pinned_base.map(str::to_string));
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -201,4 +206,94 @@ async fn mcp_endpoint_401_carries_www_authenticate_discovery_hint() {
         www.contains("/.well-known/oauth-protected-resource"),
         "resource_metadata URL should point at the well-known: {www}"
     );
+}
+
+#[tokio::test]
+async fn pinned_public_base_url_overrides_host_header() {
+    // Security-audit finding #6: with WM_PUBLIC_BASE_URL set, the
+    // advertised base comes from the pin, not the request Host — a
+    // forged Host must not be baked into discovery metadata.
+    let h = start_with(false, Some("https://mock.example.com")).await;
+    let resp = client()
+        .get(format!(
+            "http://{}/.well-known/oauth-authorization-server",
+            h.addr
+        ))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["issuer"],
+        Value::String("https://mock.example.com".into())
+    );
+    assert_eq!(
+        body["token_endpoint"],
+        Value::String("https://mock.example.com/auth/oauth/token".into())
+    );
+    assert_eq!(
+        body["registration_endpoint"],
+        Value::String("https://mock.example.com/auth/oauth/register".into())
+    );
+
+    let resp = client()
+        .get(format!(
+            "http://{}/.well-known/oauth-protected-resource",
+            h.addr
+        ))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .expect("send");
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["resource"],
+        Value::String("https://mock.example.com/api/mcp".into())
+    );
+}
+
+#[tokio::test]
+async fn host_header_still_drives_base_url_when_unpinned() {
+    // Without the pin, the Host header drives the advertised base
+    // (documented fallback behavior).
+    let h = start(false).await;
+    let resp = client()
+        .get(format!(
+            "http://{}/.well-known/oauth-authorization-server",
+            h.addr
+        ))
+        .header("host", "public.example:8443")
+        .send()
+        .await
+        .expect("send");
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(
+        body["issuer"],
+        Value::String("http://public.example:8443".into())
+    );
+}
+
+#[tokio::test]
+async fn pinned_public_base_url_drives_www_authenticate_hint() {
+    let h = start_with(false, Some("https://mock.example.com")).await;
+    let resp = client()
+        .post(format!("http://{}/api/mcp", h.addr))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 401);
+    let www = resp
+        .headers()
+        .get("www-authenticate")
+        .expect("WWW-Authenticate header present")
+        .to_str()
+        .expect("header is ascii");
+    assert!(
+        www.contains("https://mock.example.com/.well-known/oauth-protected-resource"),
+        "resource_metadata should use the pinned base, got: {www}"
+    );
+    assert!(!www.contains("evil.example"), "forged Host leaked: {www}");
 }

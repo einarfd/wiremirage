@@ -43,8 +43,7 @@ impl WmMcpServer {
         Extension(parts): Extension<http::request::Parts>,
     ) -> Result<Json<WhoAmIResult>, ErrorData> {
         let auth = auth_from(&parts)?;
-        let base_url =
-            crate::auth_api::public_base_url(&parts.headers, self.state.trust_forwarded_headers());
+        let base_url = crate::auth_api::public_base_url(&self.state, &parts.headers);
         Ok(Json(WhoAmIResult {
             user: WhoAmIUser {
                 id: auth.user_id,

@@ -52,6 +52,16 @@ carry credentials.
   Defaults to `localhost`, which is what you want for local development. A
   real deployment must set it — and must have wildcard DNS and a wildcard
   certificate for `*.{apex}`. See [deployment](deployment.md#dns-and-tls).
+- `WM_PUBLIC_BASE_URL` — optional pin for the public base URL
+  (`scheme://host[:port]`, e.g. `https://wm.example.com`) that the host
+  advertises in OAuth `redirect_uri`s, `.well-known` discovery metadata,
+  `WWW-Authenticate` hints and UI links. When set, those URLs come from the
+  pin verbatim instead of being derived from the request `Host` header, so a
+  forged `Host` on a directly-reachable instance can't be baked into them
+  (security-audit finding #6). Register the pinned URL with your GitHub /
+  OIDC app as the callback. Unset = derive from the request `Host` (plus
+  `X-Forwarded-Proto` when `WM_TRUSTED_PROXY` is set). A malformed value
+  (wrong scheme, path, empty host) fails fast at startup.
 
 ## Authentication paths
 
@@ -346,8 +356,8 @@ trust store**, not a root list bundled with the binary. Two consequences:
   hostname, and turns on the whole posture together
   ([ADR-0027](adr/0027-single-trusted-proxy-switch.md)):
   - appends `Secure` to the `wm_session` / `wm_csrf` cookies;
-  - trusts `X-Forwarded-For` (per-IP login throttle) and `X-Forwarded-Proto` /
-    `-Host` (OAuth redirect-URI derivation);
+  - trusts `X-Forwarded-For` (per-IP login throttle) and `X-Forwarded-Proto`
+    (scheme in OAuth redirect-URI derivation);
   - adds the hostname(s) to the MCP `Host`-header allowlist, on top of the
     localhost defaults.
 
