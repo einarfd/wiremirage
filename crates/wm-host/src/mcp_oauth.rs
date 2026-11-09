@@ -1268,6 +1268,23 @@ fn build_redirect_with_params(base: &str, params: &[(&str, &str)]) -> String {
 }
 
 // -- Token: POST /auth/oauth/token ------------------------------------------
+//
+// Client authentication hardening (security-audit finding #5) lives in
+// [`authenticate_client`], shared with the revoke endpoint below: the
+// unknown-client path runs a dummy argon2id verify and returns the same
+// body as a wrong secret, so neither timing nor the response reveals
+// whether a client_id exists; and the registered
+// token_endpoint_auth_method is enforced, not just stored at
+// registration. Grant-type registration is enforced at dispatch below.
+
+/// A syntactically valid argon2id hash of a fixed dummy secret, used to
+/// equalize timing on the unknown-client path of the token endpoint.
+/// Computed once on first use; the plaintext is irrelevant — the verify
+/// just has to cost the same as a real client-secret check.
+static DUMMY_CLIENT_SECRET_HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    crate::local_auth::hash_password("wiremirage-dummy-client-secret")
+        .expect("hash dummy client secret")
+});
 
 #[derive(Debug, Deserialize)]
 struct TokenForm {
@@ -1329,21 +1346,31 @@ async fn token(
         }
     };
 
-    let client = match load_client(&mut bucket, &client_auth.client_id) {
-        Ok(Some(c)) if c.revoked_at.is_none() => c,
-        _ => {
-            return oauth_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_client",
-                "unknown or revoked client",
-            );
-        }
+    let client = match authenticate_client(&mut bucket, client_auth) {
+        Ok(c) => c,
+        Err(resp) => return *resp,
     };
-    if !crate::local_auth::verify_password(&client.client_secret_hash, &client_auth.client_secret) {
+
+    // Grant-type handling. A grant type this server doesn't implement at
+    // all is unsupported_grant_type regardless of the client; a grant we
+    // do implement but the client was not registered for is
+    // unauthorized_client (RFC 6749 §6) — enforced here, not just stored
+    // at registration (finding #5).
+    if !matches!(
+        form.grant_type.as_str(),
+        "authorization_code" | "refresh_token"
+    ) {
         return oauth_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_client",
-            "client authentication failed",
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+            &format!("unsupported grant_type {:?}", form.grant_type),
+        );
+    }
+    if !client.grant_types.iter().any(|g| g == &form.grant_type) {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            "client is not registered for this grant_type",
         );
     }
 
@@ -1351,21 +1378,27 @@ async fn token(
         "authorization_code" => {
             handle_authorization_code_grant(&mut bucket, &client, &form, &state).await
         }
-        "refresh_token" => handle_refresh_token_grant(&mut bucket, &client, &form).await,
-        other => oauth_error(
-            StatusCode::BAD_REQUEST,
-            "unsupported_grant_type",
-            &format!("unsupported grant_type {other:?}"),
-        ),
+        _ => handle_refresh_token_grant(&mut bucket, &client, &form).await,
     }
 }
 
 struct ClientAuth {
     client_id: String,
     client_secret: String,
+    method: ClientAuthMethod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientAuthMethod {
+    Basic,
+    Post,
 }
 
 fn extract_client_auth(headers: &HeaderMap, form: &TokenForm) -> Option<ClientAuth> {
+    // RFC 6749 §2.3.1 says clients SHOULD use HTTP Basic; some libraries
+    // default to form-post. Both are extracted here; whether the client
+    // may actually use the method it chose is enforced after lookup,
+    // against its registered token_endpoint_auth_method.
     if let Some(v) = headers.get(header::AUTHORIZATION)
         && let Ok(raw) = v.to_str()
         && let Some(b64) = raw.strip_prefix("Basic ")
@@ -1380,6 +1413,7 @@ fn extract_client_auth(headers: &HeaderMap, form: &TokenForm) -> Option<ClientAu
             return Some(ClientAuth {
                 client_id: id.to_string(),
                 client_secret: secret.to_string(),
+                method: ClientAuthMethod::Basic,
             });
         }
     }
@@ -1387,9 +1421,58 @@ fn extract_client_auth(headers: &HeaderMap, form: &TokenForm) -> Option<ClientAu
         return Some(ClientAuth {
             client_id: id.to_string(),
             client_secret: secret.to_string(),
+            method: ClientAuthMethod::Post,
         });
     }
     None
+}
+
+/// Authenticate a client at the token and revoke endpoints: load the
+/// record, verify the secret, enforce the registered
+/// token_endpoint_auth_method. The unknown/revoked path runs a dummy
+/// argon2id verify and returns the same body as a wrong secret, so
+/// neither timing nor payload reveals whether a client_id exists
+/// (security-audit finding #5). Shared by `token` and `revoke` so the
+/// two endpoints can't drift apart.
+fn authenticate_client(
+    bucket: &mut Bucket,
+    auth: ClientAuth,
+) -> Result<OAuthClient, Box<Response>> {
+    let client = match load_client(bucket, &auth.client_id) {
+        Ok(Some(c)) if c.revoked_at.is_none() => c,
+        _ => {
+            let _ =
+                crate::local_auth::verify_password(&DUMMY_CLIENT_SECRET_HASH, &auth.client_secret);
+            return Err(Box::new(oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "client authentication failed",
+            )));
+        }
+    };
+    if !crate::local_auth::verify_password(&client.client_secret_hash, &auth.client_secret) {
+        return Err(Box::new(oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "client authentication failed",
+        )));
+    }
+    // A client registered for client_secret_basic must not authenticate
+    // with form-post credentials, and vice versa. Unrecognized
+    // registered values keep the accept-both behavior.
+    let method_ok = match client.token_endpoint_auth_method.as_str() {
+        "client_secret_basic" => auth.method == ClientAuthMethod::Basic,
+        "client_secret_post" => auth.method == ClientAuthMethod::Post,
+        _ => true,
+    };
+    if !method_ok {
+        return Err(Box::new(oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "client is not registered for the authentication method used (token_endpoint_auth_method)",
+        )));
+    }
+    Ok(client)
 }
 
 async fn handle_authorization_code_grant(
@@ -1618,6 +1701,11 @@ async fn handle_refresh_token_grant(
 }
 
 // -- Revoke: POST /auth/oauth/revoke ----------------------------------------
+//
+// Client auth goes through the same [`authenticate_client`] as the token
+// endpoint (finding #5): dummy verify + identical body on unknown
+// clients, registered auth method enforced. The token parameter itself
+// always answers 200 per RFC 7009.
 
 #[derive(Debug, Deserialize)]
 struct RevokeForm {
@@ -1667,23 +1755,10 @@ async fn revoke(
             "missing client credentials",
         );
     };
-    let client = match load_client(&mut bucket, &client_auth.client_id) {
-        Ok(Some(c)) if c.revoked_at.is_none() => c,
-        _ => {
-            return oauth_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_client",
-                "unknown or revoked client",
-            );
-        }
+    let client = match authenticate_client(&mut bucket, client_auth) {
+        Ok(c) => c,
+        Err(resp) => return *resp,
     };
-    if !crate::local_auth::verify_password(&client.client_secret_hash, &client_auth.client_secret) {
-        return oauth_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_client",
-            "client authentication failed",
-        );
-    }
 
     let hash = hash_token(&form.token);
 

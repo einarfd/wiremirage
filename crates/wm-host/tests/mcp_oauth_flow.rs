@@ -364,6 +364,251 @@ async fn token_endpoint_rejects_wrong_client_secret() {
     assert_eq!(body["error"], "invalid_client");
 }
 
+async fn post_token_form(h: &Harness, client: &Client, body: String) -> reqwest::Response {
+    client
+        .post(url(h, "/auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("token")
+}
+
+async fn register_client(h: &Harness, client: &Client, extra: Value) -> (String, String) {
+    let mut body = json!({
+        "client_name": "test",
+        "redirect_uris": ["http://127.0.0.1:0/cb"],
+    });
+    if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra_obj {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    let reg = client
+        .post(url(h, "/auth/oauth/register"))
+        .json(&body)
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(reg.status(), 201, "register should 201");
+    let reg_json: Value = reg.json().await.unwrap();
+    (
+        reg_json["client_id"].as_str().unwrap().to_string(),
+        reg_json["client_secret"].as_str().unwrap().to_string(),
+    )
+}
+
+#[tokio::test]
+async fn token_endpoint_unknown_client_matches_wrong_secret_response() {
+    // Finding #5: the unknown-client path must be indistinguishable from
+    // a wrong secret — same status and same body. (Timing is equalized
+    // by a dummy argon2id verify in the handler; the body must not leak
+    // existence either.)
+    let h = start().await;
+    let client = no_redirect_client();
+    let (client_id, _) = register_client(&h, &client, json!({})).await;
+
+    let mkbody = |id: &str, secret: &str| {
+        format!(
+            "grant_type=authorization_code&code=x&redirect_uri=http://127.0.0.1:0/cb&code_verifier=v&client_id={}&client_secret={}",
+            urlencode(id),
+            urlencode(secret),
+        )
+    };
+    let wrong = post_token_form(&h, &client, mkbody(&client_id, "wmcs_wrong")).await;
+    let unknown = post_token_form(&h, &client, mkbody("wmc_unknown", "wmcs_wrong")).await;
+
+    assert_eq!(wrong.status(), 401);
+    assert_eq!(unknown.status(), 401);
+    let wrong_body: Value = wrong.json().await.unwrap();
+    let unknown_body: Value = unknown.json().await.unwrap();
+    assert_eq!(
+        wrong_body, unknown_body,
+        "unknown client must not be distinguishable from wrong secret"
+    );
+    assert_eq!(unknown_body["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn token_endpoint_enforces_registered_auth_method() {
+    // Finding #5: a client registered for client_secret_basic cannot
+    // authenticate with form-post credentials, even with the correct
+    // secret — and a default (client_secret_post) client cannot use
+    // Basic.
+    let h = start().await;
+    let client = no_redirect_client();
+    let (basic_id, basic_secret) = register_client(
+        &h,
+        &client,
+        json!({ "token_endpoint_auth_method": "client_secret_basic" }),
+    )
+    .await;
+    let (post_id, post_secret) = register_client(&h, &client, json!({})).await;
+
+    let grant_fields =
+        "grant_type=authorization_code&code=x&redirect_uri=http://127.0.0.1:0/cb&code_verifier=v";
+
+    // Correct secret, wrong method (POST on a basic-only client) → 401.
+    let resp = post_token_form(
+        &h,
+        &client,
+        format!(
+            "{grant_fields}&client_id={}&client_secret={}",
+            urlencode(&basic_id),
+            urlencode(&basic_secret),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), 401);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_client");
+
+    // Correct secret via Basic on the basic-only client → passes client
+    // auth, then fails on the bogus code with 400 invalid_grant.
+    let basic =
+        base64::engine::general_purpose::STANDARD.encode(format!("{basic_id}:{basic_secret}"));
+    let resp = client
+        .post(url(&h, "/auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("authorization", format!("Basic {basic}"))
+        .body(grant_fields)
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(
+        resp.status(),
+        400,
+        "Basic-authenticated request should pass client auth and fail on the bad code"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_grant");
+
+    // Reverse: Basic on the default (client_secret_post) client → 401.
+    let basic =
+        base64::engine::general_purpose::STANDARD.encode(format!("{post_id}:{post_secret}"));
+    let resp = client
+        .post(url(&h, "/auth/oauth/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("authorization", format!("Basic {basic}"))
+        .body(grant_fields)
+        .send()
+        .await
+        .expect("token");
+    assert_eq!(resp.status(), 401);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn token_endpoint_enforces_registered_grant_types() {
+    // Finding #5: a client registered for authorization_code only gets
+    // 400 unauthorized_client on a refresh_token grant.
+    let h = start().await;
+    let client = no_redirect_client();
+    let (client_id, client_secret) = register_client(
+        &h,
+        &client,
+        json!({ "grant_types": ["authorization_code"] }),
+    )
+    .await;
+
+    let resp = post_token_form(
+        &h,
+        &client,
+        format!(
+            "grant_type=refresh_token&refresh_token=wmr_x&client_id={}&client_secret={}",
+            urlencode(&client_id),
+            urlencode(&client_secret),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "unauthorized_client");
+}
+
+async fn post_revoke_form(h: &Harness, client: &Client, body: String) -> reqwest::Response {
+    client
+        .post(url(h, "/auth/oauth/revoke"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .expect("revoke")
+}
+
+#[tokio::test]
+async fn revoke_endpoint_unknown_client_matches_wrong_secret_response() {
+    // Finding #5 twin: /auth/oauth/revoke had the same oracle — unknown
+    // client must be indistinguishable from a wrong secret (same status
+    // and body; timing is equalized by the dummy verify in
+    // authenticate_client).
+    let h = start().await;
+    let client = no_redirect_client();
+    let (client_id, _) = register_client(&h, &client, json!({})).await;
+
+    let mkbody = |id: &str, secret: &str| {
+        format!(
+            "token=wmm_x&client_id={}&client_secret={}",
+            urlencode(id),
+            urlencode(secret),
+        )
+    };
+    let wrong = post_revoke_form(&h, &client, mkbody(&client_id, "wmcs_wrong")).await;
+    let unknown = post_revoke_form(&h, &client, mkbody("wmc_unknown", "wmcs_wrong")).await;
+
+    assert_eq!(wrong.status(), 401);
+    assert_eq!(unknown.status(), 401);
+    let wrong_body: Value = wrong.json().await.unwrap();
+    let unknown_body: Value = unknown.json().await.unwrap();
+    assert_eq!(
+        wrong_body, unknown_body,
+        "unknown client must not be distinguishable from wrong secret"
+    );
+    assert_eq!(unknown_body["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn revoke_endpoint_enforces_registered_auth_method() {
+    // A basic-only client cannot revoke with form-post credentials even
+    // with the correct secret; Basic with the correct secret passes
+    // client auth and gets the RFC 7009 always-200.
+    let h = start().await;
+    let client = no_redirect_client();
+    let (basic_id, basic_secret) = register_client(
+        &h,
+        &client,
+        json!({ "token_endpoint_auth_method": "client_secret_basic" }),
+    )
+    .await;
+
+    let resp = post_revoke_form(
+        &h,
+        &client,
+        format!(
+            "token=wmm_x&client_id={}&client_secret={}",
+            urlencode(&basic_id),
+            urlencode(&basic_secret),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), 401);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "invalid_client");
+
+    let basic =
+        base64::engine::general_purpose::STANDARD.encode(format!("{basic_id}:{basic_secret}"));
+    let resp = client
+        .post(url(&h, "/auth/oauth/revoke"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("authorization", format!("Basic {basic}"))
+        .body("token=wmm_x")
+        .send()
+        .await
+        .expect("revoke");
+    assert_eq!(resp.status(), 200);
+}
+
 #[tokio::test]
 async fn token_endpoint_rejects_unknown_grant_type() {
     let h = start().await;
