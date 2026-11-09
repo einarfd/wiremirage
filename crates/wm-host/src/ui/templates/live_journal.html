@@ -150,17 +150,58 @@
   }
 
   function renderRow(entry) {
+    // Build the row with DOM APIs + textContent, never by assigning an
+    // HTML string: journal entries come from unauthenticated mock
+    // traffic, so any field rendered as HTML would be a stored-XSS sink
+    // (finding #7).
     var row = document.createElement("tr");
     var traceShort = entry.trace_id ? entry.trace_id.slice(0, 8) : "";
-    row.innerHTML =
-      '<td><a href="/ui/journal/' + encodeURIComponent(entry.group_name) + '/' + entry.number + '">' +
-      '<time datetime="' + entry.created_at + '">' + fmtTime(entry.created_at) + '</time></a></td>' +
-      '<td><a href="/ui/groups/' + encodeURIComponent(entry.group_name) + '">' + entry.group_name + '</a></td>' +
-      '<td>' + entry.request.method + '</td>' +
-      '<td><code>' + entry.request.path + '</code></td>' +
-      '<td><span class="status status-' + statusClass(entry.response.status) + '">' + entry.response.status + '</span></td>' +
-      '<td>' + entry.duration_ms + ' ms</td>' +
-      '<td class="text-muted">' + (traceShort ? '<code>' + traceShort + '</code>' : '—') + '</td>';
+
+    function cell() {
+      var td = document.createElement("td");
+      row.appendChild(td);
+      return td;
+    }
+
+    var tdTime = cell();
+    var aTime = document.createElement("a");
+    aTime.href = "/ui/journal/" + encodeURIComponent(entry.group_name) + "/" + entry.number;
+    var time = document.createElement("time");
+    time.dateTime = entry.created_at;
+    time.textContent = fmtTime(entry.created_at);
+    aTime.appendChild(time);
+    tdTime.appendChild(aTime);
+
+    var tdGroup = cell();
+    var aGroup = document.createElement("a");
+    aGroup.href = "/ui/groups/" + encodeURIComponent(entry.group_name);
+    aGroup.textContent = entry.group_name;
+    tdGroup.appendChild(aGroup);
+
+    cell().textContent = entry.request.method;
+
+    var tdPath = cell();
+    var codePath = document.createElement("code");
+    codePath.textContent = entry.request.path;
+    tdPath.appendChild(codePath);
+
+    var tdStatus = cell();
+    var spanStatus = document.createElement("span");
+    spanStatus.className = "status status-" + statusClass(entry.response.status);
+    spanStatus.textContent = entry.response.status;
+    tdStatus.appendChild(spanStatus);
+
+    cell().textContent = entry.duration_ms + " ms";
+
+    var tdTrace = cell();
+    tdTrace.className = "text-muted";
+    if (traceShort) {
+      var codeTrace = document.createElement("code");
+      codeTrace.textContent = traceShort;
+      tdTrace.appendChild(codeTrace);
+    } else {
+      tdTrace.textContent = "—";
+    }
     // Clear the "waiting" placeholder if present.
     var empty = document.getElementById("live-empty");
     if (empty) empty.remove();

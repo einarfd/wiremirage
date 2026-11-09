@@ -145,12 +145,25 @@
   es.addEventListener("handled", function (ev) {
     try {
       var e = JSON.parse(ev.data);
+      // DOM APIs + textContent, never an HTML string — journal entries
+      // come from unauthenticated mock traffic (finding #7).
       var li = document.createElement("li");
-      li.innerHTML =
-        '<code>' + fmtTime(e.created_at) + '</code> ' +
-        '<span class="status status-' + statusClass(e.response.status) + '">' + e.response.status + '</span> ' +
-        '<a href="/ui/journal/' + encodeURIComponent(e.group_name) + '/' + e.number + '">' +
-        e.request.method + ' <code>' + e.request.path + '</code></a>';
+      var codeTime = document.createElement("code");
+      codeTime.textContent = fmtTime(e.created_at);
+      li.appendChild(codeTime);
+      li.appendChild(document.createTextNode(" "));
+      var spanStatus = document.createElement("span");
+      spanStatus.className = "status status-" + statusClass(e.response.status);
+      spanStatus.textContent = e.response.status;
+      li.appendChild(spanStatus);
+      li.appendChild(document.createTextNode(" "));
+      var a = document.createElement("a");
+      a.href = "/ui/journal/" + encodeURIComponent(e.group_name) + "/" + e.number;
+      a.appendChild(document.createTextNode(e.request.method + " "));
+      var codePath = document.createElement("code");
+      codePath.textContent = e.request.path;
+      a.appendChild(codePath);
+      li.appendChild(a);
       var empty = document.getElementById("group-live-empty");
       if (empty) empty.remove();
       list.insertBefore(li, list.firstChild);
