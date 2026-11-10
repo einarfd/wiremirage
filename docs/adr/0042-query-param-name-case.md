@@ -1,6 +1,6 @@
 # ADR-0042: Query parameter names keep the case sent
 
-**Status:** Proposed
+**Status:** Accepted
 
 Snapshot of the Arkiv `wiremirage` workspace ADR of the same name — edit
 that one, then re-export; never edit this file in place.
