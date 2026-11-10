@@ -521,3 +521,26 @@ async fn journal_entry_404_when_unknown_group() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 404);
 }
+
+#[test]
+fn journal_templates_do_not_use_innerhtml() {
+    // Security-audit finding #7: the live-journal SSE rows are built
+    // from journal entries, which come from unauthenticated mock
+    // traffic. Building rows with innerHTML would be a stored-XSS
+    // sink, so both templates must use DOM APIs + textContent.
+    for (name, src) in [
+        (
+            "live_journal.html",
+            include_str!("../src/ui/templates/live_journal.html"),
+        ),
+        (
+            "group_detail.html",
+            include_str!("../src/ui/templates/group_detail.html"),
+        ),
+    ] {
+        assert!(
+            !src.contains("innerHTML"),
+            "{name} builds rows with innerHTML — stored-XSS sink (finding #7)"
+        );
+    }
+}
