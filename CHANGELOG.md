@@ -1,13 +1,38 @@
-# Changelog
-
-Notable changes to WireMirage. Format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-WireMirage is pre-1.0: breaking changes are allowed on minor versions when
-they make the design better, and are called out here.
-
 ## [Unreleased]
+
+## [0.1.5] — 2026-11-09
+
+### Security
+
+Fixes from the 2026-10-24 security review (findings #1–#9):
+
+- The login `next` parameter can no longer be an open redirect: only
+  printable-ASCII, host-relative targets are accepted, and
+  backslash / protocol-relative bypasses are rejected (#76).
+- Repeated response headers (e.g. multiple `set-cookie`) are sent as
+  multiple entries again instead of collapsing to the last value, and
+  wire-vs-journal header filtering now happens in one shared place (#77).
+- Route and journal reads are owner-or-admin per
+  [ADR-0041](docs/adr/0041-owner-or-admin-reads.md) on REST, MCP and UI,
+  behind one shared gate (#78, #79, #83, #84); 404 bodies name the record
+  kind ("no such group" vs "no such route") (#87, #88).
+- Unauthenticated OAuth dynamic client registration (RFC 7591) is
+  rate-limited per IP and capped host-wide via `WM_OAUTH_MAX_CLIENTS`
+  (default 1000, `0` disables registration) (#93).
+- The OAuth token and revoke endpoints no longer reveal whether a
+  `client_id` exists through timing or response body, and the registered
+  `token_endpoint_auth_method` / `grant_types` are enforced (#97).
+- New `WM_PUBLIC_BASE_URL` pins the advertised public base URL, so a
+  forged `Host` header can't be baked into OAuth redirect URIs or
+  discovery metadata (#98).
+- The web UI journal views build rows with DOM APIs instead of
+  `innerHTML`, removing a latent stored-XSS sink fed by mock traffic
+  (#99).
+- The precompiled engine cache in the temp dir is written `0600` and is
+  only deserialized when the open file's metadata shows owner-only
+  permissions and our own uid — no stat-then-read TOCTOU (#100, #104).
+- The login page URL-encodes `next` in the OAuth start links, so `&` /
+  `#` in it can't split or truncate the parameter (#86).
 
 ### Changed
 
@@ -29,6 +54,9 @@ they make the design better, and are called out here.
   `show_unmatched` (and the UI/CLI renders of them) show exactly what the
   SUT sent. The recorded pairs are the same parsed pairs the handler saw;
   `request.path` stays path-only so path filters don't match query text.
+- Dependency bumps: the swc family moves to 27 in one commit (swc_common 27,
+  swc_ecma_ast 30, parser 47, transforms 57, codegen 33 — #103); rmcp 3.9.0
+  clears RUSTSEC-2026-0462 (#94); node 24 LTS image digest refresh (#95).
 
 ## [0.1.4] — 2026-10-23
 

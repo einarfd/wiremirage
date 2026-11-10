@@ -5295,7 +5295,7 @@ dependencies = [
 
 [[package]]
 name = "wm-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -5312,7 +5312,7 @@ dependencies = [
 
 [[package]]
 name = "wm-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -5329,7 +5329,7 @@ dependencies = [
 
 [[package]]
 name = "wm-host"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5372,7 +5372,7 @@ dependencies = [
 
 [[package]]
 name = "wm-transpile"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "swc_common",
  "swc_ecma_ast",
