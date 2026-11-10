@@ -65,7 +65,7 @@ pub async fn require_bearer(
 /// discovery from the header value lands on a URL that matches the
 /// AS the host is actually advertising.
 fn unauthenticated(state: &AppState, headers: &HeaderMap, message: &'static str) -> Response {
-    let base = derive_public_base(headers, state.trust_forwarded_headers());
+    let base = crate::auth_api::public_base_url(state, headers);
     let metadata = format!("{base}/.well-known/oauth-protected-resource");
     let www_authenticate = format!("Bearer realm=\"wm-host\", resource_metadata=\"{metadata}\"");
 
@@ -74,21 +74,4 @@ fn unauthenticated(state: &AppState, headers: &HeaderMap, message: &'static str)
         resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
     }
     resp
-}
-
-fn derive_public_base(headers: &HeaderMap, trust_forwarded: bool) -> String {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8080");
-    let scheme = if trust_forwarded
-        && let Some(v) = headers.get("x-forwarded-proto")
-        && let Ok(s) = v.to_str()
-        && !s.is_empty()
-    {
-        s.to_string()
-    } else {
-        "http".to_string()
-    };
-    format!("{scheme}://{host}")
 }

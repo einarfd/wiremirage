@@ -367,7 +367,7 @@ async fn protected_resource_metadata(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Json<serde_json::Value> {
-    let base = derive_public_base(&headers, state.trust_forwarded_headers());
+    let base = crate::auth_api::public_base_url(&state, &headers);
     Json(json!({
         "resource": format!("{base}/api/mcp"),
         "authorization_servers": [base.clone()],
@@ -386,7 +386,7 @@ async fn authorization_server_metadata(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Json<serde_json::Value> {
-    let base = derive_public_base(&headers, state.trust_forwarded_headers());
+    let base = crate::auth_api::public_base_url(&state, &headers);
     Json(json!({
         "issuer": base.clone(),
         "authorization_endpoint": format!("{base}/auth/oauth/authorize"),
@@ -406,29 +406,6 @@ async fn authorization_server_metadata(
             "client_secret_basic",
         ],
     }))
-}
-
-/// Build the base URL (`scheme://host`) for advertising discovery
-/// values. Mirrors the redirect-URI logic in `auth_api.rs`: derive
-/// from the `Host` header (always present on HTTP/1.1), and honor
-/// `X-Forwarded-Proto` only when the proxy is trusted (`WM_TRUSTED_PROXY`) so
-/// a directly-reachable host can't be tricked into advertising
-/// HTTPS URLs it can't actually serve.
-fn derive_public_base(headers: &HeaderMap, trust_forwarded: bool) -> String {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8080");
-    let scheme = if trust_forwarded
-        && let Some(v) = headers.get("x-forwarded-proto")
-        && let Ok(s) = v.to_str()
-        && !s.is_empty()
-    {
-        s.to_string()
-    } else {
-        "http".to_string()
-    };
-    format!("{scheme}://{host}")
 }
 
 /// Compare an RFC 8707 `resource` query value to the URL of this
@@ -976,7 +953,7 @@ async fn authorize(
     if let Some(requested) = q.resource.as_deref().filter(|s| !s.is_empty()) {
         let expected = format!(
             "{base}/api/mcp",
-            base = derive_public_base(&headers, state.trust_forwarded_headers())
+            base = crate::auth_api::public_base_url(&state, &headers)
         );
         if !resource_matches_mcp(requested, &expected) {
             return (

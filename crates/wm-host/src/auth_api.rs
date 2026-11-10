@@ -392,7 +392,7 @@ async fn start_github(
         return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
     }
 
-    let redirect_uri = derive_redirect_uri(&headers, state.trust_forwarded_headers());
+    let redirect_uri = derive_redirect_uri(&state, &headers);
     let authorize = github.authorize_url(&redirect_uri, &nonce);
     Redirect::to(&authorize).into_response()
 }
@@ -459,7 +459,7 @@ async fn github_callback(
             .into_response();
     };
 
-    let redirect_uri = derive_redirect_uri(&headers, state.trust_forwarded_headers());
+    let redirect_uri = derive_redirect_uri(&state, &headers);
     let access_token = match github.exchange_code(&code, &redirect_uri).await {
         Ok(t) => t,
         Err(e) => {
@@ -629,7 +629,7 @@ async fn start_oidc(
         return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
     }
 
-    let redirect_uri = derive_oidc_redirect_uri(&headers, state.trust_forwarded_headers());
+    let redirect_uri = derive_oidc_redirect_uri(&state, &headers);
     let authorize = oidc.authorize_url(&redirect_uri, &nonce, &pkce_challenge);
     Redirect::to(&authorize).into_response()
 }
@@ -686,7 +686,7 @@ async fn oidc_callback(
             .into_response();
     };
 
-    let redirect_uri = derive_oidc_redirect_uri(&headers, state.trust_forwarded_headers());
+    let redirect_uri = derive_oidc_redirect_uri(&state, &headers);
     let access_token = match oidc
         .exchange_code(&code, &redirect_uri, &record.pkce_verifier)
         .await
@@ -809,11 +809,8 @@ fn consume_oidc_state(state: &AppState, nonce: &str) -> Result<OidcStateRecord, 
     Ok(record)
 }
 
-fn derive_oidc_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
-    format!(
-        "{}/auth/callback/oidc",
-        public_base_url(headers, trust_forwarded)
-    )
+fn derive_oidc_redirect_uri(state: &AppState, headers: &HeaderMap) -> String {
+    format!("{}/auth/callback/oidc", public_base_url(state, headers))
 }
 
 enum StateError {
@@ -842,22 +839,76 @@ fn consume_oauth_state(state: &AppState, nonce: &str) -> Result<String, StateErr
     Ok(safe_next)
 }
 
+/// Parse and normalize a `WM_PUBLIC_BASE_URL` value: `scheme://host[:port]`
+/// with scheme `http` or `https`, no path, query, fragment or userinfo.
+/// A trailing slash is trimmed. Returns the normalized base URL
+/// (`scheme://host[:port]`, scheme lowercased), or an error naming what's
+/// wrong — a malformed pin must fail fast at startup, not silently fall
+/// back to the request-derived value.
+pub fn parse_public_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let (scheme, rest) = trimmed
+        .split_once("://")
+        .ok_or_else(|| format!("expected scheme://host, got {raw:?}"))?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("scheme must be http or https, got {scheme:?}"));
+    }
+    if rest.is_empty() {
+        return Err("host is empty".to_string());
+    }
+    if rest.chars().any(|c| matches!(c, '/' | '?' | '#' | '@')) {
+        return Err(format!(
+            "host must not contain path, query, fragment or userinfo: {rest:?}"
+        ));
+    }
+    // Reject invalid host characters and non-numeric ports by parsing
+    // the assembled URL as an http::Uri (operator-supplied config, but
+    // a garbage pin should fail at startup, not produce garbage URLs).
+    let uri: http::Uri = format!("{scheme}://{rest}")
+        .parse()
+        .map_err(|e| format!("invalid host {rest:?}: {e}"))?;
+    if uri.host().map(str::is_empty).unwrap_or(true) {
+        return Err("host is empty".to_string());
+    }
+    // http::Uri parses ports lazily, so a non-numeric port slips through
+    // the parse above — reject it explicitly. Bracketed IPv6 literals
+    // carry the port after the closing bracket.
+    let port = if let Some(end) = rest.find(']') {
+        rest[end + 1..].strip_prefix(':')
+    } else {
+        rest.rsplit_once(':').map(|(_, p)| p)
+    };
+    if let Some(p) = port
+        && p.parse::<u16>().is_err()
+    {
+        return Err(format!("invalid port in host: {rest:?}"));
+    }
+    Ok(format!("{scheme}://{rest}"))
+}
+
 /// Build the redirect_uri we tell GitHub to send the user back to.
 /// MUST match what's registered on the GitHub OAuth app's settings
 /// page (within the loopback-port wildcard described in RFC 8252,
 /// which GitHub honors for `http://localhost:<port>` URLs).
-/// The host's public base URL (`{scheme}://{host}`), derived from the
-/// request. `Host` is taken verbatim (a reverse proxy like Caddy
-/// preserves it); the scheme comes from `X-Forwarded-Proto` when the
-/// proxy is trusted (`WM_TRUSTED_PROXY`), else `http` for the loopback
-/// dev case. Shared by the OAuth redirect-URI and the "Connect an agent"
-/// page so both report the same public origin.
-pub(crate) fn public_base_url(headers: &HeaderMap, trust_forwarded: bool) -> String {
+/// The host's public base URL (`{scheme}://{host}`). When
+/// `WM_PUBLIC_BASE_URL` is set, that pin is used verbatim, so a forged
+/// request `Host` can't be baked into redirect_uris or discovery metadata
+/// (security-audit finding #6). Otherwise it's derived from the request:
+/// `Host` is taken verbatim (a reverse proxy like Caddy preserves it);
+/// the scheme comes from `X-Forwarded-Proto` when the proxy is trusted
+/// (`WM_TRUSTED_PROXY`), else `http` for the loopback dev case. Shared by
+/// the OAuth redirect-URI and the "Connect an agent" page so both report
+/// the same public origin.
+pub(crate) fn public_base_url(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(pinned) = state.public_base_url() {
+        return pinned.to_string();
+    }
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:8080");
-    let scheme = if trust_forwarded
+    let scheme = if state.trust_forwarded_headers()
         && let Some(v) = headers.get("x-forwarded-proto")
         && let Ok(s) = v.to_str()
         && !s.is_empty()
@@ -876,24 +927,55 @@ pub(crate) fn public_base_url(headers: &HeaderMap, trust_forwarded: bool) -> Str
 /// `Host` *is* the apex; we reuse [`public_base_url`]'s scheme/host derivation
 /// (which also carries the dev port, e.g. `localhost:8080`) and prefix the
 /// group's DNS label. No trailing slash; append the route path to taste.
-pub(crate) fn group_base_url(group: &str, headers: &HeaderMap, trust_forwarded: bool) -> String {
-    let base = public_base_url(headers, trust_forwarded);
+pub(crate) fn group_base_url(group: &str, state: &AppState, headers: &HeaderMap) -> String {
+    let base = public_base_url(state, headers);
     match base.split_once("://") {
         Some((scheme, host)) => format!("{scheme}://{group}.{host}"),
         None => format!("{group}.{base}"),
     }
 }
 
-fn derive_redirect_uri(headers: &HeaderMap, trust_forwarded: bool) -> String {
-    format!(
-        "{}/auth/callback",
-        public_base_url(headers, trust_forwarded)
-    )
+fn derive_redirect_uri(state: &AppState, headers: &HeaderMap) -> String {
+    format!("{}/auth/callback", public_base_url(state, headers))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_next;
+    use super::{parse_public_base_url, sanitize_next};
+
+    #[test]
+    fn parse_public_base_url_accepts_scheme_host_and_port() {
+        assert_eq!(
+            parse_public_base_url("https://mock.example.com").unwrap(),
+            "https://mock.example.com"
+        );
+        assert_eq!(
+            parse_public_base_url("http://localhost:8080/").unwrap(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            parse_public_base_url("  HTTPS://Example.COM  ").unwrap(),
+            "https://Example.COM"
+        );
+        assert_eq!(
+            parse_public_base_url("http://[::1]:8080").unwrap(),
+            "http://[::1]:8080"
+        );
+    }
+
+    #[test]
+    fn parse_public_base_url_rejects_malformed_values() {
+        assert!(parse_public_base_url("mock.example.com").is_err());
+        assert!(parse_public_base_url("ftp://mock.example.com").is_err());
+        assert!(parse_public_base_url("https://").is_err());
+        assert!(parse_public_base_url("https://mock.example.com/path").is_err());
+        assert!(parse_public_base_url("https://user@mock.example.com").is_err());
+        assert!(parse_public_base_url("https://mock.example.com/?q=1").is_err());
+        // Invalid host characters and non-numeric ports are rejected by
+        // the http::Uri re-parse.
+        assert!(parse_public_base_url("https://exa mple.com").is_err());
+        assert!(parse_public_base_url("https://mock.example.com:abc").is_err());
+    }
 
     #[test]
     fn sanitize_next_accepts_host_relative_paths() {

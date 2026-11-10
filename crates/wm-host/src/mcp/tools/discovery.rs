@@ -265,7 +265,6 @@ impl WmMcpServer {
             .registry()
             .list_routes()
             .map_err(map_registry_error)?;
-        let trust = self.state.trust_forwarded_headers();
         // Same scoping as the group list: admin counts everything, a
         // tenant counts only groups they own (ADR-0030 SemFLIP).
         let visible: Option<std::collections::HashSet<String>> = if auth.is_admin {
@@ -282,7 +281,8 @@ impl WmMcpServer {
             .into_iter()
             .map(|g| {
                 let route_count = all_routes.iter().filter(|r| r.group_id == g.id).count() as u32;
-                let base_url = crate::auth_api::group_base_url(&g.name, &parts.headers, trust);
+                let base_url =
+                    crate::auth_api::group_base_url(&g.name, &self.state, &parts.headers);
                 GroupSummary {
                     is_mine: g.owner_id == auth.user_id,
                     owner_id: g.owner_id,
@@ -294,8 +294,7 @@ impl WmMcpServer {
                 }
             })
             .collect();
-        let base_url =
-            crate::auth_api::public_base_url(&parts.headers, self.state.trust_forwarded_headers());
+        let base_url = crate::auth_api::public_base_url(&self.state, &parts.headers);
         Ok(Json(SummarizeWorkspaceResult {
             host: HostInfo {
                 version: HOST_VERSION.into(),
@@ -620,11 +619,7 @@ impl WmMcpServer {
         {
             MatchProbe::Hit(m) => Ok(Json(FindRouteResult {
                 matched: true,
-                route: Some(RouteRecord::build(
-                    &m.route,
-                    &parts.headers,
-                    self.state.trust_forwarded_headers(),
-                )),
+                route: Some(RouteRecord::build(&m.route, &self.state, &parts.headers)),
                 path_params: Some(m.path_params),
                 near_misses: Vec::new(),
             })),

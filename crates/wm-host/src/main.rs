@@ -127,6 +127,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(apex = %apex, "apex host set (mock traffic served on group subdomains; ADR-0030)");
     state = state.with_apex_host(apex);
 
+    // Security-audit finding #6: `WM_PUBLIC_BASE_URL=<scheme>://<host[:port]>`
+    // pins the public base URL advertised in OAuth redirect_uris, discovery
+    // metadata, WWW-Authenticate hints and UI links, so a forged request
+    // `Host` header can't be baked into them. Unset = derive from the request
+    // `Host` as before. A malformed value fails fast here, naming the var.
+    let public_base_url = match env::var("WM_PUBLIC_BASE_URL") {
+        Ok(raw) if !raw.trim().is_empty() => Some(
+            wm_host::auth_api::parse_public_base_url(&raw)
+                .map_err(|e| anyhow!("WM_PUBLIC_BASE_URL: {e}"))?,
+        ),
+        _ => None,
+    };
+    if let Some(base) = &public_base_url {
+        tracing::info!(base = %base, "WM_PUBLIC_BASE_URL set; advertised public URLs pinned to it");
+    }
+    state = state.with_public_base_url(public_base_url);
+
     // Security-audit finding #4: `POST /auth/oauth/register` (DCR) is
     // unauthenticated and each attempt costs an argon2id hash, so the
     // endpoint is rate-limited per IP and capped host-wide. The cap is

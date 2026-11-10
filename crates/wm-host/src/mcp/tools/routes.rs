@@ -51,10 +51,10 @@ pub struct GroupRef {
 impl RouteRecord {
     /// Build a record, computing the per-group `url` from the request
     /// headers (the apex this control-plane MCP call lands on).
-    pub fn build(r: &Route, headers: &http::HeaderMap, trust_forwarded: bool) -> Self {
+    pub fn build(r: &Route, state: &crate::AppState, headers: &http::HeaderMap) -> Self {
         let url = format!(
             "{}{}",
-            crate::auth_api::group_base_url(&r.group_name, headers, trust_forwarded),
+            crate::auth_api::group_base_url(&r.group_name, state, headers),
             r.path
         );
         Self {
@@ -293,11 +293,10 @@ impl WmMcpServer {
         sort_routes(&mut filtered, sort_key, dir);
 
         let (page, total, next_offset) = slice_for_page(&filtered, offset, limit);
-        let trust = self.state.trust_forwarded_headers();
         Ok(Json(ListRoutesResult {
             routes: page
                 .iter()
-                .map(|r| RouteRecord::build(r, &parts.headers, trust))
+                .map(|r| RouteRecord::build(r, &self.state, &parts.headers))
                 .collect(),
             total,
             next_offset,
@@ -325,8 +324,8 @@ impl WmMcpServer {
         .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(RouteRecord::build(
             &route,
+            &self.state,
             &parts.headers,
-            self.state.trust_forwarded_headers(),
         )))
     }
 
@@ -378,8 +377,8 @@ impl WmMcpServer {
             .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(RouteRecord::build(
             &route,
+            &self.state,
             &parts.headers,
-            self.state.trust_forwarded_headers(),
         )))
     }
 
@@ -405,8 +404,8 @@ impl WmMcpServer {
             .map_err(crate::mcp::error::map_api_error)?;
         Ok(Json(RouteRecord::build(
             &updated,
+            &self.state,
             &parts.headers,
-            self.state.trust_forwarded_headers(),
         )))
     }
 

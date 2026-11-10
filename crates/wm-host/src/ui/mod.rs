@@ -267,7 +267,7 @@ pub fn router(state: AppState) -> Router {
 /// public origin) and paste-ready client configs. No forms; the token
 /// is a placeholder with a link to the tokens page.
 async fn connect(State(state): State<AppState>, auth: AuthContext, headers: HeaderMap) -> Response {
-    let base = crate::auth_api::public_base_url(&headers, state.trust_forwarded_headers());
+    let base = crate::auth_api::public_base_url(&state, &headers);
     let mcp_url = format!("{base}/api/mcp");
     render(
         &state,
@@ -394,15 +394,7 @@ async fn groups_list_page(
     let rows: Vec<GroupsListRow> = paged
         .groups
         .iter()
-        .map(|g| {
-            GroupsListRow::from_group(
-                g,
-                &owner_names,
-                &all_routes,
-                &headers,
-                state.trust_forwarded_headers(),
-            )
-        })
+        .map(|g| GroupsListRow::from_group(g, &owner_names, &all_routes, &state, &headers))
         .collect();
 
     let sort = q.sort.clone().unwrap_or_else(|| "last_activity_at".into());
@@ -463,13 +455,13 @@ impl GroupsListRow {
         g: &Group,
         owner_names: &HashMap<String, String>,
         routes: &[Route],
+        state: &AppState,
         headers: &HeaderMap,
-        trust_forwarded: bool,
     ) -> Self {
         let route_count = routes.iter().filter(|r| r.group_id == g.id).count();
         Self {
             name: g.name.clone(),
-            base_url: crate::auth_api::group_base_url(&g.name, headers, trust_forwarded),
+            base_url: crate::auth_api::group_base_url(&g.name, state, headers),
             implicit: g.implicit,
             owner_name: owner_names
                 .get(&g.owner_id)
@@ -974,11 +966,7 @@ async fn group_detail_page(
     let group_view = GroupDetailGroup {
         id: group.id.clone(),
         name: group.name.clone(),
-        base_url: crate::auth_api::group_base_url(
-            &group.name,
-            &headers,
-            state.trust_forwarded_headers(),
-        ),
+        base_url: crate::auth_api::group_base_url(&group.name, &state, &headers),
         implicit: group.implicit,
         owner_name: owner_names
             .get(&group.owner_id)
@@ -1462,11 +1450,7 @@ async fn route_detail_page(
         path: route.path.clone(),
         url: format!(
             "{}{}",
-            crate::auth_api::group_base_url(
-                &route.group_name,
-                &headers,
-                state.trust_forwarded_headers()
-            ),
+            crate::auth_api::group_base_url(&route.group_name, &state, &headers),
             route.path
         ),
         language: route.language.clone(),

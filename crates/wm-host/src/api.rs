@@ -195,10 +195,10 @@ struct GroupRef {
 impl RouteResponse {
     /// Build a response, computing the per-group `url` from the request
     /// headers (the apex these control-plane surfaces are served on).
-    fn build(r: &Route, headers: &HeaderMap, trust_forwarded: bool) -> Self {
+    fn build(r: &Route, state: &AppState, headers: &HeaderMap) -> Self {
         let url = format!(
             "{}{}",
-            crate::auth_api::group_base_url(&r.group_name, headers, trust_forwarded),
+            crate::auth_api::group_base_url(&r.group_name, state, headers),
             r.path
         );
         Self {
@@ -551,7 +551,7 @@ async fn create_route(
         "/api/routes/{}",
         render_slug(&route.group_name, route.number)
     );
-    let resp_body = RouteResponse::build(&route, &headers, state.trust_forwarded_headers());
+    let resp_body = RouteResponse::build(&route, &state, &headers);
     let mut resp = (StatusCode::CREATED, Json(resp_body)).into_response();
     resp.headers_mut().insert(
         header::LOCATION,
@@ -667,11 +667,10 @@ async fn list_routes(
     Query(q): Query<RoutesListQuery>,
 ) -> Result<Json<ListRoutesResponse>, ApiError> {
     let paged = list_routes_core(&state, &auth, &q)?;
-    let trust = state.trust_forwarded_headers();
     let routes = paged
         .routes
         .iter()
-        .map(|r| RouteResponse::build(r, &headers, trust))
+        .map(|r| RouteResponse::build(r, &state, &headers))
         .collect();
     Ok(Json(ListRoutesResponse {
         routes,
@@ -881,11 +880,7 @@ async fn get_route(
     Path((group, number)): Path<(String, u32)>,
 ) -> Result<Json<RouteResponse>, ApiError> {
     let route = ensure_route_owner_or_admin(&state, &auth, &group, number, "read it")?;
-    Ok(Json(RouteResponse::build(
-        &route,
-        &headers,
-        state.trust_forwarded_headers(),
-    )))
+    Ok(Json(RouteResponse::build(&route, &state, &headers)))
 }
 
 async fn patch_route(
@@ -896,11 +891,7 @@ async fn patch_route(
     Json(body): Json<PatchRouteBody>,
 ) -> Result<Json<RouteResponse>, ApiError> {
     let updated = patch_route_core(&state, &auth, &group, number, body).await?;
-    Ok(Json(RouteResponse::build(
-        &updated,
-        &headers,
-        state.trust_forwarded_headers(),
-    )))
+    Ok(Json(RouteResponse::build(&updated, &state, &headers)))
 }
 
 /// Shared PATCH pipeline used by both the REST handler above and the
@@ -2578,11 +2569,7 @@ async fn match_probe(
     {
         MatchProbe::Hit(m) => Ok(Json(MatchResponse::Hit {
             matched: true,
-            route: Box::new(RouteResponse::build(
-                &m.route,
-                &headers,
-                state.trust_forwarded_headers(),
-            )),
+            route: Box::new(RouteResponse::build(&m.route, &state, &headers)),
             path_params: m.path_params,
         })),
         MatchProbe::Miss(near) => Ok(Json(MatchResponse::Miss {

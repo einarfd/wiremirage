@@ -167,8 +167,8 @@ pub struct AppState {
     /// connections, which would break login).
     secure_cookies: bool,
     /// When true, honor `X-Forwarded-For` for the login throttle's
-    /// per-IP key and `X-Forwarded-Proto`/`-Host` for OAuth redirect-URI
-    /// derivation. Enabled by `WM_TRUSTED_PROXY` (ADR-0027). Default off
+    /// per-IP key and `X-Forwarded-Proto` for the scheme in OAuth
+    /// redirect-URI derivation. Enabled by `WM_TRUSTED_PROXY` (ADR-0027). Default off
     /// — the placeholder IP is used otherwise, which collapses everyone
     /// into one throttle bucket but makes IP spoofing impossible.
     trust_forwarded_headers: bool,
@@ -177,6 +177,14 @@ pub struct AppState {
     /// DNS-rebinding protection). Empty = MCP accepts localhost only. Set
     /// from `WM_TRUSTED_PROXY`.
     mcp_allowed_hosts: Vec<String>,
+    /// Config-pinned public base URL (`scheme://host[:port]`, no trailing
+    /// slash), from `WM_PUBLIC_BASE_URL` (security-audit finding #6). When
+    /// set, every public URL the host advertises — OAuth redirect_uris,
+    /// discovery metadata, `WWW-Authenticate` hints, the UI "Connect an
+    /// agent" page — uses this verbatim instead of deriving from the
+    /// request `Host` header, so a forged `Host` can't be baked into them.
+    /// `None` = derive from the request as before.
+    public_base_url: Option<String>,
     /// The apex hostname this instance serves on (ADR-0030 virtual-host
     /// routing). Mock traffic is served on group subdomains
     /// `{group}.{apex_host}`; the apex itself is control-plane only.
@@ -231,6 +239,7 @@ impl AppState {
             secure_cookies: false,
             trust_forwarded_headers: false,
             mcp_allowed_hosts: Vec::new(),
+            public_base_url: None,
             apex_host: "localhost".to_string(),
             github_oauth: None,
             oidc: None,
@@ -287,6 +296,19 @@ impl AppState {
 
     pub fn mcp_allowed_hosts(&self) -> &[String] {
         &self.mcp_allowed_hosts
+    }
+
+    /// Pin the public base URL advertised in OAuth redirect_uris,
+    /// discovery metadata and UI links (security-audit finding #6). Wired
+    /// from `WM_PUBLIC_BASE_URL` in `main.rs`; `None` derives from the
+    /// request `Host` header.
+    pub fn with_public_base_url(mut self, base: Option<String>) -> Self {
+        self.public_base_url = base;
+        self
+    }
+
+    pub fn public_base_url(&self) -> Option<&str> {
+        self.public_base_url.as_deref()
     }
 
     /// Set the apex hostname (ADR-0030). Stored lowercased so Host-header
