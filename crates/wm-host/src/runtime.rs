@@ -271,12 +271,10 @@ impl Runtime {
 
         // Cache hit: read + deserialize. A read miss, a stale artifact
         // that fails to deserialize (wasmtime upgrade, config drift), or
-        // a file whose permissions say someone else could have written it
-        // (finding #8) simply falls through to a recompile below.
-        let cached = std::fs::metadata(&cache_path)
-            .ok()
-            .filter(cache_file_trusted)
-            .and_then(|_| std::fs::read(&cache_path).ok());
+        // a file whose open-fd metadata says someone else could have
+        // written it (finding #8) simply falls through to a recompile
+        // below.
+        let cached = read_trusted_cache_file(&cache_path);
         if let Some(cached) = cached {
             // SAFETY: see `engine_component`. An incompatible artifact
             // returns Err here rather than misbehaving, and we recompile.
@@ -529,20 +527,59 @@ fn write_cache_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
-/// A cached artifact is trusted only when no group/other permission bits
-/// are set (finding #8): in a sticky temp dir only the owner can replace
-/// the file, so a no-group/other-bits file we can read is one we wrote.
-/// Anything else (e.g. a world-readable file an attacker pre-created)
-/// is ignored and recompiled.
+/// A cached artifact is trusted only when it has no group/other
+/// permission bits AND is owned by this process's effective user
+/// (finding #8, plus the root edge case: a root process can read anyone's
+/// 0600 file, so mode bits alone don't prove we wrote it). In a sticky
+/// temp dir only the owner can replace the file, so an owner-only file
+/// owned by us is one we wrote. Anything else (e.g. a world-readable
+/// file an attacker pre-created) is ignored and recompiled.
 #[cfg(unix)]
 fn cache_file_trusted(md: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    md.permissions().mode() & 0o077 == 0
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    cache_trust_bits(md.permissions().mode(), md.uid(), current_euid())
+}
+
+/// Split out for testing: mode/uid/euid in, verdict out.
+#[cfg(unix)]
+fn cache_trust_bits(mode: u32, uid: u32, euid: u32) -> bool {
+    mode & 0o077 == 0 && uid == euid
+}
+
+#[cfg(unix)]
+fn current_euid() -> u32 {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() }
 }
 
 #[cfg(not(unix))]
 fn cache_file_trusted(_md: &std::fs::Metadata) -> bool {
     true
+}
+
+/// Open the cache artifact once and check the *open file's* metadata
+/// before reading (finding #8 follow-up): stat-then-read is a TOCTOU —
+/// on a non-sticky temp dir the file could be swapped between the two
+/// syscalls. Returns `None` for a missing, untrusted, or unreadable
+/// artifact; the caller falls through to a recompile.
+#[cfg(unix)]
+fn read_trusted_cache_file(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::OpenOptions::new().read(true).open(path).ok()?;
+    let md = file.metadata().ok()?;
+    if !cache_file_trusted(&md) {
+        return None;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+#[cfg(not(unix))]
+fn read_trusted_cache_file(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
 }
 
 #[cfg(test)]
@@ -587,5 +624,35 @@ mod tests {
         assert_eq!(md.permissions().mode() & 0o777, 0o600);
         assert!(cache_file_trusted(&md));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_trust_bits_rejects_foreign_owner_even_at_0600() {
+        // Root edge case: mode bits alone don't prove we wrote the file,
+        // because a root process can read anyone's 0600 file.
+        let euid = current_euid();
+        assert!(cache_trust_bits(0o600, euid, euid));
+        assert!(!cache_trust_bits(0o600, euid.wrapping_add(1), euid));
+        assert!(!cache_trust_bits(0o644, euid, euid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_trusted_cache_file_reads_own_0600_and_rejects_group_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("wm-cwasm-read-test-{}.cwasm", std::process::id()));
+        write_cache_file(&path, b"artifact").unwrap();
+        assert_eq!(
+            read_trusted_cache_file(&path).as_deref(),
+            Some(b"artifact".as_slice())
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_trusted_cache_file(&path), None);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read_trusted_cache_file(&path), None);
     }
 }
