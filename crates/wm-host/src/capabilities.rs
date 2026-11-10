@@ -180,7 +180,7 @@ contract is kebab-case but the JS binding camelCases everything).
   path: string,            // Full literal path. e.g., "/users/123/posts/456"
   matchedPattern: string,  // The route pattern that matched. e.g., "/users/{id}/posts/{post-id}"
   pathParams: [string, string][],  // [["id","123"],["post-id","456"]]
-  query: [string, string][],       // Parsed query parameters. Names lowercased.
+  query: [string, string][],       // Parsed query parameters. Names as sent (case-sensitive); values form-decoded.
   headers: [string, string][],     // Request headers. Names lowercased. Multi-valued repeat.
   body: Uint8Array,        // Raw body bytes. May be empty. Capped at 10 MiB.
 }
@@ -201,7 +201,7 @@ arrays by hand. Each returns the first match's value, or `undefined`:
 ```ts
 const ct = req.header("content-type");   // case-INSENSITIVE (HTTP headers)
 const userId = req.pathParam("id");      // exact match
-const page = req.queryParam("page");     // exact match
+const page = req.queryParam("page");     // exact match (case-sensitive; names are as sent)
 ```
 
 The underlying arrays (`req.headers`, `req.pathParams`, `req.query`) are still

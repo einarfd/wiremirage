@@ -11,9 +11,10 @@ package wiremirage:handler@0.1.0;
 // HTTP request and response types
 
 interface http {
-  // A header name and value pair. Names are case-insensitive on the wire but
-  // are presented to handlers in lowercase. Multi-valued headers appear as
-  // multiple entries.
+  // A name/value pair. When used for headers, names are case-insensitive on
+  // the wire and are presented to handlers in lowercase; multi-valued headers
+  // appear as multiple entries. When used for query parameters, names keep
+  // the case sent — query names are case-sensitive (RFC 3986, ADR-0042).
   type header = tuple<string, string>;
 
   // A captured path parameter. The name corresponds to a {name} segment in
@@ -26,7 +27,7 @@ interface http {
     path: string,                   // The full literal path. e.g., "/users/123/posts/456"
     matched-pattern: string,        // The route pattern that matched. e.g., "/users/{id}/posts/{post-id}"
     path-params: list<path-param>,  // Captures from the route pattern. e.g., [("id","123"),("post-id","456")]
-    query: list<header>,            // Parsed query parameters. Names lowercased.
+    query: list<header>,            // Parsed query parameters. Names as sent (case-sensitive, ADR-0042); values form-decoded.
     headers: list<header>,          // Request headers. Names lowercased.
     body: list<u8>,                 // Raw body bytes. May be empty. Capped at request-body-size.
   }

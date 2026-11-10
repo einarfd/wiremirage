@@ -437,9 +437,12 @@ async fn journal_records_the_parsed_query_for_handled_and_unmatched() {
     let client = reqwest::Client::new();
     let host = format!("{group}.localhost");
 
-    // Handled: the route matches, the journal entry carries the query.
+    // Handled: the route matches, the journal entry carries the query with
+    // names as sent (ADR-0042).
     let resp = client
-        .get(format!("http://{addr}/v1/charges?page=3&filter=active"))
+        .get(format!(
+            "http://{addr}/v1/charges?customerId=C-1&brandCode=FK"
+        ))
         .header(reqwest::header::HOST, &host)
         .send()
         .await
@@ -459,10 +462,10 @@ async fn journal_records_the_parsed_query_for_handled_and_unmatched() {
     assert_eq!(
         entries[0].query,
         vec![
-            ("page".to_string(), "3".to_string()),
-            ("filter".to_string(), "active".to_string()),
+            ("customerId".to_string(), "C-1".to_string()),
+            ("brandCode".to_string(), "FK".to_string()),
         ],
-        "handled journal entry should record the parsed query"
+        "handled journal entry should record the parsed query, names as sent"
     );
     assert_eq!(entries[0].request.path, "/v1/charges");
 

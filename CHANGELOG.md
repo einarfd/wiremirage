@@ -9,6 +9,18 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: query parameter names are no longer lowercased**
+  ([ADR-0042](docs/adr/0042-query-param-name-case.md)). `req.query` keeps
+  names exactly as sent and `req.queryParam("customerId")` matches exactly —
+  query names are case-sensitive on the wire (RFC 3986), unlike header
+  names, which stay lowercased and case-insensitive. Handlers written
+  against the old lowercased contract must match the case clients actually
+  send. The journal records the same as-sent pairs the handler saw. This
+  also fixes camelCase `query` match rules in the `s3-slowdown` conformance
+  lane, which match exactly and could never fire before.
+
 ### Fixed
 
 - **The request journal now records the parsed query string.** Handled
