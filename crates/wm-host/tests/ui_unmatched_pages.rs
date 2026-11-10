@@ -436,6 +436,7 @@ fn inject_unmatched_with_near_miss(h: &Harness, method: &str, path: &str) {
                 body_truncated: false,
                 original_body_size: 0,
             },
+            query: Vec::new(),
             near_misses: vec![UnmatchedNearMiss {
                 route: "stripe-mock/3".into(),
                 route_path: "/v1/refunds".into(),

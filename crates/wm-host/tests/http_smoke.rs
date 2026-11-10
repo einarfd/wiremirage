@@ -396,3 +396,90 @@ async fn capabilities_types_topic_serves_the_handler_dts() {
     }
     server.abort();
 }
+
+/// The journal entry must record the parsed query string — both for
+/// handled requests and for unmatched ones (the discovery surface). The
+/// handler and the journal see the same parsed pairs.
+#[tokio::test]
+async fn journal_records_the_parsed_query_for_handled_and_unmatched() {
+    let storage = Storage::in_memory();
+    let auth = Auth::new(storage.clone());
+    auth.bootstrap_admin("bootstrap", "wmt_test")
+        .expect("bootstrap");
+    let runtime = Arc::new(Runtime::new(storage.clone()).expect("runtime"));
+    let registry = Arc::new(Registry::new(storage.clone()));
+    let route = registry
+        .create_route(NewRoute {
+            group: None,
+            methods: vec!["GET".into()],
+            path: "/v1/charges".into(),
+            language: "wasm".into(),
+            bindings_version: "0.1.0".into(),
+            compiled_wasm: echo_bytes(),
+            source: None,
+            owner_id: "test-owner".into(),
+        })
+        .expect("create route");
+    let group = route.group_name.clone();
+    let group_id = route.group_id.clone();
+    let routes = RouteTable::warm(registry, runtime.engine().clone()).expect("table");
+    routes.refresh_after_create(route);
+    let journal = Journal::new(storage.clone());
+    let app = router(AppState::new(runtime, routes, auth, Journal::new(storage)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("axum::serve");
+    });
+
+    let client = reqwest::Client::new();
+    let host = format!("{group}.localhost");
+
+    // Handled: the route matches, the journal entry carries the query.
+    let resp = client
+        .get(format!("http://{addr}/v1/charges?page=3&filter=active"))
+        .header(reqwest::header::HOST, &host)
+        .send()
+        .await
+        .expect("get handled");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let entries = journal
+        .list_for_group(
+            &group_id,
+            wm_host::journal::ListCursor {
+                before: None,
+                limit: 10,
+            },
+        )
+        .expect("list journal");
+    assert_eq!(entries.len(), 1, "one handled entry expected");
+    assert_eq!(
+        entries[0].query,
+        vec![
+            ("page".to_string(), "3".to_string()),
+            ("filter".to_string(), "active".to_string()),
+        ],
+        "handled journal entry should record the parsed query"
+    );
+    assert_eq!(entries[0].request.path, "/v1/charges");
+
+    // Unmatched: a 404 still lands in the unmatched journal, with query.
+    let resp = client
+        .get(format!("http://{addr}/nope?x=1"))
+        .header(reqwest::header::HOST, &host)
+        .send()
+        .await
+        .expect("get unmatched");
+    assert_eq!(resp.status().as_u16(), 404);
+    let unmatched = journal.get_unmatched(1).expect("unmatched entry");
+    assert_eq!(
+        unmatched.query,
+        vec![("x".to_string(), "1".to_string())],
+        "unmatched entry should record the parsed query"
+    );
+
+    server.abort();
+}

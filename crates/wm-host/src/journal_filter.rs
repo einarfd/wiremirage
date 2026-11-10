@@ -274,6 +274,7 @@ mod tests {
                 original_body_size: 0,
                 body_truncated: false,
             },
+            query: vec![],
             near_misses: vec![],
         }))
     }

@@ -292,6 +292,7 @@ async fn tail_emits_unmatched_when_no_filters() {
                 original_body_size: 0,
                 body_truncated: false,
             },
+            query: Vec::new(),
             near_misses: Vec::new(),
         })
         .expect("record_unmatched");

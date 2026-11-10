@@ -434,6 +434,10 @@ pub struct UnmatchedRecord {
     pub trace_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub request: RequestEnvelope,
+    /// The parsed query string. Mirror of the host's `UnmatchedRecord`;
+    /// `#[serde(default)]` for records minted before the field existed.
+    #[serde(default)]
+    pub query: Vec<(String, String)>,
     /// Routes that nearly matched. Populated by the dispatcher at
     /// unmatched-write time (slice 35); empty when nothing nearby
     /// was found. Mirror of the host's `UnmatchedNearMiss`.

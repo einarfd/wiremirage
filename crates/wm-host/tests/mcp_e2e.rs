@@ -1371,6 +1371,7 @@ async fn list_recent_unmatched_filters_by_path_pattern() {
                     body_truncated: false,
                     original_body_size: 0,
                 },
+                query: Vec::new(),
                 near_misses: Vec::new(),
             })
             .expect("record unmatched");
@@ -1420,6 +1421,7 @@ async fn list_recent_unmatched_includes_near_misses_projection() {
                 body_truncated: false,
                 original_body_size: 0,
             },
+            query: Vec::new(),
             near_misses: vec![wm_host::journal::UnmatchedNearMiss {
                 route: "stripe-mock/1".into(),
                 route_path: "/v1/charges".into(),
@@ -1473,6 +1475,7 @@ async fn list_recent_unmatched_emits_empty_near_misses_when_none() {
                 body_truncated: false,
                 original_body_size: 0,
             },
+            query: Vec::new(),
             near_misses: vec![],
         })
         .expect("record unmatched");
@@ -1880,6 +1883,7 @@ async fn summarize_workspace_counts_recent_unmatched() {
                     original_body_size: 0,
                     body_truncated: false,
                 },
+                query: Vec::new(),
                 near_misses: vec![],
             })
             .expect("record unmatched");
@@ -1988,6 +1992,7 @@ async fn show_unmatched_returns_full_request_envelope() {
                 original_body_size: 14,
                 body_truncated: false,
             },
+            query: Vec::new(),
             near_misses: vec![],
         })
         .expect("record unmatched");

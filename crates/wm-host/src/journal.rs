@@ -155,6 +155,11 @@ pub struct UnmatchedRecord {
     pub trace_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub request: RequestEnvelope,
+    /// The parsed query string, same pairs the handler would have seen.
+    /// `#[serde(default)]` guards the ≤1h window where records minted
+    /// before this field existed may still be stored.
+    #[serde(default)]
+    pub query: Vec<(String, String)>,
     /// Routes that almost matched (same path, different method, or
     /// a one-segment string-prefix difference). Empty when no
     /// near-misses were detected. Populated by the dispatcher at
@@ -293,6 +298,9 @@ pub struct NewUnmatchedEntry {
     pub group_id: String,
     pub group_name: String,
     pub request: RequestEnvelope,
+    /// The parsed query string, recorded so the unmatched entry shows
+    /// exactly what the SUT sent.
+    pub query: Vec<(String, String)>,
     /// Computed by the dispatcher (or the test driver) at write
     /// time. Empty when nothing nearby was found, or when the
     /// caller doesn't have a route table to consult.
@@ -701,6 +709,7 @@ impl Journal {
             trace_id: entry.trace_id,
             created_at: Utc::now(),
             request: entry.request,
+            query: entry.query,
             near_misses: entry.near_misses,
         };
         let key = format!("unmatched:{}", record.id);
@@ -979,6 +988,7 @@ mod tests {
             group_id: group.into(),
             group_name: group.into(),
             request: sample_envelope(b""),
+            query: Vec::new(),
             near_misses: vec![],
         })
         .expect("record unmatched");
@@ -1195,6 +1205,7 @@ mod tests {
                 group_id: "g1".into(),
                 group_name: "g1".into(),
                 request: sample_envelope(b"oops"),
+                query: Vec::new(),
                 near_misses: Vec::new(),
             })
             .unwrap();
@@ -1213,6 +1224,7 @@ mod tests {
                 group_id: "g1".into(),
                 group_name: "g1".into(),
                 request: sample_envelope(b""),
+                query: Vec::new(),
                 near_misses: Vec::new(),
             })
             .unwrap();
@@ -1222,6 +1234,7 @@ mod tests {
                 group_id: "g1".into(),
                 group_name: "g1".into(),
                 request: sample_envelope(b""),
+                query: Vec::new(),
                 near_misses: Vec::new(),
             })
             .unwrap();
@@ -1238,6 +1251,7 @@ mod tests {
                 group_id: "g1".into(),
                 group_name: "g1".into(),
                 request: sample_envelope(b""),
+                query: Vec::new(),
                 near_misses: Vec::new(),
             })
             .unwrap();

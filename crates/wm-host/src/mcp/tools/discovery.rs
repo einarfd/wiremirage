@@ -423,7 +423,7 @@ impl WmMcpServer {
 
     #[tool(
         name = "show_unmatched",
-        description = "Fetch one unmatched-request entry in full by its `number` — the complete captured request the SUT sent to a path no route matched: method, path, all headers, and the body (UTF-8 string, or { \"base64\": \"...\" } for binary). `list_recent_unmatched` returns only a summary (group + method + path + near-misses); reach for this to see exactly what an SDK posted so you can build the matching mock. The unmatched journal is the discovery surface: a request hits an undefined path, lands here with its full envelope, and you register the real route from what you see. Owner-or-admin of the group the request was addressed to."
+        description = "Fetch one unmatched-request entry in full by its `number` — the complete captured request the SUT sent to a path no route matched: method, path, the parsed query, all headers, and the body (UTF-8 string, or { \"base64\": \"...\" } for binary). `list_recent_unmatched` returns only a summary (group + method + path + near-misses); reach for this to see exactly what an SDK posted so you can build the matching mock. The unmatched journal is the discovery surface: a request hits an undefined path, lands here with its full envelope, and you register the real route from what you see. Owner-or-admin of the group the request was addressed to."
     )]
     pub async fn show_unmatched(
         &self,
