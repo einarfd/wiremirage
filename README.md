@@ -236,9 +236,9 @@ docs/               documentation and ADRs
 
 ## Status
 
-Pre-1.0 and honest about it: no released binaries yet, no version tags, and
-breaking changes land without a deprecation window when they make the design
-better. The maintainer runs it daily against real SDK integrations, and the
+Pre-1.0 and honest about it: releases are tagged `vX.Y.Z` with binaries and
+container images attached, and breaking changes land without a deprecation
+window when they make the design better. The maintainer runs it daily against real SDK integrations, and the
 test suite (780+ tests, plus the conformance lanes) gates every change.
 
 Known limits worth knowing before you deploy: **one replica**
