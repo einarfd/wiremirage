@@ -716,6 +716,10 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
     };
 
     let path = uri.path();
+    // Parse the query once, up front: the handler (via the WIT request)
+    // and the journal entry both record this same parsed list, so the two
+    // can't drift apart.
+    let query_pairs = parse_query(&uri);
 
     // ADR-0033: there are no globally reserved paths. The control-plane
     // surfaces (/api, /ui, /auth, /health, /ready, MCP) are served by the
@@ -848,6 +852,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                         group_id: group.id.clone(),
                         group_name: group.name.clone(),
                         request: envelope,
+                        query: query_pairs.clone(),
                         near_misses,
                     }) {
                         tracing::warn!(error = %e, "failed to record unmatched journal entry");
@@ -1099,6 +1104,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
                             trace_id: trace_id.clone(),
                             matched: matched.clone(),
                             request: request_envelope,
+                            query: query_pairs.clone(),
                             started,
                             head_delivered_at,
                             status,
@@ -1208,7 +1214,7 @@ async fn dispatch_inner(state: AppState, req: Request) -> anyhow::Result<Respons
         request: request_envelope,
         response: response_envelope,
         path_params: matched.path_params.clone(),
-        query: vec![],
+        query: query_pairs.clone(),
         handler_logs: handler_log_entries,
         duration_ms,
         resources,
@@ -1421,21 +1427,7 @@ fn build_wit_request(
         })
         .collect();
 
-    // Parse the URL query string into (name, value) pairs. Names are
-    // lowercased to match the WIT contract (`request.query` doc); both halves
-    // are form-decoded (`+` → space, then percent-decoding).
-    let query: Vec<Header> = uri
-        .query()
-        .map(|q| {
-            q.split('&')
-                .filter(|pair| !pair.is_empty())
-                .map(|pair| {
-                    let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-                    (form_decode(k).to_lowercase(), form_decode(v))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let query: Vec<Header> = parse_query(uri);
 
     WitRequest {
         method: method.as_str().to_uppercase(),
@@ -1446,6 +1438,23 @@ fn build_wit_request(
         headers: headers_vec,
         body,
     }
+}
+
+/// Parse the URL query string into (name, value) pairs. Names are
+/// lowercased to match the WIT contract (`request.query` doc); both halves
+/// are form-decoded (`+` → space, then percent-decoding).
+fn parse_query(uri: &Uri) -> Vec<(String, String)> {
+    uri.query()
+        .map(|q| {
+            q.split('&')
+                .filter(|pair| !pair.is_empty())
+                .map(|pair| {
+                    let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                    (form_decode(k).to_lowercase(), form_decode(v))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Decode one application/x-www-form-urlencoded component: `+` is a space,
@@ -1613,6 +1622,9 @@ struct StreamingJournalCtx {
     trace_id: Option<String>,
     matched: MatchedRoute,
     request: RequestEnvelope,
+    /// The parsed query, shared with the WIT request so the journal entry
+    /// records the same pairs the handler saw.
+    query: Vec<(String, String)>,
     started: std::time::Instant,
     /// Instant at which the response head reached the wire — used to
     /// compute `wm.streaming.duration_ms` (post-TTFB) separately from
@@ -1649,6 +1661,7 @@ fn spawn_streaming_journal(
             trace_id,
             matched,
             request,
+            query,
             started,
             head_delivered_at,
             status,
@@ -1736,7 +1749,7 @@ fn spawn_streaming_journal(
             request,
             response,
             path_params: matched.path_params.clone(),
-            query: vec![],
+            query,
             handler_logs: handler_log_entries,
             duration_ms,
             resources,
@@ -1806,14 +1819,32 @@ fn error_response(status: StatusCode, msg: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, Uri};
 
     use super::{
         build_axum_response_owned, build_streaming_response, error_response,
-        filter_handler_headers, friendly_handler_error, sanitize_header_text,
+        filter_handler_headers, friendly_handler_error, parse_query, sanitize_header_text,
     };
     use crate::bindings::wiremirage::handler::http::Response as WitResponse;
     use crate::host_state::StreamHead;
+
+    #[test]
+    fn parse_query_splits_and_form_decodes_pairs() {
+        let uri: Uri = "/x?customerId=C-1&flag&a=%20b+c".parse().unwrap();
+        let q = parse_query(&uri);
+        assert_eq!(
+            q,
+            vec![
+                ("customerid".to_string(), "C-1".to_string()),
+                ("flag".to_string(), String::new()),
+                ("a".to_string(), " b c".to_string()),
+            ]
+        );
+        let no_query: Uri = "/x".parse().unwrap();
+        assert!(parse_query(&no_query).is_empty());
+        let empty_pair: Uri = "/x?&".parse().unwrap();
+        assert!(parse_query(&empty_pair).is_empty());
+    }
 
     #[test]
     fn clean_js_error_passes_through() {

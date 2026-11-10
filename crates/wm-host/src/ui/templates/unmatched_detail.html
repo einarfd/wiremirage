@@ -51,6 +51,9 @@
   <dl class="meta-grid">
     <dt>Method</dt><dd>{{ entry.method }}</dd>
     <dt>Path</dt><dd><code>{{ entry.path }}</code></dd>
+    {% if entry.query | length > 0 %}
+    <dt>Query</dt><dd>{% for kv in entry.query %}<code>{{ kv[0] }}={{ kv[1] }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+    {% endif %}
   </dl>
   <h3>Headers</h3>
   {% if entry.request_headers | length == 0 %}

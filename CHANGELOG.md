@@ -9,6 +9,15 @@ they make the design better, and are called out here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The request journal now records the parsed query string.** Handled
+  entries populate their existing `query` field (previously always `[]`)
+  and unmatched entries gained the same field, so `list_journal` /
+  `show_unmatched` (and the UI/CLI renders of them) show exactly what the
+  SUT sent. The recorded pairs are the same parsed pairs the handler saw;
+  `request.path` stays path-only so path filters don't match query text.
+
 ## [0.1.4] — 2026-10-23
 
 ### Added

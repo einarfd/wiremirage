@@ -187,6 +187,16 @@ pub fn render_journal_entry(j: &JournalRecord, format: Format) {
                     ""
                 }
             );
+            if !j.query.is_empty() {
+                println!(
+                    "query:       {}",
+                    j.query
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(" & ")
+                );
+            }
             println!(
                 "response:    {} ({} bytes{})",
                 j.response.status,
@@ -360,6 +370,16 @@ pub fn render_unmatched_entry(u: &UnmatchedRecord, format: Format) {
                     ""
                 }
             );
+            if !u.query.is_empty() {
+                println!(
+                    "query:      {}",
+                    u.query
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(" & ")
+                );
+            }
             if !u.near_misses.is_empty() {
                 println!("near_misses:");
                 for nm in &u.near_misses {
