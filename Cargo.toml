@@ -60,11 +60,11 @@ schemars = { version = "1", features = ["chrono04"] }
 # Pure-Rust TypeScript transpile (ADR-0020 slice B, ADR-0038). Declared at
 # workspace level because wm-transpile and wm-host's build script both pull
 # the same set; one version, one compile.
-swc_common = "26"
-swc_ecma_ast = "29"
-swc_ecma_parser = { version = "45", features = ["typescript"] }
-swc_ecma_transforms_typescript = "55"
-swc_ecma_codegen = "32"
+swc_common = "27"
+swc_ecma_ast = "30"
+swc_ecma_parser = { version = "47", features = ["typescript"] }
+swc_ecma_transforms_typescript = "57"
+swc_ecma_codegen = "33"
 
 [profile.release]
 lto = "thin"
