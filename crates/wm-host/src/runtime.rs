@@ -269,10 +269,15 @@ impl Runtime {
         let cache_path =
             std::env::temp_dir().join(format!("wiremirage-engine-v1-{hash:016x}.cwasm"));
 
-        // Cache hit: read + deserialize. A read miss, or a stale artifact
-        // that fails to deserialize (wasmtime upgrade, config drift),
-        // simply falls through to a recompile below.
-        if let Ok(cached) = std::fs::read(&cache_path) {
+        // Cache hit: read + deserialize. A read miss, a stale artifact
+        // that fails to deserialize (wasmtime upgrade, config drift), or
+        // a file whose permissions say someone else could have written it
+        // (finding #8) simply falls through to a recompile below.
+        let cached = std::fs::metadata(&cache_path)
+            .ok()
+            .filter(cache_file_trusted)
+            .and_then(|_| std::fs::read(&cache_path).ok());
+        if let Some(cached) = cached {
             // SAFETY: see `engine_component`. An incompatible artifact
             // returns Err here rather than misbehaving, and we recompile.
             self.components_built.fetch_add(1, Ordering::Relaxed);
@@ -290,7 +295,7 @@ impl Runtime {
         // best-effort — a failed cache write just means the next process
         // recompiles.
         let tmp = cache_path.with_extension(format!("tmp.{}", std::process::id()));
-        if std::fs::write(&tmp, &compiled).is_ok() {
+        if write_cache_file(&tmp, &compiled).is_ok() {
             let _ = std::fs::rename(&tmp, &cache_path);
         }
         Ok((component, Arc::new(compiled)))
@@ -499,4 +504,88 @@ impl Runtime {
 pub struct BucketHandles {
     pub route: wasmtime::component::Resource<Bucket>,
     pub group: wasmtime::component::Resource<Bucket>,
+}
+
+/// Write a cwasm cache artifact with owner-only permissions (0600) on
+/// unix. The cache lives in the world-writable temp dir, so a looser
+/// mode would let other local users read — and on a non-sticky temp
+/// dir, replace — the artifact we later `Component::deserialize`
+/// (security-audit finding #8).
+#[cfg(unix)]
+fn write_cache_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_cache_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
+/// A cached artifact is trusted only when no group/other permission bits
+/// are set (finding #8): in a sticky temp dir only the owner can replace
+/// the file, so a no-group/other-bits file we can read is one we wrote.
+/// Anything else (e.g. a world-readable file an attacker pre-created)
+/// is ignored and recompiled.
+#[cfg(unix)]
+fn cache_file_trusted(md: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    md.permissions().mode() & 0o077 == 0
+}
+
+#[cfg(not(unix))]
+fn cache_file_trusted(_md: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_file_trusted_rejects_group_or_other_bits() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("wm-cwasm-test-{}-{{}}", std::process::id()));
+        for (mode, expected) in [
+            (0o600, true),
+            (0o400, true),
+            (0o644, false),
+            (0o604, false),
+            (0o666, false),
+        ] {
+            let p = path.with_extension(format!("{mode:o}"));
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(mode)
+                .open(&p)
+                .unwrap();
+            let md = std::fs::metadata(&p).unwrap();
+            assert_eq!(cache_file_trusted(&md), expected, "mode {mode:o}");
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_cache_file_creates_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("wm-cwasm-write-test-{}.cwasm", std::process::id()));
+        write_cache_file(&path, b"fake").unwrap();
+        let md = std::fs::metadata(&path).unwrap();
+        assert_eq!(md.permissions().mode() & 0o777, 0o600);
+        assert!(cache_file_trusted(&md));
+        let _ = std::fs::remove_file(&path);
+    }
 }
