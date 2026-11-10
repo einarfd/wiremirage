@@ -71,7 +71,7 @@ your handler, it runs.
   path: string,                // "/users/123/posts/456"
   matchedPattern: string,      // "/users/{id}/posts/{post-id}"
   pathParams: [string, string][],
-  query: [string, string][],   // names lowercased
+  query: [string, string][],   // names as sent (case-sensitive); values form-decoded
   headers: [string, string][], // names lowercased
   body: Uint8Array,            // may be empty
 }

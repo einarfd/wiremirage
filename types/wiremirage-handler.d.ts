@@ -26,7 +26,7 @@ export interface WireMirageRequest {
   matchedPattern: string;
   /** Captures from the pattern, in order: `[["id", "123"]]`. */
   pathParams: Array<[string, string]>;
-  /** Parsed query parameters; names lowercased. */
+  /** Parsed query parameters; names as sent (case-sensitive), values form-decoded. */
   query: Array<[string, string]>;
   /** Request headers; names lowercased. */
   headers: Array<[string, string]>;
@@ -36,7 +36,7 @@ export interface WireMirageRequest {
   header(name: string): string | undefined;
   /** Single path-param lookup by name. */
   pathParam(name: string): string | undefined;
-  /** Single query-param lookup by name (first match). */
+  /** Single query-param lookup by exact name, as sent (first match). Case-sensitive. */
   queryParam(name: string): string | undefined;
 }
 

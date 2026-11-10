@@ -1440,9 +1440,10 @@ fn build_wit_request(
     }
 }
 
-/// Parse the URL query string into (name, value) pairs. Names are
-/// lowercased to match the WIT contract (`request.query` doc); both halves
-/// are form-decoded (`+` → space, then percent-decoding).
+/// Parse the URL query string into (name, value) pairs. Names keep the case
+/// sent — query parameter names are case-sensitive on the wire (RFC 3986),
+/// unlike header names (ADR-0042); `req.queryParam` matches them exactly.
+/// Both halves are form-decoded (`+` → space, then percent-decoding).
 fn parse_query(uri: &Uri) -> Vec<(String, String)> {
     uri.query()
         .map(|q| {
@@ -1450,7 +1451,7 @@ fn parse_query(uri: &Uri) -> Vec<(String, String)> {
                 .filter(|pair| !pair.is_empty())
                 .map(|pair| {
                     let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-                    (form_decode(k).to_lowercase(), form_decode(v))
+                    (form_decode(k), form_decode(v))
                 })
                 .collect()
         })
@@ -1830,12 +1831,13 @@ mod tests {
 
     #[test]
     fn parse_query_splits_and_form_decodes_pairs() {
+        // Names keep the case sent (ADR-0042); only values are decoded.
         let uri: Uri = "/x?customerId=C-1&flag&a=%20b+c".parse().unwrap();
         let q = parse_query(&uri);
         assert_eq!(
             q,
             vec![
-                ("customerid".to_string(), "C-1".to_string()),
+                ("customerId".to_string(), "C-1".to_string()),
                 ("flag".to_string(), String::new()),
                 ("a".to_string(), " b c".to_string()),
             ]

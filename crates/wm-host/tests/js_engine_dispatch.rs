@@ -795,7 +795,9 @@ async fn handler_logging_reaches_journal_and_fetch_is_catchable() {
 #[tokio::test]
 async fn request_convenience_accessors_resolve_header_pathparam_queryparam() {
     // Field-report nit: req.header() / req.pathParam() / req.queryParam() over
-    // the tuple arrays. header() is case-insensitive (HTTP); the others exact.
+    // the tuple arrays. header() is case-insensitive (HTTP); pathParam and
+    // queryParam are exact matches — and query names are as sent (ADR-0042),
+    // so a camelCase `?customerId=` resolves with its original case.
     let Some(engine_path) = vendored_engine_path() else {
         eprintln!("skipping: vendored js-engine.wasm not present");
         return;
@@ -817,6 +819,7 @@ async fn request_convenience_accessors_resolve_header_pathparam_queryparam() {
             req.header("X-Test") || "no-header",
             req.pathParam("id") || "no-param",
             req.queryParam("page") || "no-query",
+            req.queryParam("customerId") || "no-camel",
           ];
           return { status: 200, headers: [], body: new TextEncoder().encode(parts.join("/")) };
         }
@@ -845,7 +848,7 @@ async fn request_convenience_accessors_resolve_header_pathparam_queryparam() {
     });
 
     let body = reqwest::Client::new()
-        .get(format!("http://{addr}/widgets/42?page=3"))
+        .get(format!("http://{addr}/widgets/42?page=3&customerId=C-1"))
         .header(reqwest::header::HOST, format!("{group}.localhost"))
         // Sent lowercase on the wire; the handler asks for "X-Test".
         .header("x-test", "hi")
@@ -856,8 +859,8 @@ async fn request_convenience_accessors_resolve_header_pathparam_queryparam() {
         .await
         .expect("body");
     assert_eq!(
-        body, "hi/42/3",
-        "header (case-insensitive) + pathParam + queryParam all resolved"
+        body, "hi/42/3/C-1",
+        "header (case-insensitive) + pathParam + queryParam all resolved, query name case preserved"
     );
     server.abort();
 }
