@@ -205,6 +205,16 @@ switch:
   `Secure` cookies, `X-Forwarded-*` trust, and the MCP `Host` allowlist
   together ([ADR-0027](adr/0027-single-trusted-proxy-switch.md)). It's one
   setting so the posture can't be half-configured.
+- **`WM_PUBLIC_BASE_URL=https://<apex>`** — pins the public base URL
+  advertised in OAuth redirect URIs, discovery metadata and UI links, so a
+  forged `Host` header on a reachable instance can't be baked into them
+  (audit finding #6). Register the pinned URL as the OAuth app callback.
+  Optional when the proxy always preserves the real `Host`; recommended
+  when in doubt.
+- **`WM_OAUTH_MAX_CLIENTS=<n>`** — host-wide cap on dynamically registered
+  OAuth clients (default 1000, `0` disables registration entirely). The
+  unauthenticated registration endpoint is also rate-limited per IP (audit
+  finding #4); lower the cap if you don't expect many MCP clients.
 
 Then the first-deploy checklist:
 
