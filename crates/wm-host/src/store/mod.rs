@@ -10,6 +10,8 @@
 //! act as thin views over the shared backing store. Persistence lives in the
 //! backend, not in the bucket.
 
+use redis::ConnectionLike as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
@@ -45,7 +47,79 @@ pub enum StoreError {
 #[derive(Clone)]
 pub enum Storage {
     InMemory(Arc<Mutex<MemStore>>),
-    Valkey(Arc<redis::Client>),
+    Valkey(Arc<ConnPool>),
+}
+
+/// A small pool of blocking Valkey connections, shared per process.
+///
+/// `redis::Client::get_connection` dials a brand-new TCP connection on every
+/// call, and buckets used to be opened per operation — two per handler
+/// invocation (route + group) plus one per control-plane op. Under sustained
+/// load that is hundreds of short-lived outbound connections per second,
+/// which pile up in TIME_WAIT and exhaust the ephemeral port range
+/// (`connect: Cannot assign requested address`, os error 99). The pool hands
+/// out idle keep-alive connections instead, so live backend connections track
+/// concurrent operations, not request rate.
+#[doc(hidden)]
+pub struct ConnPool {
+    client: redis::Client,
+    idle: Mutex<Vec<redis::Connection>>,
+    dials: AtomicU64,
+}
+
+impl ConnPool {
+    fn new(client: redis::Client) -> Self {
+        Self {
+            client,
+            idle: Mutex::new(Vec::new()),
+            dials: AtomicU64::new(0),
+        }
+    }
+
+    fn client(&self) -> &redis::Client {
+        &self.client
+    }
+
+    /// How many fresh TCP connections have actually been dialed. Exposed for
+    /// the tier-3 pool test: re-opening a bucket must not dial again.
+    pub(crate) fn dial_count(&self) -> u64 {
+        self.dials.load(Ordering::Relaxed)
+    }
+
+    /// Check out a connection: reuse a pooled idle one (validated with a
+    /// PING, since `is_open` only reflects the local socket) or dial.
+    fn checkout(&self) -> Result<redis::Connection, StoreError> {
+        while let Some(mut conn) = self.idle.lock().expect("poisoned").pop() {
+            if conn.is_open() && redis::cmd("PING").query::<String>(&mut conn).is_ok() {
+                return Ok(conn);
+            }
+        }
+        self.dials.fetch_add(1, Ordering::Relaxed);
+        self.client
+            .get_connection()
+            .map_err(|e| StoreError::Backend(format!("connect: {e}")))
+    }
+
+    fn checkin(&self, conn: redis::Connection) {
+        if conn.is_open() {
+            self.idle.lock().expect("poisoned").push(conn);
+        }
+    }
+
+    /// Run `f` with a checked-out connection, returning it to the pool
+    /// afterwards (unless the op failed with a backend error — that
+    /// connection may be dead, so it is dropped instead of pooled).
+    fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&mut redis::Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut conn = self.checkout()?;
+        let result = f(&mut conn);
+        if !matches!(result, Err(StoreError::Backend(_))) {
+            self.checkin(conn);
+        }
+        result
+    }
 }
 
 impl Storage {
@@ -68,7 +142,18 @@ impl Storage {
         let _: String = redis::cmd("PING")
             .query(&mut conn)
             .map_err(|e| StoreError::Backend(format!("ping: {e}")))?;
-        Ok(Self::Valkey(Arc::new(client)))
+        Ok(Self::Valkey(Arc::new(ConnPool::new(client))))
+    }
+
+    /// Fresh-connection count for the Valkey backend (`None` in-memory).
+    /// `#[doc(hidden)]`: exists so the tier-3 suite can assert that bucket
+    /// re-opens reuse pooled connections instead of dialing per op.
+    #[doc(hidden)]
+    pub fn valkey_dial_count(&self) -> Option<u64> {
+        match self {
+            Storage::InMemory(_) => None,
+            Storage::Valkey(pool) => Some(pool.dial_count()),
+        }
     }
 
     /// Open an async pub/sub connection, or `None` on the in-memory
@@ -80,8 +165,8 @@ impl Storage {
     pub async fn pubsub(&self) -> Option<Result<redis::aio::PubSub, StoreError>> {
         match self {
             Storage::InMemory(_) => None,
-            Storage::Valkey(client) => Some(
-                client
+            Storage::Valkey(pool) => Some(
+                pool.client()
                     .get_async_pubsub()
                     .await
                     .map_err(|e| StoreError::Backend(format!("pubsub connect: {e}"))),
@@ -141,11 +226,8 @@ impl Storage {
                 let mut store = store.lock().expect("poisoned");
                 Ok(memory::copy_with_prefix(&mut store, src_prefix, dst_prefix))
             }
-            Storage::Valkey(client) => {
-                let mut conn = client
-                    .get_connection()
-                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
-                valkey::copy_with_prefix(&mut conn, src_prefix, dst_prefix)
+            Storage::Valkey(pool) => {
+                pool.with_conn(|conn| valkey::copy_with_prefix(conn, src_prefix, dst_prefix))
             }
         }
     }
@@ -157,16 +239,13 @@ impl Storage {
     pub fn set_pttl_with_prefix(&self, prefix: &str, millis: u64) -> Result<(), StoreError> {
         match self {
             Storage::InMemory(_) => Ok(()),
-            Storage::Valkey(client) => {
-                let mut conn = client
-                    .get_connection()
-                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
-                let keys = valkey::scan_with_prefix(&mut conn, prefix)?;
+            Storage::Valkey(pool) => pool.with_conn(|conn| {
+                let keys = valkey::scan_with_prefix(conn, prefix)?;
                 for k in keys {
-                    valkey::pexpire(&mut conn, &k, millis)?;
+                    valkey::pexpire(conn, &k, millis)?;
                 }
                 Ok(())
-            }
+            }),
         }
     }
 
@@ -182,15 +261,12 @@ impl Storage {
     pub fn ping(&self) -> Result<(), StoreError> {
         match self {
             Storage::InMemory(_) => Ok(()),
-            Storage::Valkey(client) => {
-                let mut conn = client
-                    .get_connection()
-                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
+            Storage::Valkey(pool) => pool.with_conn(|conn| {
                 let _: String = redis::cmd("PING")
-                    .query(&mut conn)
+                    .query(conn)
                     .map_err(|e| StoreError::Backend(format!("ping: {e}")))?;
                 Ok(())
-            }
+            }),
         }
     }
 
@@ -200,12 +276,14 @@ impl Storage {
                 store: store.clone(),
                 prefix,
             }),
-            Storage::Valkey(client) => {
-                let conn = client
-                    .get_connection()
-                    .map_err(|e| StoreError::Backend(format!("connect: {e}")))?;
-                Ok(Bucket::Valkey { conn, prefix })
-            }
+            // Lazy: the connection is checked out of the pool on the
+            // bucket's first store op, not here — a handler that never
+            // touches the store never dials the backend.
+            Storage::Valkey(pool) => Ok(Bucket::Valkey(ValkeyBucket {
+                conn: None,
+                prefix,
+                pool: pool.clone(),
+            })),
         }
     }
 }
@@ -219,10 +297,23 @@ pub enum Bucket {
         store: Arc<Mutex<MemStore>>,
         prefix: String,
     },
-    Valkey {
-        conn: redis::Connection,
-        prefix: String,
-    },
+    Valkey(ValkeyBucket),
+}
+
+/// The Valkey-backed bucket: a lazily-dialed connection checked out of the
+/// process-wide [`ConnPool`] on first use, and returned to the pool on drop.
+pub struct ValkeyBucket {
+    conn: Option<redis::Connection>,
+    prefix: String,
+    pool: Arc<ConnPool>,
+}
+
+impl Drop for ValkeyBucket {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.checkin(conn);
+        }
+    }
 }
 
 impl Bucket {
@@ -235,7 +326,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 memory::get(&store, &fk).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::get(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
@@ -250,7 +346,12 @@ impl Bucket {
                 memory::set(&mut store, fk, value);
                 Ok(())
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::set(conn, &fk, value).map_err(|e| restore_user_key(e, prefix))
             }
@@ -265,7 +366,12 @@ impl Bucket {
                 memory::delete(&mut store, &fk);
                 Ok(())
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::delete(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
@@ -297,7 +403,12 @@ impl Bucket {
             // No wall-clock expiry on this backend, so this is just a
             // write — same as `set_ttl` being a no-op here.
             Bucket::InMemory { .. } => self.set(key, value),
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 redis::cmd("SET")
                     .arg(&fk)
@@ -320,7 +431,12 @@ impl Bucket {
     pub fn set_ttl(&mut self, key: &str, ttl_seconds: u64) -> Result<(), StoreError> {
         match self {
             Bucket::InMemory { .. } => Ok(()),
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 let _: i64 = redis::cmd("EXPIRE")
                     .arg(&fk)
@@ -341,7 +457,12 @@ impl Bucket {
     pub fn clear_ttl(&mut self, key: &str) -> Result<(), StoreError> {
         match self {
             Bucket::InMemory { .. } => Ok(()),
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 let _: i64 = redis::cmd("PERSIST")
                     .arg(&fk)
@@ -374,7 +495,12 @@ impl Bucket {
                 memory::set(&mut store, fk, value);
                 Ok(true)
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 let got: Option<String> = redis::cmd("SET")
                     .arg(&fk)
@@ -395,7 +521,12 @@ impl Bucket {
     pub fn remaining_ttl(&mut self, key: &str) -> Result<Option<u64>, StoreError> {
         match self {
             Bucket::InMemory { .. } => Ok(None),
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 let ttl: i64 = redis::cmd("TTL")
                     .arg(&fk)
@@ -458,7 +589,12 @@ impl Bucket {
                 memory::set(&mut store, fk, payload);
                 Ok(true)
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 // SET .. NX EX is one round trip and atomic across
                 // replicas, which is the whole point.
@@ -493,7 +629,12 @@ impl Bucket {
     pub fn publish(&mut self, channel: &str, payload: Vec<u8>) -> Result<u64, StoreError> {
         match self {
             Bucket::InMemory { .. } => Ok(0),
-            Bucket::Valkey { conn, .. } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, pool, .. } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let n: i64 = redis::cmd("PUBLISH")
                     .arg(channel)
                     .arg(payload)
@@ -526,7 +667,12 @@ impl Bucket {
                 let mut store = store.lock().expect("poisoned");
                 memory::incr(&mut store, &fk, by).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::incr(conn, &fk, by).map_err(|e| restore_user_key(e, prefix))
             }
@@ -545,7 +691,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 Ok(memory::kind(&store, &fk))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::kind(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
@@ -565,7 +716,12 @@ impl Bucket {
                     .map(|k| k.strip_prefix(prefix.as_str()).unwrap_or(&k).to_string())
                     .collect())
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let combined = match user_prefix {
                     Some(p) => format!("{prefix}{p}"),
                     None => prefix.clone(),
@@ -592,7 +748,12 @@ impl Bucket {
                 let mut store = store.lock().expect("poisoned");
                 memory::list_push(&mut store, fk, value).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::list_push(conn, &fk, value).map_err(|e| restore_user_key(e, prefix))
             }
@@ -606,7 +767,12 @@ impl Bucket {
                 let mut store = store.lock().expect("poisoned");
                 memory::list_pop(&mut store, &fk).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::list_pop(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
@@ -626,7 +792,12 @@ impl Bucket {
                 memory::list_range(&store, &fk, start, stop)
                     .map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::list_range(conn, &fk, start, stop).map_err(|e| restore_user_key(e, prefix))
             }
@@ -640,7 +811,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 memory::list_length(&store, &fk).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::list_length(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
@@ -656,7 +832,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 memory::hash_get(&store, &fk, field).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::hash_get(conn, &fk, field).map_err(|e| restore_user_key(e, prefix))
             }
@@ -671,7 +852,12 @@ impl Bucket {
                 memory::hash_set(&mut store, fk, field.to_string(), value)
                     .map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::hash_set(conn, &fk, field, value).map_err(|e| restore_user_key(e, prefix))
             }
@@ -685,7 +871,12 @@ impl Bucket {
                 let mut store = store.lock().expect("poisoned");
                 memory::hash_delete(&mut store, &fk, field).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::hash_delete(conn, &fk, field).map_err(|e| restore_user_key(e, prefix))
             }
@@ -699,7 +890,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 memory::hash_keys(&store, &fk).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::hash_keys(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
@@ -717,7 +913,12 @@ impl Bucket {
                 memory::hash_incr(&mut store, &fk, field, by)
                     .map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::hash_incr(conn, &fk, field, by).map_err(|e| restore_user_key(e, prefix))
             }
@@ -736,7 +937,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 memory::hash_get_all(&store, &fk).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::hash_get_all(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }
@@ -753,7 +959,12 @@ impl Bucket {
                 memory::set_add(&mut store, fk, member.to_string())
                     .map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::set_add(conn, &fk, member).map_err(|e| restore_user_key(e, prefix))
             }
@@ -767,7 +978,12 @@ impl Bucket {
                 let mut store = store.lock().expect("poisoned");
                 memory::set_remove(&mut store, &fk, member).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::set_remove(conn, &fk, member).map_err(|e| restore_user_key(e, prefix))
             }
@@ -781,7 +997,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 memory::set_contains(&store, &fk, member).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::set_contains(conn, &fk, member).map_err(|e| restore_user_key(e, prefix))
             }
@@ -797,7 +1018,12 @@ impl Bucket {
                 let store = store.lock().expect("poisoned");
                 memory::set_members(&store, &fk).map_err(|e| restore_user_key(e, prefix))
             }
-            Bucket::Valkey { conn, prefix } => {
+            Bucket::Valkey(b) => {
+                let ValkeyBucket { conn, prefix, pool } = b;
+                if conn.is_none() {
+                    *conn = Some(pool.checkout()?);
+                }
+                let conn = conn.as_mut().expect("just ensured");
                 let fk = format!("{prefix}{key}");
                 valkey::set_members(conn, &fk).map_err(|e| restore_user_key(e, prefix))
             }

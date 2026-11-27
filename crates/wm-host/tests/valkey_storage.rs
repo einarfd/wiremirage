@@ -96,6 +96,49 @@ macro_rules! decl_cases {
 
 wm_host::storage_cases!(decl_cases);
 
+#[test]
+fn buckets_reuse_pooled_connections_and_dial_lazily() {
+    // Regression test for the per-op dial that exhausted ephemeral ports
+    // under load (EADDRNOTAVAIL on connect): buckets must check out from
+    // the shared pool, and only on first actual use.
+    let storage = Storage::valkey(&shared().url).expect("connect to valkey");
+
+    // Opening a bucket without touching the store must not dial.
+    let before = storage.valkey_dial_count().expect("valkey backend");
+    {
+        let _bk = storage.route_bucket("pool-lazy", "r").expect("open bucket");
+    }
+    assert_eq!(
+        storage.valkey_dial_count().expect("valkey backend"),
+        before,
+        "bucket open without a store op must not dial"
+    );
+
+    // First real op dials once; later buckets reuse the pooled connection.
+    {
+        let mut bk = storage
+            .route_bucket("pool-reuse", "r")
+            .expect("open bucket");
+        bk.set("k", b"v".to_vec()).expect("set");
+    }
+    {
+        let mut bk = storage
+            .route_bucket("pool-reuse", "r")
+            .expect("open bucket");
+        assert_eq!(bk.get("k").expect("get"), Some(b"v".to_vec()));
+    }
+    {
+        let mut admin = storage.admin_bucket().expect("admin bucket");
+        admin.delete("kv:pool-reuse:r:k").ok();
+    }
+    let after = storage.valkey_dial_count().expect("valkey backend");
+    assert_eq!(
+        after - before,
+        1,
+        "three bucket lifecycles with store ops must dial exactly once"
+    );
+}
+
 // -- ADR-0040: ttl_seconds 0 arms no expiry, and patching to 0 clears it --
 
 #[test]
