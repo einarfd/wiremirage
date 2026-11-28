@@ -22,10 +22,17 @@ targets = [
 # serde_norway swap); a transitive one usually is not.
 unmaintained = "workspace"
 yanked = "deny"
-# Empty on purpose. Every advisory in the tree is currently cleared by a
-# version, not by an exemption — keep it that way where it's cheap, and
-# make anything added here say why and what would remove it.
-ignore = []
+# Cleared by version where cheap (e.g. RUSTSEC-2026-0592 -> url 2.5.9).
+# Exemptions below must say why, and what would remove them.
+ignore = [
+    # chrono is unmaintained (all versions), but no known vulnerability —
+    # the advisory is a maintenance signal. Our use is timestamp
+    # parse/format/arithmetic plus schemars' chrono04 feature (~57 call
+    # sites). Cleared by migrating to jiff (tracked in the follow-up
+    # issue); until then this exemption keeps the audit job honest about
+    # everything else.
+    "RUSTSEC-2026-0543",
+]
 
 [licenses]
 # WireMirage is Apache-2.0. This list is what the dependency tree
